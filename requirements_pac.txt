@@ -1,9 +1,10 @@
+
 streamlit
 pandas
 numpy
 matplotlib
+fpdf2
 openpyxl
-reportlab
-pdfplumber
-PyMuPDF
 Pillow
+PyMuPDF
+scipy
