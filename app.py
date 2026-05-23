@@ -71,29 +71,36 @@ def to_float(x):
         return np.nan
 
 
+
 def read_curve_file_robust(uploaded_file):
-    """Lee CSV/TXT de curva sin fallar por codificación.
-    Acepta UTF-8, UTF-8-SIG, CP1252, Latin-1 e ISO-8859-1.
-    Detecta separadores coma, punto y coma, tabulador o espacios.
+    """Lee CSV/TXT de curva sin fallar por codificación ni por formato irregular.
+
+    Soporta:
+    - UTF-8, UTF-8-SIG, CP1252, Latin-1, ISO-8859-1.
+    - CSV con coma, punto y coma, tabulador o espacios.
+    - Archivos TXT sin encabezado.
+    - Archivos con una sola columna de presión.
+    - Archivos con texto del equipo mezclado con números.
+    - Decimales con coma o punto.
     Devuelve DataFrame normalizado: tiempo_ms, presion_mmHg.
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+
     text = None
-    last_error = None
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1"):
         try:
             text = raw.decode(enc)
             break
-        except UnicodeDecodeError as e:
-            last_error = e
+        except UnicodeDecodeError:
+            continue
     if text is None:
         text = raw.decode("latin-1", errors="replace")
 
-    text = text.replace("\x00", "").strip()
+    text = text.replace("\x00", "").replace("\ufeff", "").strip()
     if not text:
         raise ValueError("El archivo de curva está vacío.")
 
-    # Intento 1: tabla con separador flexible.
+    # 1) Intento estructurado: CSV/TXT con separadores habituales.
     for sep in (None, ";", ",", "\t", r"\s+"):
         try:
             df = pd.read_csv(
@@ -103,45 +110,149 @@ def read_curve_file_robust(uploaded_file):
                 decimal=",",
                 on_bad_lines="skip"
             )
-            if df is not None and df.shape[0] > 0 and df.shape[1] >= 2:
-                return normalize_wave_dataframe(df)
+            if df is not None and df.shape[0] >= 3:
+                try:
+                    return normalize_wave_dataframe(df)
+                except Exception:
+                    pass
         except Exception:
             pass
 
-    # Intento 2: extraer pares numéricos de texto sin formato.
-    rows = []
+    # 2) Intento sin encabezado: todas las líneas con números.
+    numeric_rows = []
     for line in text.splitlines():
         nums = re.findall(r"[-+]?\d+(?:[\.,]\d+)?", line)
-        if len(nums) >= 2:
-            rows.append([to_float(nums[0]), to_float(nums[1])])
-    if len(rows) >= 3:
-        return normalize_wave_dataframe(pd.DataFrame(rows, columns=["tiempo_ms", "presion_mmHg"]))
+        if nums:
+            numeric_rows.append([to_float(n) for n in nums if not np.isnan(to_float(n))])
 
-    raise ValueError("No se pudieron reconocer columnas de tiempo y presión en el archivo CSV/TXT.")
+    # 2a) Pares tiempo-presión en líneas.
+    pair_rows = []
+    for row in numeric_rows:
+        if len(row) >= 2:
+            pair_rows.append([row[0], row[1]])
+    if len(pair_rows) >= 3:
+        try:
+            return normalize_wave_dataframe(pd.DataFrame(pair_rows, columns=["tiempo_ms", "presion_mmHg"]))
+        except Exception:
+            pass
+
+    # 2b) Secuencia larga de presiones sin tiempo: una presión por línea o vector.
+    flat = []
+    for row in numeric_rows:
+        flat.extend(row)
+
+    # Filtra valores fisiológicos compatibles con presión arterial de curva.
+    pressure_like = [v for v in flat if 20 <= v <= 260]
+    if len(pressure_like) >= 8:
+        tiempo = np.linspace(0, 1000, len(pressure_like))
+        return pd.DataFrame({"tiempo_ms": tiempo, "presion_mmHg": pressure_like})
+
+    raise ValueError(
+        "No se pudieron reconocer columnas de tiempo y presión en el archivo CSV/TXT. "
+        "El lector acepta columnas como tiempo/time/ms/x y presión/pressure/PAC/mmHg/y, "
+        "o una secuencia simple de valores de presión."
+    )
 
 
 def normalize_wave_dataframe(df):
+    """Normaliza cualquier tabla de curva a tiempo_ms/presion_mmHg."""
     df = df.copy()
+
+    # Si pandas tomó todo como una única columna con separadores internos, reintentar expandir.
+    if df.shape[1] == 1:
+        col = df.columns[0]
+        joined = "\n".join(df[col].astype(str).tolist())
+        for sep in (";", ",", "\t", r"\s+"):
+            try:
+                tmp = pd.read_csv(io.StringIO(joined), sep=sep, engine="python", header=None, on_bad_lines="skip")
+                if tmp.shape[1] >= 2 and tmp.shape[0] >= 3:
+                    df = tmp
+                    break
+            except Exception:
+                pass
+
+    original_cols = list(df.columns)
     df.columns = [str(c).strip().lower() for c in df.columns]
 
-    time_candidates = [c for c in df.columns if any(k in c for k in ["tiempo", "time", "ms", "seg", "sec", "x"])]
-    pressure_candidates = [c for c in df.columns if any(k in c for k in ["pres", "pressure", "pao", "pac", "central", "mmhg", "y"])]
+    # Convertir todo lo posible a numérico.
+    num = pd.DataFrame()
+    for c in df.columns:
+        num[c] = df[c].map(to_float)
 
-    tcol = time_candidates[0] if time_candidates else df.columns[0]
-    pcol = None
-    for c in pressure_candidates:
-        if c != tcol:
-            pcol = c
-            break
-    if pcol is None:
-        pcol = df.columns[1]
+    valid_numeric_cols = [c for c in num.columns if num[c].notna().sum() >= 3]
 
-    out = pd.DataFrame({
-        "tiempo_ms": df[tcol].map(to_float),
-        "presion_mmHg": df[pcol].map(to_float),
-    }).dropna()
+    if len(valid_numeric_cols) >= 2:
+        time_candidates = [
+            c for c in valid_numeric_cols
+            if any(k in str(c).lower() for k in ["tiempo", "time", "ms", "mseg", "miliseg", "seg", "sec", "x"])
+        ]
+        pressure_candidates = [
+            c for c in valid_numeric_cols
+            if any(k in str(c).lower() for k in ["pres", "pressure", "pao", "pac", "central", "mmhg", "aort", "y"])
+        ]
+
+        # Si no hay nombres claros, detectar por comportamiento:
+        # tiempo = columna más monótonamente creciente; presión = rango fisiológico arterial.
+        if time_candidates:
+            tcol = time_candidates[0]
+        else:
+            monotonic_scores = {}
+            for c in valid_numeric_cols:
+                s = num[c].dropna().astype(float)
+                if len(s) >= 3:
+                    diffs = np.diff(s.values)
+                    monotonic_scores[c] = np.mean(diffs >= 0)
+            tcol = max(monotonic_scores, key=monotonic_scores.get)
+
+        pcol = None
+        for c in pressure_candidates:
+            if c != tcol:
+                pcol = c
+                break
+
+        if pcol is None:
+            candidates = []
+            for c in valid_numeric_cols:
+                if c == tcol:
+                    continue
+                s = num[c].dropna().astype(float)
+                if len(s) >= 3:
+                    med = float(np.nanmedian(s))
+                    amp = float(np.nanmax(s) - np.nanmin(s))
+                    # presión arterial central/radial plausible
+                    score = 0
+                    if 40 <= med <= 180:
+                        score += 2
+                    if 10 <= amp <= 140:
+                        score += 1
+                    candidates.append((score, c))
+            if candidates:
+                pcol = sorted(candidates, reverse=True)[0][1]
+            else:
+                pcol = [c for c in valid_numeric_cols if c != tcol][0]
+
+        out = pd.DataFrame({
+            "tiempo_ms": num[tcol],
+            "presion_mmHg": num[pcol],
+        }).dropna()
+
+    elif len(valid_numeric_cols) == 1:
+        # Una sola columna numérica: interpretarla como presión y generar tiempo 0-1000 ms.
+        pcol = valid_numeric_cols[0]
+        pressure = num[pcol].dropna().astype(float)
+        pressure = pressure[(pressure >= 20) & (pressure <= 260)]
+        if len(pressure) < 3:
+            raise ValueError("La columna única no contiene suficientes valores fisiológicos de presión.")
+        out = pd.DataFrame({
+            "tiempo_ms": np.linspace(0, 1000, len(pressure)),
+            "presion_mmHg": pressure.values,
+        })
+    else:
+        raise ValueError("No se detectaron columnas numéricas válidas en el archivo de curva.")
 
     out = out.sort_values("tiempo_ms").drop_duplicates("tiempo_ms")
+    out = out.replace([np.inf, -np.inf], np.nan).dropna()
+
     if len(out) < 3:
         raise ValueError("La curva debe tener al menos 3 pares válidos de tiempo-presión.")
 
@@ -149,8 +260,16 @@ def normalize_wave_dataframe(df):
     if out["tiempo_ms"].max() <= 5:
         out["tiempo_ms"] = out["tiempo_ms"] * 1000.0
 
-    return out.reset_index(drop=True)
+    # Si el tiempo no cubre un ciclo razonable, reescalar a 0-1000 ms preservando forma.
+    if out["tiempo_ms"].max() - out["tiempo_ms"].min() <= 0:
+        out["tiempo_ms"] = np.linspace(0, 1000, len(out))
+    else:
+        tmin = out["tiempo_ms"].min()
+        tmax = out["tiempo_ms"].max()
+        if tmax > 5000 or tmax < 100:
+            out["tiempo_ms"] = (out["tiempo_ms"] - tmin) / (tmax - tmin) * 1000.0
 
+    return out.reset_index(drop=True)
 
 def extract_pdf_text(pdf_bytes):
     text = ""
@@ -379,96 +498,4 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         story.append(KeepTogether([Paragraph(title, styles["Heading3"]), Image(png, width=170*mm, height=90*mm)]))
     story.append(PageBreak())
     story.append(Paragraph("Análisis armónico de la onda de presión central", styles["Heading2"]))
-    story.append(Paragraph("Se calcula por transformada rápida de Fourier sobre la onda central importada o, si no se adjunta curva digitalizada, sobre una curva sintética calibrada con la PAS/PAD central. Su utilidad clínica es describir la distribución de energía pulsátil, los componentes de alta frecuencia y la posible contribución de rigidez arterial/reflexiones tempranas.", styles["BodyText"]))
-    htab = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]] + [[i+1, f"{r.frecuencia_hz:.2f}", f"{r.amplitud:.2f}", f"{r.energia_relativa_:.2f}" if False else f"{r['energia_relativa_%']:.2f}"] for i,r in hdf.iterrows()]
-    story.append(Table(htab, colWidths=[28*mm,42*mm,42*mm,48*mm], style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9EAF7")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
-    if screenshot_png:
-        story.append(PageBreak())
-        story.append(Paragraph("CAPTURA PANTALLA DE MEDICIONES - segunda hoja del estudio original", styles["Heading2"]))
-        story.append(Image(io.BytesIO(screenshot_png), width=170*mm, height=230*mm))
-    story.append(PageBreak())
-    story.append(Paragraph("Referencias bibliográficas", styles["Heading2"]))
-    for i, refb in enumerate(BIBLIOGRAFIA, 1):
-        story.append(Paragraph(f"{i}. {refb}", styles["Small"]))
-    doc.build(story)
-    buf.seek(0)
-    return buf.getvalue()
-
-def save_history(row):
-    new = pd.DataFrame([row])
-    if HISTORIAL_FILE.exists():
-        old = pd.read_excel(HISTORIAL_FILE)
-        out = pd.concat([old, new], ignore_index=True)
-    else:
-        out = new
-    out.to_excel(HISTORIAL_FILE, index=False)
-    return out
-
-st.title(APP_TITLE)
-st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
-
-with st.sidebar:
-    st.header("1) Importar estudio")
-    pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-    wave_file = st.file_uploader("Opcional: CSV/TXT curva central (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
-    st.info("Si la extracción automática no detecta algún dato, corríjalo manualmente antes de generar el PDF.")
-
-base = {}
-screenshot = None
-if pdf_file:
-    pdf_bytes = pdf_file.read()
-    text = extract_pdf_text(pdf_bytes)
-    base = parse_model_pac(text)
-    screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
-else:
-    base = parse_model_pac("")
-
-st.subheader("Datos extraídos / edición manual")
-cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","medicacion","diagnostico_previo"]
-row = {}
-for i, f in enumerate(fields):
-    with cols[i%4]:
-        val = base.get(f, "")
-        if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
-            row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
-        else:
-            row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
-
-if wave_file:
-    try:
-        wave_df = read_curve_file_robust(wave_file)
-        st.success("Curva importada correctamente con lector robusto CSV/TXT.")
-    except Exception as e:
-        st.error(f"No se pudo importar la curva. Se generará una curva sintética desde las métricas. Detalle: {e}")
-        wave_df = make_waveform(row)
-else:
-    wave_df = make_waveform(row)
-
-hdf = harmonic_analysis(wave_df)
-dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
-
-st.subheader("Vista clínica previa")
-st.write(dx)
-st.write(f"Categoría braquial: {cat} | Amplificación PAS: {amp_sbp:.1f} mmHg | PPA: {ppa:.2f} | Perfil: {risk}")
-
-g1, g2 = st.columns(2)
-with g1:
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales")
-    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central")
-with g2:
-    st.image(plot_waveform(wave_df), caption="Onda central")
-    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica")
-
-st.subheader("Historial y exportación")
-if st.button("Guardar en historial"):
-    hist = save_history(row)
-    st.success(f"Registro guardado. Total: {len(hist)} estudios.")
-
-if HISTORIAL_FILE.exists():
-    hist = pd.read_excel(HISTORIAL_FILE)
-    st.dataframe(hist, use_container_width=True)
-    st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-st.download_button("Generar y descargar PDF médico integrado", pdf_bytes_out, file_name=f"PAC_IA_{row.get('paciente','paciente').replace(' ','_')}.pdf", mime="application/pdf")
+    story.append(Paragraph("Se calcula por transformada rápida de Fourier sobre la onda central importada o, si no se adjunta curva digitalizada, sobre una curva sintética calibrada con la P
