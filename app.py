@@ -498,4 +498,91 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         story.append(KeepTogether([Paragraph(title, styles["Heading3"]), Image(png, width=170*mm, height=90*mm)]))
     story.append(PageBreak())
     story.append(Paragraph("Análisis armónico de la onda de presión central", styles["Heading2"]))
-    story.append(Paragraph("Se calcula por transformada rápida de Fourier sobre la onda central importada o, si no se adjunta curva digitalizada, sobre una curva sintética calibrada con la P
+    story.append(Paragraph(
+        "Se calcula por transformada rápida de Fourier sobre la onda central importada o, "
+        "si no se adjunta curva digitalizada, sobre una curva sintética calibrada con la presión "
+        "sistólica central, presión diastólica central, presión de pulso, aumentación aórtica e "
+        "índice de aumentación del estudio. El análisis armónico se interpreta como una estimación "
+        "fisiológica de la distribución espectral de energía de la onda de presión central.",
+        styles["Normal"]
+    ))
+    
+
+def save_history(row):
+    new = pd.DataFrame([row])
+    if HISTORIAL_FILE.exists():
+        old = pd.read_excel(HISTORIAL_FILE)
+        out = pd.concat([old, new], ignore_index=True)
+    else:
+        out = new
+    out.to_excel(HISTORIAL_FILE, index=False)
+    return out
+
+st.title(APP_TITLE)
+st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
+
+with st.sidebar:
+    st.header("1) Importar estudio")
+    pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
+    wave_file = st.file_uploader("Opcional: CSV/TXT curva central (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+    st.info("Si la extracción automática no detecta algún dato, corríjalo manualmente antes de generar el PDF.")
+
+base = {}
+screenshot = None
+if pdf_file:
+    pdf_bytes = pdf_file.read()
+    text = extract_pdf_text(pdf_bytes)
+    base = parse_model_pac(text)
+    screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
+else:
+    base = parse_model_pac("")
+
+st.subheader("Datos extraídos / edición manual")
+cols = st.columns(4)
+fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","medicacion","diagnostico_previo"]
+row = {}
+for i, f in enumerate(fields):
+    with cols[i%4]:
+        val = base.get(f, "")
+        if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
+            row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
+        else:
+            row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
+
+if wave_file:
+    try:
+        wave_df = read_curve_file_robust(wave_file)
+        st.success("Curva importada correctamente con lector robusto CSV/TXT.")
+    except Exception as e:
+        st.error(f"No se pudo importar la curva. Se generará una curva sintética desde las métricas. Detalle: {e}")
+        wave_df = make_waveform(row)
+else:
+    wave_df = make_waveform(row)
+
+hdf = harmonic_analysis(wave_df)
+dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+
+st.subheader("Vista clínica previa")
+st.write(dx)
+st.write(f"Categoría braquial: {cat} | Amplificación PAS: {amp_sbp:.1f} mmHg | PPA: {ppa:.2f} | Perfil: {risk}")
+
+g1, g2 = st.columns(2)
+with g1:
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales")
+    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central")
+with g2:
+    st.image(plot_waveform(wave_df), caption="Onda central")
+    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica")
+
+st.subheader("Historial y exportación")
+if st.button("Guardar en historial"):
+    hist = save_history(row)
+    st.success(f"Registro guardado. Total: {len(hist)} estudios.")
+
+if HISTORIAL_FILE.exists():
+    hist = pd.read_excel(HISTORIAL_FILE)
+    st.dataframe(hist, use_container_width=True)
+    st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
+st.download_button("Generar y descargar PDF médico integrado", pdf_bytes_out, file_name=f"PAC_IA_{row.get('paciente','paciente').replace(' ','_')}.pdf", mime="application/pdf")
