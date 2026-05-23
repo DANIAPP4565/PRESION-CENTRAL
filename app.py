@@ -445,47 +445,81 @@ def central_diagnosis(row):
     return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
 
 
+def _norm01_from_value(value, low, high, default=0.5):
+    """Normaliza un valor clínico a 0-1 para modular la morfología de la onda."""
+    v = to_float(value)
+    if np.isnan(v):
+        return float(default)
+    return float(np.clip((v - low) / max(high - low, 1e-6), 0, 1))
+
+
 def make_waveform(row, n=512):
-    """Curva sintética fisiológica calibrada exactamente con PAS/PAD central del estudio."""
+    """Curva sintética fisiológica individualizada y calibrada con PAS/PAD central.
+
+    La versión previa generaba ondas demasiado parecidas porque usaba tiempos y amplitudes
+    casi fijos. Esta versión modula forma, pico sistólico, hombro, cola diastólica y contenido
+    armónico según PP central, Au, IAu, PE, FC y amplificación periférico-central.
+    """
     cSBP = to_float(row.get("pas_central"))
     cDBP = to_float(row.get("pad_central"))
     pp_c = to_float(row.get("pp_central"))
+    pSBP = to_float(row.get("pas_radial"))
+    pp_r = to_float(row.get("pp_radial"))
     au = to_float(row.get("au"))
     iau = to_float(row.get("iau"))
     pe = to_float(row.get("pe"))
+    fc = to_float(row.get("fc"))
 
     if np.isnan(cSBP) or cSBP <= 0:
         cSBP = 120.0
     if np.isnan(cDBP) or cDBP <= 0:
         cDBP = 80.0
     if cSBP <= cDBP:
-        if not np.isnan(pp_c) and pp_c > 10:
-            cSBP = cDBP + pp_c
-        else:
-            cSBP = cDBP + 35.0
+        cSBP = cDBP + (pp_c if not np.isnan(pp_c) and pp_c > 10 else 35.0)
 
-    pp = cSBP - cDBP
+    pp = max(cSBP - cDBP, 12.0)
     t = np.linspace(0, 1, n)
 
-    # Morfología: ascenso sistólico rápido, hombro/onda reflejada y descenso diastólico.
-    peak_t = 0.22
-    refl_t = 0.40 + (0.04 if not np.isnan(pe) and pe < 35 else 0.0)
-    refl_amp = 0.22
-    if not np.isnan(iau):
-        refl_amp = np.clip(iau / 70.0, 0.12, 0.45)
-    if not np.isnan(au) and au > 0:
-        refl_amp = np.clip(au / max(pp, 1), 0.10, 0.45)
+    stiffness = _norm01_from_value(iau, 0, 45, 0.45)
+    au_rel = 0.0 if np.isnan(au) else float(np.clip(au / max(pp, 1.0), -0.25, 0.55))
+    pp_load = _norm01_from_value(pp, 25, 80, 0.45)
+    fc_load = _norm01_from_value(fc, 55, 105, 0.45)
+    pe_load = _norm01_from_value(pe, 25, 45, 0.50)
+    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - cSBP) / 35.0, -0.25, 1.0))
+    ppa = np.nan
+    if not np.isnan(pp_r) and pp > 0:
+        ppa = pp_r / pp
+    amp_load = 0.5 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.70, 0, 1))  # menor PPA = más carga central
 
-    primary = np.exp(-((t - peak_t) / 0.095) ** 2)
-    reflected = refl_amp * np.exp(-((t - refl_t) / 0.125) ** 2)
-    diastolic_tail = 0.18 * np.exp(-((t - 0.68) / 0.27) ** 2)
-    runoff = 0.08 * (1 - t)
+    # Tiempos: rigidez/IAu alto => retorno más temprano y hombro más próximo al pico.
+    peak_t = 0.18 + 0.055 * (1 - fc_load) + 0.025 * (1 - pe_load)
+    peak_t = float(np.clip(peak_t, 0.16, 0.27))
+    refl_t = 0.46 - 0.13 * stiffness - 0.04 * amp_load + 0.03 * (1 - pe_load)
+    refl_t = float(np.clip(refl_t, peak_t + 0.08, 0.54))
+    notch_t = float(np.clip(0.34 + 0.18 * pe_load, 0.34, 0.58))
 
-    raw = primary + reflected + diastolic_tail + runoff
-    p = cDBP + pp * (raw - raw.min()) / (raw.max() - raw.min())
+    # Amplitudes: Au/IAu/PP/PPA modifican claramente el hombro reflejado.
+    refl_amp = 0.12 + 0.35 * stiffness + 0.20 * max(au_rel, 0) + 0.12 * pp_load + 0.10 * amp_load
+    refl_amp = float(np.clip(refl_amp, 0.08, 0.72))
+    primary_width = 0.075 + 0.04 * (1 - stiffness) + 0.015 * pe_load
+    refl_width = 0.085 + 0.07 * (1 - stiffness) + 0.025 * pe_load
+    tail_amp = 0.10 + 0.16 * (1 - stiffness) + 0.05 * (1 - pp_load)
+
+    primary = np.exp(-((t - peak_t) / primary_width) ** 2)
+    reflected = refl_amp * np.exp(-((t - refl_t) / refl_width) ** 2)
+    notch = -0.07 * (1 - stiffness) * np.exp(-((t - notch_t) / 0.040) ** 2)
+    diastolic_tail = tail_amp * np.exp(-((t - 0.70) / (0.22 + 0.07*(1-stiffness))) ** 2)
+    runoff = (0.04 + 0.07 * (1 - stiffness)) * (1 - t)
+
+    # Componente armónico leve: evita ondas idénticas cuando los parámetros son cercanos.
+    harmonic_shape = 0.018 * (pp_load - 0.5) * np.sin(2*np.pi*3*t) + 0.012 * (stiffness - 0.5) * np.sin(2*np.pi*5*t)
+
+    raw = primary + reflected + notch + diastolic_tail + runoff + harmonic_shape
+    raw = pd.Series(raw).rolling(5, center=True, min_periods=1).mean().to_numpy()
+    p = cDBP + pp * (raw - raw.min()) / max(raw.max() - raw.min(), 1e-6)
 
     # Fijar exactamente PAD y PAS del estudio.
-    p = cDBP + (p - p.min()) * (cSBP - cDBP) / (p.max() - p.min())
+    p = cDBP + (p - p.min()) * (cSBP - cDBP) / max(p.max() - p.min(), 1e-6)
     return pd.DataFrame({"tiempo_ms": t * 1000, "presion_central_mmHg": p})
 
 def harmonic_analysis(wave_df):
@@ -519,11 +553,11 @@ def plot_pressure_comparison(row):
 def estimate_wave_separation(wave_df, row):
     """Separación estimada de onda anterógrada (Pf) y retrógrada (Pb) desde presión central.
 
-    Método clínico-aproximado para informe:
-    - Usa la onda central calibrada.
-    - Estima una onda de flujo aórtico triangular/suavizada durante el período eyectivo.
-    - Deriva Pf/Pb por componentes temporales: Pf domina ascenso sistólico temprano; Pb domina hombro sistólico/tardío.
-    - Reporta RM = Pb/Pf, RI = Pb/(Pf+Pb), Tfor, Tref y Tfor/Tref.
+    Ajuste 2026-05:
+    - Usa la presión central real/importada o sintética individualizada como curva madre.
+    - La presión total del gráfico queda como la curva central completa, no como una reconstrucción genérica.
+    - Pf y Pb se calculan como componentes sobre la línea diastólica basal para que la superposición cambie
+      entre pacientes según PP, Au, IAu, PE, FC y amplificación periférico-central.
     """
     df = wave_df.copy()
     t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
@@ -536,73 +570,84 @@ def estimate_wave_separation(wave_df, row):
         t = df["tiempo_ms"].to_numpy(dtype=float)
         p = df["presion_central_mmHg"].to_numpy(dtype=float)
 
-    # Reinterpolar a grilla regular 0-1000 ms
+    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000
     t0 = np.linspace(0, 1000, 512)
-    p0 = np.interp(t0, (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000, p)
-    p0 = pd.Series(p0).rolling(9, center=True, min_periods=1).mean().to_numpy()
+    p0 = np.interp(t0, t_norm, p)
+    p0 = pd.Series(p0).rolling(7, center=True, min_periods=1).mean().to_numpy()
 
     pad = to_float(row.get("pad_central"))
     pas = to_float(row.get("pas_central"))
     if np.isnan(pad): pad = float(np.nanmin(p0))
     if np.isnan(pas): pas = float(np.nanmax(p0))
+    if pas <= pad:
+        pas = float(np.nanmax(p0)); pad = float(np.nanmin(p0))
     pp = max(pas - pad, 1.0)
 
+    # Recalibrar curva madre para que cada paciente conserve PAS/PAD exactas.
+    p0 = pad + (p0 - np.nanmin(p0)) * (pas - pad) / max(np.nanmax(p0)-np.nanmin(p0), 1e-6)
     excess = np.clip(p0 - pad, 0, None)
-    if np.nanmax(excess) > 0:
-        excess = excess / np.nanmax(excess) * pp
 
     au = to_float(row.get("au"))
     iau = to_float(row.get("iau"))
     pe_pct = to_float(row.get("pe"))
     fc = to_float(row.get("fc"))
+    pSBP = to_float(row.get("pas_radial"))
+    pp_r = to_float(row.get("pp_radial"))
 
-    # Duración eyectiva estimada. En el equipo PE viene como %; se traduce a ms.
-    if not np.isnan(fc) and fc > 20:
-        cycle_ms = 60000.0 / fc
-    else:
-        cycle_ms = 1000.0
-    if not np.isnan(pe_pct) and pe_pct > 10:
-        ej_ms = np.clip(cycle_ms * pe_pct / 100.0, 220, 420)
-    else:
-        ej_ms = 320.0
+    stiffness = _norm01_from_value(iau, 0, 45, 0.45)
+    pp_load = _norm01_from_value(pp, 25, 80, 0.45)
+    fc_load = _norm01_from_value(fc, 55, 105, 0.45)
+    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - pas) / 35.0, -0.25, 1.0))
+    ppa = np.nan if np.isnan(pp_r) or pp <= 0 else pp_r / pp
+    amp_load = 0.5 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.70, 0, 1))
+
+    # Duración eyectiva estimada. En el equipo PE viene como %.
+    cycle_ms = 60000.0 / fc if not np.isnan(fc) and fc > 20 else 1000.0
+    ej_ms = np.clip(cycle_ms * pe_pct / 100.0, 220, 440) if not np.isnan(pe_pct) and pe_pct > 10 else 320.0
 
     peak_i = int(np.nanargmax(p0))
     t_peak = float(t0[peak_i])
 
-    # Tiempo de reflexión: si IAu/Au altos, retorno más precoz; si bajos, más tardío.
+    # Retorno de onda: IAu/Au altos y PPA baja => retorno más precoz.
     if not np.isnan(iau):
-        tref = np.clip(t_peak + 130 - 1.8 * iau, t_peak + 55, t_peak + 190)
+        tref = t_peak + 165 - 2.45 * iau - 30 * amp_load + 18 * (1 - pp_load)
     else:
-        tref = t_peak + 120
-    tref = float(np.clip(tref, 260, 520))
+        tref = t_peak + 115 - 35 * amp_load
+    tref = float(np.clip(tref, t_peak + 45, 540))
 
-    # Magnitud reflejada
-    if not np.isnan(au) and au > 0:
-        pb_peak = np.clip(au + 0.25 * pp, 0.12 * pp, 0.55 * pp)
+    # Magnitud reflejada muy dependiente de Au/IAu/PP/PPA.
+    if not np.isnan(au):
+        pb_peak = 0.10 * pp + max(au, -0.10 * pp) + 0.20 * pp * stiffness + 0.08 * pp * amp_load
     elif not np.isnan(iau):
-        pb_peak = np.clip(pp * iau / 100.0 + 0.12 * pp, 0.10 * pp, 0.55 * pp)
+        pb_peak = pp * (0.10 + iau/95.0 + 0.08 * amp_load)
     else:
-        pb_peak = 0.28 * pp
+        pb_peak = pp * (0.20 + 0.12 * amp_load)
+    pb_peak = float(np.clip(pb_peak, 0.07 * pp, 0.68 * pp))
 
-    # Onda retrógrada: gaussiana tardía + cola diastólica suave.
-    pb = pb_peak * np.exp(-((t0 - tref) / 145.0) ** 2)
-    pb += 0.18 * pb_peak * np.exp(-((t0 - 650) / 260.0) ** 2)
+    # Onda retrógrada absoluta sobre basal diastólica.
+    pb_width = 100 + 80 * (1 - stiffness) + 25 * (1 - pp_load)
+    pb = pb_peak * np.exp(-((t0 - tref) / pb_width) ** 2)
+    pb += (0.10 + 0.10*(1-stiffness)) * pb_peak * np.exp(-((t0 - 650) / 260.0) ** 2)
 
-    # Onda anterógrada = componente sistólico temprano remanente, restringida a valores positivos.
+    # Pf como componente remanente temprano. Se prioriza que Pf+Pb se parezca a la curva madre.
     pf = np.clip(excess - pb, 0, None)
-    # Si queda subestimada, construir Pf sistólica suave calibrada.
     if np.nanmax(pf) < 0.35 * pp:
-        pf_peak = max(0.60 * pp, pp - pb_peak * 0.5)
-        pf = pf_peak * np.exp(-((t0 - t_peak) / 105.0) ** 2)
-        pf += 0.10 * pf_peak * np.exp(-((t0 - 360) / 180.0) ** 2)
+        pf_peak_target = pp * (0.72 - 0.18*stiffness + 0.06*amp_sbp)
+        pf_width = 78 + 42*(1-stiffness) + 22*fc_load
+        pf = pf_peak_target * np.exp(-((t0 - t_peak) / pf_width) ** 2)
+        pf += 0.08 * pf_peak_target * np.exp(-((t0 - (t_peak+145)) / 170.0) ** 2)
 
-    # Curva reconstruida aproximada desde exceso.
-    p_recon = pad + pf + pb
-    # Recalibrar suma para conservar PAS/PAD
-    p_recon = pad + (p_recon - np.nanmin(p_recon)) * (pas - pad) / max(np.nanmax(p_recon)-np.nanmin(p_recon), 1e-6)
-    scale = (pas - pad) / max(np.nanmax(pf + pb) - np.nanmin(pf + pb), 1e-6)
-    pf = pf * scale
-    pb = pb * scale
+    # Ajuste suave para conservar amplitud total sin borrar diferencias individuales.
+    summed = pf + pb
+    if np.nanmax(summed) > 0:
+        scale = pp / max(np.nanmax(summed), 1e-6)
+        pf *= scale
+        pb *= scale
+
+    pf_abs = pad + pf
+    pb_abs = pad + pb
+    p_model = pad + np.clip(pf + pb, 0, None)
+    p_model = pad + (p_model - np.nanmin(p_model)) * (pas - pad) / max(np.nanmax(p_model)-np.nanmin(p_model), 1e-6)
 
     pf_peak = float(np.nanmax(pf))
     pb_peak = float(np.nanmax(pb))
@@ -612,25 +657,27 @@ def estimate_wave_separation(wave_df, row):
     ri = pb_peak / (pf_peak + pb_peak) if (pf_peak + pb_peak) > 0 else np.nan
     t_ratio = tfor / tref_m if tref_m > 0 else np.nan
 
-    # Flujo aórtico triangular suavizado calibrado a volumen sistólico estimado.
+    # Flujo aórtico triangular suavizado; también varía con PP/FC/PE.
     flow = np.zeros_like(t0)
-    ej_end = min(ej_ms, 520)
-    q_peak_t = max(90, min(t_peak - 25, 190))
+    ej_end = min(ej_ms, 540)
+    q_peak_t = max(75, min(t_peak - 20 + 20*(1-stiffness), 205))
     asc = (t0 <= q_peak_t)
     desc = (t0 > q_peak_t) & (t0 <= ej_end)
-    flow[asc] = t0[asc] / q_peak_t
+    flow[asc] = t0[asc] / max(q_peak_t, 1)
     flow[desc] = 1 - (t0[desc] - q_peak_t) / max(ej_end - q_peak_t, 1)
     flow = np.clip(flow, 0, None)
-    # Estimación simple de Qp con PP/FC; clínica, no invasiva y solo orientativa.
-    qp = np.clip(250 + 3.0 * pp + (0 if np.isnan(fc) else 0.6 * fc), 220, 520)
+    qp = np.clip(210 + 3.8 * pp + (0 if np.isnan(fc) else 0.85 * fc) - 45*stiffness, 180, 560)
     flow = flow * qp
     flow = pd.Series(flow).rolling(9, center=True, min_periods=1).mean().to_numpy()
 
     sep_df = pd.DataFrame({
         "tiempo_ms": t0,
-        "presion_total_mmHg": p_recon,
+        "presion_total_mmHg": p0,
+        "presion_modelo_pf_pb_mmHg": p_model,
         "onda_anterograda_pf": pf,
         "onda_retrograda_pb": pb,
+        "onda_anterograda_pf_abs": pf_abs,
+        "onda_retrograda_pb_abs": pb_abs,
         "flujo_aortico_estimado_ml_s": flow,
     })
 
@@ -644,6 +691,8 @@ def estimate_wave_separation(wave_df, row):
         "tfor_tref": t_ratio,
         "qp_ml_s": float(np.nanmax(flow)),
         "pe_ms": float(ej_end),
+        "ppa": ppa,
+        "rigidez_modelo": stiffness,
     }
     return sep_df, metrics
 
