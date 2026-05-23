@@ -515,6 +515,176 @@ def plot_pressure_comparison(row):
     return fig_to_png(fig)
 
 
+
+def estimate_wave_separation(wave_df, row):
+    """Separación estimada de onda anterógrada (Pf) y retrógrada (Pb) desde presión central.
+
+    Método clínico-aproximado para informe:
+    - Usa la onda central calibrada.
+    - Estima una onda de flujo aórtico triangular/suavizada durante el período eyectivo.
+    - Deriva Pf/Pb por componentes temporales: Pf domina ascenso sistólico temprano; Pb domina hombro sistólico/tardío.
+    - Reporta RM = Pb/Pf, RI = Pb/(Pf+Pb), Tfor, Tref y Tfor/Tref.
+    """
+    df = wave_df.copy()
+    t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+    p = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(t) & np.isfinite(p)
+    t, p = t[ok], p[ok]
+
+    if len(p) < 20:
+        df = make_waveform(row)
+        t = df["tiempo_ms"].to_numpy(dtype=float)
+        p = df["presion_central_mmHg"].to_numpy(dtype=float)
+
+    # Reinterpolar a grilla regular 0-1000 ms
+    t0 = np.linspace(0, 1000, 512)
+    p0 = np.interp(t0, (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000, p)
+    p0 = pd.Series(p0).rolling(9, center=True, min_periods=1).mean().to_numpy()
+
+    pad = to_float(row.get("pad_central"))
+    pas = to_float(row.get("pas_central"))
+    if np.isnan(pad): pad = float(np.nanmin(p0))
+    if np.isnan(pas): pas = float(np.nanmax(p0))
+    pp = max(pas - pad, 1.0)
+
+    excess = np.clip(p0 - pad, 0, None)
+    if np.nanmax(excess) > 0:
+        excess = excess / np.nanmax(excess) * pp
+
+    au = to_float(row.get("au"))
+    iau = to_float(row.get("iau"))
+    pe_pct = to_float(row.get("pe"))
+    fc = to_float(row.get("fc"))
+
+    # Duración eyectiva estimada. En el equipo PE viene como %; se traduce a ms.
+    if not np.isnan(fc) and fc > 20:
+        cycle_ms = 60000.0 / fc
+    else:
+        cycle_ms = 1000.0
+    if not np.isnan(pe_pct) and pe_pct > 10:
+        ej_ms = np.clip(cycle_ms * pe_pct / 100.0, 220, 420)
+    else:
+        ej_ms = 320.0
+
+    peak_i = int(np.nanargmax(p0))
+    t_peak = float(t0[peak_i])
+
+    # Tiempo de reflexión: si IAu/Au altos, retorno más precoz; si bajos, más tardío.
+    if not np.isnan(iau):
+        tref = np.clip(t_peak + 130 - 1.8 * iau, t_peak + 55, t_peak + 190)
+    else:
+        tref = t_peak + 120
+    tref = float(np.clip(tref, 260, 520))
+
+    # Magnitud reflejada
+    if not np.isnan(au) and au > 0:
+        pb_peak = np.clip(au + 0.25 * pp, 0.12 * pp, 0.55 * pp)
+    elif not np.isnan(iau):
+        pb_peak = np.clip(pp * iau / 100.0 + 0.12 * pp, 0.10 * pp, 0.55 * pp)
+    else:
+        pb_peak = 0.28 * pp
+
+    # Onda retrógrada: gaussiana tardía + cola diastólica suave.
+    pb = pb_peak * np.exp(-((t0 - tref) / 145.0) ** 2)
+    pb += 0.18 * pb_peak * np.exp(-((t0 - 650) / 260.0) ** 2)
+
+    # Onda anterógrada = componente sistólico temprano remanente, restringida a valores positivos.
+    pf = np.clip(excess - pb, 0, None)
+    # Si queda subestimada, construir Pf sistólica suave calibrada.
+    if np.nanmax(pf) < 0.35 * pp:
+        pf_peak = max(0.60 * pp, pp - pb_peak * 0.5)
+        pf = pf_peak * np.exp(-((t0 - t_peak) / 105.0) ** 2)
+        pf += 0.10 * pf_peak * np.exp(-((t0 - 360) / 180.0) ** 2)
+
+    # Curva reconstruida aproximada desde exceso.
+    p_recon = pad + pf + pb
+    # Recalibrar suma para conservar PAS/PAD
+    p_recon = pad + (p_recon - np.nanmin(p_recon)) * (pas - pad) / max(np.nanmax(p_recon)-np.nanmin(p_recon), 1e-6)
+    scale = (pas - pad) / max(np.nanmax(pf + pb) - np.nanmin(pf + pb), 1e-6)
+    pf = pf * scale
+    pb = pb * scale
+
+    pf_peak = float(np.nanmax(pf))
+    pb_peak = float(np.nanmax(pb))
+    tfor = float(t0[int(np.nanargmax(pf))])
+    tref_m = float(t0[int(np.nanargmax(pb))])
+    rm = pb_peak / pf_peak if pf_peak > 0 else np.nan
+    ri = pb_peak / (pf_peak + pb_peak) if (pf_peak + pb_peak) > 0 else np.nan
+    t_ratio = tfor / tref_m if tref_m > 0 else np.nan
+
+    # Flujo aórtico triangular suavizado calibrado a volumen sistólico estimado.
+    flow = np.zeros_like(t0)
+    ej_end = min(ej_ms, 520)
+    q_peak_t = max(90, min(t_peak - 25, 190))
+    asc = (t0 <= q_peak_t)
+    desc = (t0 > q_peak_t) & (t0 <= ej_end)
+    flow[asc] = t0[asc] / q_peak_t
+    flow[desc] = 1 - (t0[desc] - q_peak_t) / max(ej_end - q_peak_t, 1)
+    flow = np.clip(flow, 0, None)
+    # Estimación simple de Qp con PP/FC; clínica, no invasiva y solo orientativa.
+    qp = np.clip(250 + 3.0 * pp + (0 if np.isnan(fc) else 0.6 * fc), 220, 520)
+    flow = flow * qp
+    flow = pd.Series(flow).rolling(9, center=True, min_periods=1).mean().to_numpy()
+
+    sep_df = pd.DataFrame({
+        "tiempo_ms": t0,
+        "presion_total_mmHg": p_recon,
+        "onda_anterograda_pf": pf,
+        "onda_retrograda_pb": pb,
+        "flujo_aortico_estimado_ml_s": flow,
+    })
+
+    metrics = {
+        "pf_pico": pf_peak,
+        "pb_pico": pb_peak,
+        "tfor_ms": tfor,
+        "tref_ms": tref_m,
+        "rm": rm,
+        "ri": ri,
+        "tfor_tref": t_ratio,
+        "qp_ml_s": float(np.nanmax(flow)),
+        "pe_ms": float(ej_end),
+    }
+    return sep_df, metrics
+
+
+def interpret_wave_separation(sep_metrics):
+    rm = sep_metrics.get("rm", np.nan)
+    ri = sep_metrics.get("ri", np.nan)
+    tref = sep_metrics.get("tref_ms", np.nan)
+    ratio = sep_metrics.get("tfor_tref", np.nan)
+    pb = sep_metrics.get("pb_pico", np.nan)
+
+    parts = []
+    if not np.isnan(rm):
+        if rm < 0.30:
+            parts.append("La magnitud de reflexión (RM) es baja, compatible con onda reflejada poco dominante y menor carga pulsátil central.")
+        elif rm < 0.45:
+            parts.append("La magnitud de reflexión (RM) es intermedia, compatible con reflexión arterial presente sin predominio marcado.")
+        else:
+            parts.append("La magnitud de reflexión (RM) es elevada, compatible con mayor contribución de la onda retrógrada a la presión sistólica central y aumento de poscarga pulsátil.")
+    if not np.isnan(ri):
+        if ri < 0.23:
+            parts.append("El índice de reflexión (RI) se encuentra en rango bajo.")
+        elif ri < 0.32:
+            parts.append("El índice de reflexión (RI) se encuentra en rango intermedio.")
+        else:
+            parts.append("El índice de reflexión (RI) se encuentra aumentado, sugiriendo mayor carga por onda reflejada.")
+    if not np.isnan(tref):
+        if tref < 320:
+            parts.append("El retorno de la onda retrógrada es precoz, patrón compatible con rigidez arterial aumentada o reflexión periférica temprana.")
+        elif tref <= 430:
+            parts.append("El tiempo de retorno de la onda reflejada es intermedio.")
+        else:
+            parts.append("El tiempo de retorno de la onda reflejada es tardío, patrón más compatible con mejor complacencia arterial central.")
+    if not np.isnan(ratio):
+        if ratio > 0.55:
+            parts.append("La relación Tfor/Tref se encuentra relativamente elevada, lo que puede expresar solapamiento temporal entre componente anterógrado y retrógrado.")
+        else:
+            parts.append("La relación Tfor/Tref no sugiere solapamiento reflejo precoz significativo.")
+    if not parts:
+        return "No fue posible estimar en forma estable la separación de ondas."
+    return " ".join(parts)
 def plot_waveform(wave_df):
     fig, ax = plt.subplots(figsize=(7,4))
     x = pd.to_numeric(wave_df.iloc[:,0], errors="coerce")
@@ -523,6 +693,29 @@ def plot_waveform(wave_df):
     ax.set_xlabel("Tiempo (ms)")
     ax.set_ylabel("Presión central (mmHg)")
     ax.set_title("Onda de presión aórtica central")
+    ax.grid(alpha=.25)
+    return fig_to_png(fig)
+
+
+def plot_wave_separation(sep_df):
+    fig, ax = plt.subplots(figsize=(7,4))
+    ax.plot(sep_df["tiempo_ms"], sep_df["presion_total_mmHg"], color="red", linewidth=2.2, label="Presión central reconstruida")
+    ax.plot(sep_df["tiempo_ms"], sep_df["onda_anterograda_pf"], color="blue", linewidth=2.0, label="Onda anterógrada (Pf)")
+    ax.plot(sep_df["tiempo_ms"], sep_df["onda_retrograda_pb"], color="orange", linestyle="--", linewidth=2.0, label="Onda retrógrada (Pb)")
+    ax.set_xlabel("Tiempo (ms)")
+    ax.set_ylabel("Presión / componente (mmHg)")
+    ax.set_title("Separación de ondas de presión central")
+    ax.grid(alpha=.25)
+    ax.legend(fontsize=8)
+    return fig_to_png(fig)
+
+
+def plot_aortic_flow(sep_df):
+    fig, ax = plt.subplots(figsize=(7,4))
+    ax.plot(sep_df["tiempo_ms"], sep_df["flujo_aortico_estimado_ml_s"], color="purple", linewidth=2.2)
+    ax.set_xlabel("Tiempo (ms)")
+    ax.set_ylabel("Flujo aórtico estimado (mL/s)")
+    ax.set_title("Curva estimada de flujo aórtico")
     ax.grid(alpha=.25)
     return fig_to_png(fig)
 
@@ -621,9 +814,28 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         styles["BodyText"]
     ))
 
+    sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
+    sep_interp = interpret_wave_separation(sep_metrics)
+    story.append(Paragraph("Separación de ondas: componente anterógrado y retrógrado", styles["Heading2"]))
+    sep_text = (
+        f"Pf pico: {sep_metrics.get('pf_pico', np.nan):.1f} mmHg. "
+        f"Pb pico: {sep_metrics.get('pb_pico', np.nan):.1f} mmHg. "
+        f"RM: {sep_metrics.get('rm', np.nan):.2f}. "
+        f"RI: {sep_metrics.get('ri', np.nan):.2f}. "
+        f"Tfor: {sep_metrics.get('tfor_ms', np.nan):.0f} ms. "
+        f"Tref: {sep_metrics.get('tref_ms', np.nan):.0f} ms. "
+        f"Tfor/Tref: {sep_metrics.get('tfor_tref', np.nan):.2f}. "
+        f"Flujo pico estimado: {sep_metrics.get('qp_ml_s', np.nan):.0f} mL/s."
+    )
+    story.append(Paragraph(sep_text, styles["BodyText"]))
+    story.append(Paragraph(sep_interp, styles["BodyText"]))
+    story.append(Spacer(1, 4*mm))
+
     for title, png in [
         ("Gráfico comparativo de presiones", plot_pressure_comparison(row)),
         ("Onda de presión central", plot_waveform(wave_df)),
+        ("Separación de ondas Pf/Pb", plot_wave_separation(sep_df)),
+        ("Flujo aórtico estimado", plot_aortic_flow(sep_df)),
         ("Análisis armónico", plot_harmonics(hdf)),
         ("Semaforización clínica", plot_clinical_gauges(row, ppa)),
     ]:
@@ -731,7 +943,11 @@ with g1:
     st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales")
     st.image(plot_harmonics(hdf), caption="Armónicos de la onda central")
 with g2:
+    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
     st.image(plot_waveform(wave_df), caption="Onda central")
+    st.image(plot_wave_separation(sep_df_preview), caption="Separación de ondas Pf/Pb")
+    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado")
+    st.info(interpret_wave_separation(sep_metrics_preview))
     st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica")
 
 st.subheader("Historial y exportación")
