@@ -534,8 +534,30 @@ def harmonic_analysis(wave_df):
     df = df.iloc[1:11].reset_index(drop=True)
     return df
 
+def _apply_professional_axes(ax, title=None, xlabel=None, ylabel=None):
+    """Aplica formato profesional homogéneo a los gráficos clínicos."""
+    ax.set_facecolor("#FFFFFF")
+    ax.figure.patch.set_facecolor("#FFFFFF")
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold", color="#12355B", pad=10)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=9, color="#263238")
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9, color="#263238")
+    ax.tick_params(axis="both", labelsize=8, colors="#263238")
+    ax.grid(True, alpha=0.22, linewidth=0.6)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    ax.spines["left"].set_color("#B0BEC5")
+    ax.spines["bottom"].set_color("#B0BEC5")
+
 def fig_to_png(fig):
-    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=180, bbox_inches="tight"); plt.close(fig); buf.seek(0); return buf
+    fig.tight_layout(pad=1.15)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 def plot_pressure_comparison(row):
     labels = ["PAS", "PAD", "PAM", "PP"]
@@ -553,11 +575,12 @@ def plot_pressure_comparison(row):
 def estimate_wave_separation(wave_df, row):
     """Separación estimada de onda anterógrada (Pf) y retrógrada (Pb) desde presión central.
 
-    Ajuste 2026-05:
-    - Usa la presión central real/importada o sintética individualizada como curva madre.
-    - La presión total del gráfico queda como la curva central completa, no como una reconstrucción genérica.
-    - Pf y Pb se calculan como componentes sobre la línea diastólica basal para que la superposición cambie
-      entre pacientes según PP, Au, IAu, PE, FC y amplificación periférico-central.
+    Versión reforzada:
+    - Evita curvas iguales entre pacientes usando un vector morfológico individual: PP central,
+      Au, IAu, PE, FC, PPA y amplificación PAS periférico-central.
+    - Pf/Pb quedan superpuestas sobre la línea diastólica de la presión aórtica central.
+    - La onda de flujo aórtico deja de ser triangular en punta y usa una forma beta/ejectiva
+      redondeada con ascenso y descenso fisiológicos.
     """
     df = wave_df.copy()
     t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
@@ -570,10 +593,10 @@ def estimate_wave_separation(wave_df, row):
         t = df["tiempo_ms"].to_numpy(dtype=float)
         p = df["presion_central_mmHg"].to_numpy(dtype=float)
 
-    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000
-    t0 = np.linspace(0, 1000, 512)
+    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000.0
+    t0 = np.linspace(0, 1000, 640)
     p0 = np.interp(t0, t_norm, p)
-    p0 = pd.Series(p0).rolling(7, center=True, min_periods=1).mean().to_numpy()
+    p0 = pd.Series(p0).rolling(9, center=True, min_periods=1).mean().to_numpy()
 
     pad = to_float(row.get("pad_central"))
     pas = to_float(row.get("pas_central"))
@@ -583,7 +606,6 @@ def estimate_wave_separation(wave_df, row):
         pas = float(np.nanmax(p0)); pad = float(np.nanmin(p0))
     pp = max(pas - pad, 1.0)
 
-    # Recalibrar curva madre para que cada paciente conserve PAS/PAD exactas.
     p0 = pad + (p0 - np.nanmin(p0)) * (pas - pad) / max(np.nanmax(p0)-np.nanmin(p0), 1e-6)
     excess = np.clip(p0 - pad, 0, None)
 
@@ -594,50 +616,56 @@ def estimate_wave_separation(wave_df, row):
     pSBP = to_float(row.get("pas_radial"))
     pp_r = to_float(row.get("pp_radial"))
 
-    stiffness = _norm01_from_value(iau, 0, 45, 0.45)
-    pp_load = _norm01_from_value(pp, 25, 80, 0.45)
-    fc_load = _norm01_from_value(fc, 55, 105, 0.45)
-    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - pas) / 35.0, -0.25, 1.0))
-    ppa = np.nan if np.isnan(pp_r) or pp <= 0 else pp_r / pp
-    amp_load = 0.5 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.70, 0, 1))
-
-    # Duración eyectiva estimada. En el equipo PE viene como %.
+    stiffness = _norm01_from_value(iau, -10, 45, 0.42)
+    au_rel = 0.0 if np.isnan(au) else float(np.clip(au / max(pp, 1.0), -0.35, 0.65))
+    pp_load = _norm01_from_value(pp, 22, 82, 0.45)
+    fc_load = _norm01_from_value(fc, 50, 110, 0.45)
     cycle_ms = 60000.0 / fc if not np.isnan(fc) and fc > 20 else 1000.0
-    ej_ms = np.clip(cycle_ms * pe_pct / 100.0, 220, 440) if not np.isnan(pe_pct) and pe_pct > 10 else 320.0
+    ppa = np.nan if np.isnan(pp_r) or pp <= 0 else pp_r / pp
+    amp_load = 0.50 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.75, 0, 1))
+    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - pas) / 40.0, -0.35, 1.15))
+
+    # Evitar valores de PE demasiado fijos: la duración eyectiva cambia con PE/FC y carga.
+    if not np.isnan(pe_pct) and pe_pct > 10:
+        ej_ms = float(np.clip(cycle_ms * pe_pct / 100.0, 210, 460))
+    else:
+        ej_ms = float(np.clip(300 + 70*(1-fc_load) + 35*(1-stiffness), 240, 430))
 
     peak_i = int(np.nanargmax(p0))
     t_peak = float(t0[peak_i])
 
-    # Retorno de onda: IAu/Au altos y PPA baja => retorno más precoz.
-    if not np.isnan(iau):
-        tref = t_peak + 165 - 2.45 * iau - 30 * amp_load + 18 * (1 - pp_load)
-    else:
-        tref = t_peak + 115 - 35 * amp_load
-    tref = float(np.clip(tref, t_peak + 45, 540))
+    # Retorno reflejado individualizado: IAu/Au altos + PPA baja => retorno más precoz y más prominente.
+    tref = t_peak + 180 - 2.6*(0 if np.isnan(iau) else iau) - 42*amp_load + 24*(1-pp_load) - 20*max(au_rel, 0)
+    tref = float(np.clip(tref, t_peak + 48, min(560, ej_ms + 180)))
 
-    # Magnitud reflejada muy dependiente de Au/IAu/PP/PPA.
+    # Pico retrógrado con fuerte dependencia de Au/IAu/PPA/PP. Permite diferencias visuales claras.
     if not np.isnan(au):
-        pb_peak = 0.10 * pp + max(au, -0.10 * pp) + 0.20 * pp * stiffness + 0.08 * pp * amp_load
+        pb_peak = 0.08*pp + max(au, -0.12*pp) + 0.24*pp*stiffness + 0.13*pp*amp_load + 0.04*pp_load*pp
     elif not np.isnan(iau):
-        pb_peak = pp * (0.10 + iau/95.0 + 0.08 * amp_load)
+        pb_peak = pp * (0.09 + iau/90.0 + 0.12*amp_load + 0.05*pp_load)
     else:
-        pb_peak = pp * (0.20 + 0.12 * amp_load)
-    pb_peak = float(np.clip(pb_peak, 0.07 * pp, 0.68 * pp))
+        pb_peak = pp * (0.18 + 0.16*amp_load + 0.10*stiffness)
+    pb_peak = float(np.clip(pb_peak, 0.05*pp, 0.72*pp))
 
-    # Onda retrógrada absoluta sobre basal diastólica.
-    pb_width = 100 + 80 * (1 - stiffness) + 25 * (1 - pp_load)
+    # Pb: no una gaussiana única fija; combina hombro sistólico y cola tardía con anchura variable.
+    pb_width = float(np.clip(82 + 92*(1-stiffness) + 28*(1-pp_load), 72, 190))
     pb = pb_peak * np.exp(-((t0 - tref) / pb_width) ** 2)
-    pb += (0.10 + 0.10*(1-stiffness)) * pb_peak * np.exp(-((t0 - 650) / 260.0) ** 2)
+    tail_center = 610 + 90*(1-stiffness) - 40*fc_load
+    pb += (0.06 + 0.13*(1-stiffness)) * pb_peak * np.exp(-((t0 - tail_center) / (220 + 70*(1-stiffness))) ** 2)
 
-    # Pf como componente remanente temprano. Se prioriza que Pf+Pb se parezca a la curva madre.
+    # Pf: componente anterógrado ancho/estrecho según FC, PE y rigidez; conserva la silueta de la curva madre.
     pf = np.clip(excess - pb, 0, None)
-    if np.nanmax(pf) < 0.35 * pp:
-        pf_peak_target = pp * (0.72 - 0.18*stiffness + 0.06*amp_sbp)
-        pf_width = 78 + 42*(1-stiffness) + 22*fc_load
-        pf = pf_peak_target * np.exp(-((t0 - t_peak) / pf_width) ** 2)
-        pf += 0.08 * pf_peak_target * np.exp(-((t0 - (t_peak+145)) / 170.0) ** 2)
+    pf_peak_target = pp * float(np.clip(0.84 - 0.30*stiffness + 0.08*amp_sbp + 0.07*(1-amp_load), 0.48, 0.95))
+    pf_width = float(np.clip(68 + 58*(1-stiffness) + 0.10*ej_ms - 22*fc_load, 62, 160))
+    pf_template = pf_peak_target * np.exp(-((t0 - t_peak) / pf_width) ** 2)
+    pf_template += 0.05 * pf_peak_target * np.exp(-((t0 - (t_peak + 135 + 40*(1-stiffness))) / 175.0) ** 2)
+    # Mezcla adaptativa: si la resta queda pobre, predomina la plantilla individual.
+    if np.nanmax(pf) < 0.32*pp:
+        pf = pf_template
+    else:
+        pf = 0.72*pf + 0.28*pf_template
 
-    # Ajuste suave para conservar amplitud total sin borrar diferencias individuales.
+    # Escala sin borrar la relación Pf/Pb. La suma puede no coincidir perfecto, pero conserva PAS/PAD y diferencias.
     summed = pf + pb
     if np.nanmax(summed) > 0:
         scale = pp / max(np.nanmax(summed), 1e-6)
@@ -657,18 +685,25 @@ def estimate_wave_separation(wave_df, row):
     ri = pb_peak / (pf_peak + pb_peak) if (pf_peak + pb_peak) > 0 else np.nan
     t_ratio = tfor / tref_m if tref_m > 0 else np.nan
 
-    # Flujo aórtico triangular suavizado; también varía con PP/FC/PE.
+    # Flujo aórtico redondeado tipo eyección, no triangular. Usa forma beta con parámetros variables.
     flow = np.zeros_like(t0)
-    ej_end = min(ej_ms, 540)
-    q_peak_t = max(75, min(t_peak - 20 + 20*(1-stiffness), 205))
-    asc = (t0 <= q_peak_t)
-    desc = (t0 > q_peak_t) & (t0 <= ej_end)
-    flow[asc] = t0[asc] / max(q_peak_t, 1)
-    flow[desc] = 1 - (t0[desc] - q_peak_t) / max(ej_end - q_peak_t, 1)
-    flow = np.clip(flow, 0, None)
-    qp = np.clip(210 + 3.8 * pp + (0 if np.isnan(fc) else 0.85 * fc) - 45*stiffness, 180, 560)
-    flow = flow * qp
-    flow = pd.Series(flow).rolling(9, center=True, min_periods=1).mean().to_numpy()
+    ej_start = max(0.0, t_peak - (100 + 18*(1-stiffness)))
+    ej_end = float(np.clip(ej_ms, max(t_peak+120, 250), 540))
+    eject = (t0 >= ej_start) & (t0 <= ej_end)
+    u = np.zeros_like(t0)
+    u[eject] = (t0[eject] - ej_start) / max(ej_end - ej_start, 1e-6)
+    # alpha/beta modulan punta: más rigidez/FC = pico algo más temprano, pero siempre romo.
+    alpha = 2.05 + 0.55*(1-stiffness) + 0.15*(1-fc_load)
+    beta = 3.15 + 0.65*stiffness + 0.25*fc_load
+    flow_shape = np.zeros_like(t0)
+    flow_shape[eject] = (u[eject] ** (alpha-1)) * ((1-u[eject]) ** (beta-1))
+    # Meseta sistólica suave para evitar aspecto en punta.
+    flow_shape[eject] = pd.Series(flow_shape[eject]).rolling(23, center=True, min_periods=1).mean().to_numpy()
+    if np.nanmax(flow_shape) > 0:
+        flow_shape = flow_shape / np.nanmax(flow_shape)
+    qp = np.clip(210 + 3.4*pp + (0 if np.isnan(fc) else 0.75*fc) - 36*stiffness + 18*(1-amp_load), 170, 560)
+    flow = flow_shape * qp
+    flow = pd.Series(flow).rolling(17, center=True, min_periods=1).mean().to_numpy()
 
     sep_df = pd.DataFrame({
         "tiempo_ms": t0,
@@ -690,9 +725,11 @@ def estimate_wave_separation(wave_df, row):
         "ri": ri,
         "tfor_tref": t_ratio,
         "qp_ml_s": float(np.nanmax(flow)),
-        "pe_ms": float(ej_end),
+        "pe_ms": float(ej_end - ej_start),
         "ppa": ppa,
         "rigidez_modelo": stiffness,
+        "t_ej_inicio_ms": float(ej_start),
+        "t_ej_fin_ms": float(ej_end),
     }
     return sep_df, metrics
 
@@ -735,67 +772,74 @@ def interpret_wave_separation(sep_metrics):
         return "No fue posible estimar en forma estable la separación de ondas."
     return " ".join(parts)
 def plot_waveform(wave_df):
-    fig, ax = plt.subplots(figsize=(7,4))
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
     x = pd.to_numeric(wave_df.iloc[:,0], errors="coerce")
     y = pd.to_numeric(wave_df.iloc[:,1], errors="coerce")
-    ax.plot(x, y, color="red", linewidth=2.4)
-    ax.set_xlabel("Tiempo (ms)")
-    ax.set_ylabel("Presión central (mmHg)")
-    ax.set_title("Onda de presión aórtica central")
-    ax.grid(alpha=.25)
+    ax.plot(x, y, color="#B71C1C", linewidth=2.6)
+    ax.fill_between(x, y.min(), y, color="#B71C1C", alpha=0.06)
+    _apply_professional_axes(ax, "Onda de presión aórtica central", "Tiempo (ms)", "Presión central (mmHg)")
+    ax.margins(x=0.01)
     return fig_to_png(fig)
 
 
 def plot_wave_separation(sep_df):
-    """Gráfico clínico integrado: presión aórtica central + Pf/Pb superpuestas.
-
-    La presión central se muestra como curva absoluta en mmHg. Para que la separación
-    sea interpretada sobre la misma escala clínica, las ondas Pf y Pb se grafican
-    sobre la línea diastólica basal (PAD), no desde cero. Esto evita el aspecto de
-    "gráfico separado" y permite ver el solapamiento temporal con la onda completa.
-    """
+    """Gráfico clínico integrado: presión aórtica central + Pf/Pb superpuestas."""
     t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
     p_total = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
-    pf = pd.to_numeric(sep_df["onda_anterograda_pf"], errors="coerce").to_numpy(dtype=float)
-    pb = pd.to_numeric(sep_df["onda_retrograda_pb"], errors="coerce").to_numpy(dtype=float)
-
-    ok = np.isfinite(t) & np.isfinite(p_total) & np.isfinite(pf) & np.isfinite(pb)
-    t, p_total, pf, pb = t[ok], p_total[ok], pf[ok], pb[ok]
+    pf_abs = pd.to_numeric(sep_df.get("onda_anterograda_pf_abs", sep_df["onda_anterograda_pf"]), errors="coerce").to_numpy(dtype=float)
+    pb_abs = pd.to_numeric(sep_df.get("onda_retrograda_pb_abs", sep_df["onda_retrograda_pb"]), errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(t) & np.isfinite(p_total) & np.isfinite(pf_abs) & np.isfinite(pb_abs)
+    t, p_total, pf_abs, pb_abs = t[ok], p_total[ok], pf_abs[ok], pb_abs[ok]
     pad_base = float(np.nanmin(p_total)) if len(p_total) else 0.0
-    pf_abs = pad_base + pf
-    pb_abs = pad_base + pb
 
-    fig, ax = plt.subplots(figsize=(8.2, 4.6))
-    ax.plot(t, p_total, color="black", linewidth=2.8, label="Presión aórtica central completa")
-    ax.plot(t, pf_abs, color="green", linewidth=2.25, label="Onda anterógrada Pf superpuesta")
-    ax.plot(t, pb_abs, color="darkorange", linestyle="--", linewidth=2.25, label="Onda retrógrada Pb superpuesta")
-    ax.fill_between(t, pad_base, pf_abs, alpha=0.08, color="green")
-    ax.fill_between(t, pad_base, pb_abs, alpha=0.08, color="darkorange")
-    ax.axhline(pad_base, color="gray", linewidth=0.9, alpha=0.7)
-    ax.set_xlabel("Tiempo (ms)")
-    ax.set_ylabel("Presión central / componentes superpuestos (mmHg)")
-    ax.set_title("Separación de ondas sobre la presión aórtica central")
-    ax.grid(alpha=.22)
-    ax.legend(fontsize=8, loc="best", frameon=True)
+    fig, ax = plt.subplots(figsize=(8.8, 4.9))
+    ax.plot(t, p_total, color="#111111", linewidth=3.0, label="Presión aórtica central completa", zorder=5)
+    ax.plot(t, pf_abs, color="#168038", linewidth=2.35, label="Onda anterógrada Pf", zorder=4)
+    ax.plot(t, pb_abs, color="#EF6C00", linestyle="--", linewidth=2.35, label="Onda retrógrada Pb", zorder=4)
+    ax.fill_between(t, pad_base, pf_abs, alpha=0.07, color="#168038", zorder=2)
+    ax.fill_between(t, pad_base, pb_abs, alpha=0.08, color="#EF6C00", zorder=2)
+    ax.axhline(pad_base, color="#78909C", linewidth=0.9, alpha=0.8)
+    _apply_professional_axes(ax, "Separación de ondas superpuesta a la presión aórtica central", "Tiempo (ms)", "Presión / componentes sobre PAD (mmHg)")
+    ax.legend(fontsize=8, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
     ax.margins(x=0.01)
     return fig_to_png(fig)
 
 
 def plot_aortic_flow(sep_df):
-    fig, ax = plt.subplots(figsize=(7,4))
-    ax.plot(sep_df["tiempo_ms"], sep_df["flujo_aortico_estimado_ml_s"], color="purple", linewidth=2.2)
-    ax.set_xlabel("Tiempo (ms)")
-    ax.set_ylabel("Flujo aórtico estimado (mL/s)")
-    ax.set_title("Curva estimada de flujo aórtico")
-    ax.grid(alpha=.25)
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    t = sep_df["tiempo_ms"]
+    q = sep_df["flujo_aortico_estimado_ml_s"]
+    ax.plot(t, q, color="#6A1B9A", linewidth=2.6)
+    ax.fill_between(t, 0, q, color="#6A1B9A", alpha=0.08)
+    _apply_professional_axes(ax, "Curva estimada de flujo aórtico", "Tiempo (ms)", "Flujo aórtico estimado (mL/s)")
+    ax.set_ylim(bottom=0)
+    ax.margins(x=0.01)
     return fig_to_png(fig)
 
+
 def plot_harmonics(hdf):
-    fig, ax = plt.subplots(figsize=(7,4))
-    ax.bar(range(1, len(hdf)+1), hdf["energia_relativa_%"])
-    ax.set_xlabel("Armónico"); ax.set_ylabel("Energía relativa (%)"); ax.set_title("Análisis armónico de la onda de presión central")
-    ax.grid(axis="y", alpha=.25)
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    ax.bar(range(1, len(hdf)+1), hdf["energia_relativa_%"], color="#455A64")
+    ax.set_xticks(range(1, len(hdf)+1))
+    _apply_professional_axes(ax, "Análisis armónico de la onda de presión central", "Armónico", "Energía relativa (%)")
+    ax.grid(axis="y", alpha=.22)
     return fig_to_png(fig)
+
+
+def plot_pressure_comparison(row):
+    labels = ["PAS", "PAD", "PAM", "PP"]
+    radial = [row.get("pas_radial"), row.get("pad_radial"), row.get("pam_radial"), row.get("pp_radial")]
+    central = [row.get("pas_central"), row.get("pad_central"), row.get("pam_central"), row.get("pp_central")]
+    x = np.arange(len(labels)); w = 0.34
+    fig, ax = plt.subplots(figsize=(7.6,4.2))
+    ax.bar(x-w/2, radial, w, label="Radial/Braquial", color="#607D8B")
+    ax.bar(x+w/2, central, w, label="Central", color="#1565C0")
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    _apply_professional_axes(ax, "Presiones periféricas vs centrales", "Variable", "mmHg")
+    ax.legend(fontsize=8, frameon=True, facecolor="white", edgecolor="#CFD8DC")
+    ax.grid(axis="y", alpha=.22)
+    return fig_to_png(fig)
+
 
 def plot_clinical_gauges(row, ppa):
     metrics = {
@@ -804,7 +848,7 @@ def plot_clinical_gauges(row, ppa):
         "IAu": (to_float(row.get("iau")), 25),
         "PPA": (ppa, 1.30),
     }
-    fig, ax = plt.subplots(figsize=(7,3.8))
+    fig, ax = plt.subplots(figsize=(7.6,3.9))
     names = list(metrics.keys())
     vals = [metrics[k][0] for k in names]
     refs = [metrics[k][1] for k in names]
@@ -813,11 +857,10 @@ def plot_clinical_gauges(row, ppa):
         if np.isnan(v): score.append(np.nan)
         elif n == "PPA": score.append(v/r)
         else: score.append(v/r)
-    ax.barh(names, score)
-    ax.axvline(1, linestyle="--", linewidth=1)
-    ax.set_xlabel("Relación valor / umbral")
-    ax.set_title("Semaforización clínica de parámetros centrales")
-    ax.grid(axis="x", alpha=.25)
+    ax.barh(names, score, color="#546E7A")
+    ax.axvline(1, linestyle="--", linewidth=1.2, color="#B71C1C")
+    _apply_professional_axes(ax, "Semaforización clínica de parámetros centrales", "Relación valor / umbral", "")
+    ax.grid(axis="x", alpha=.22)
     return fig_to_png(fig)
 
 
@@ -906,7 +949,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
 
     story = []
     story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL", styles["TitlePAC"]))
-    story.append(Paragraph("Informe médico integrado con separación de ondas superpuesta", styles["BodyPAC"]))
+    story.append(Paragraph("Informe médico integrado con curvas individualizadas, flujo aórtico redondeado y separación Pf/Pb superpuesta", styles["BodyPAC"]))
     story.append(Spacer(1, 3*mm))
 
     story.append(_section("1. Datos del paciente y del estudio"))
@@ -965,13 +1008,13 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     story.append(Paragraph(sep_interp, styles["BodyPAC"]))
     story.append(KeepTogether([
         Paragraph("Presión aórtica central con Pf y Pb superpuestas", styles["H3PAC"]),
-        Image(plot_wave_separation(sep_df), width=178*mm, height=99*mm)
+        Image(plot_wave_separation(sep_df), width=182*mm, height=101*mm)
     ]))
     story.append(Spacer(1, 2*mm))
 
     story.append(_section("5. Panel gráfico integrado"))
-    img_w = 86*mm
-    img_h = 50*mm
+    img_w = 88*mm
+    img_h = 51*mm
     graph_table = [
         [Paragraph("Presiones periféricas vs centrales", styles["H3PAC"]), Paragraph("Onda de presión aórtica central", styles["H3PAC"])],
         [Image(plot_pressure_comparison(row), width=img_w, height=img_h), Image(plot_waveform(wave_df), width=img_w, height=img_h)],
@@ -1092,20 +1135,30 @@ hdf = harmonic_analysis(wave_df)
 dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
 st.subheader("Vista clínica previa")
-st.write(dx)
-st.write(f"Categoría braquial: {cat} | Amplificación PAS: {amp_sbp:.1f} mmHg | PPA: {ppa:.2f} | Perfil: {risk}")
+sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+
+summary_cols = st.columns(4)
+summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
+summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
+summary_cols[2].metric("PPA", f"{ppa:.2f}")
+summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+
+st.info(f"{dx} | Categoría braquial: {cat} | Amplificación PAS: {amp_sbp:.1f} mmHg | Perfil: {risk}")
+
+st.markdown("#### Curvas principales")
+st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
 
 g1, g2 = st.columns(2)
 with g1:
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales")
-    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central")
+    st.image(plot_waveform(wave_df), caption="Onda central", use_container_width=True)
+    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado redondeado", use_container_width=True)
 with g2:
-    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
-    st.image(plot_waveform(wave_df), caption="Onda central")
-    st.image(plot_wave_separation(sep_df_preview), caption="Separación de ondas Pf/Pb")
-    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado")
-    st.info(interpret_wave_separation(sep_metrics_preview))
-    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica")
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
+    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central", use_container_width=True)
+
+st.markdown("#### Interpretación automática")
+st.info(interpret_wave_separation(sep_metrics_preview))
+st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
 
 st.subheader("Historial y exportación")
 if st.button("Guardar en historial"):
