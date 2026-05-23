@@ -160,7 +160,7 @@ def calibrate_waveform_to_metrics(wave_df, row):
 
     ymin, ymax = float(np.nanmin(y)), float(np.nanmax(y))
     if ymax - ymin < 1:
-        return make_waveform(row)
+        raise ValueError("Curva real inválida: amplitud de presión insuficiente para calibración. No se generará curva sintética.")
 
     ycal = pad + (y - ymin) * (pas - pad) / (ymax - ymin)
 
@@ -179,7 +179,7 @@ def read_curve_file_robust(uploaded_file, row=None):
 
     Acepta columnas nombradas como tiempo/time/ms y presión/pressure/PAC/mmHg.
     También acepta TXT/CSV sin encabezado si contiene una serie real de al menos 20-50 puntos.
-    Si el archivo no contiene una curva fisiológica, se usa curva sintética calibrada.
+    Modo estricto: si no hay curva real válida, se detiene el análisis de ondas/armónicos y no se usa curva sintética.
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
 
@@ -589,9 +589,7 @@ def estimate_wave_separation(wave_df, row):
     t, p = t[ok], p[ok]
 
     if len(p) < 20:
-        df = make_waveform(row)
-        t = df["tiempo_ms"].to_numpy(dtype=float)
-        p = df["presion_central_mmHg"].to_numpy(dtype=float)
+        raise ValueError("No hay curva real suficiente para separación de ondas. Se requieren al menos 20 puntos válidos del estudio.")
 
     t_norm = (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000.0
     t0 = np.linspace(0, 1000, 640)
@@ -1409,54 +1407,67 @@ for i, f in enumerate(fields):
         else:
             row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
 
+wave_df = None
+curve_error = None
 if wave_file:
     try:
         wave_df = read_curve_file_robust(wave_file, row)
-        st.success("Curva importada correctamente con lector robusto CSV/TXT.")
+        st.success("Curva real importada y validada correctamente. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
     except Exception as e:
-        st.warning(f"El archivo importado no contiene una curva válida. Se usará curva fisiológica calibrada con las métricas del estudio. Detalle: {e}")
-        wave_df = make_waveform(row)
+        curve_error = str(e)
+        st.error("El archivo importado no contiene una curva real válida. No se generarán gráficos de onda, separación Pf/Pb, armónicos ni PDF médico con curva sintética.")
+        st.caption(f"Detalle técnico: {curve_error}")
 else:
-    wave_df = make_waveform(row)
+    st.error("Para generar informe, separación de ondas y armónicos se debe cargar la curva real del paciente en CSV/TXT. La app queda en modo estricto: no usa curva sintética ni genérica.")
 
-hdf = harmonic_analysis(wave_df)
 dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
 st.subheader("Vista clínica previa")
-sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
-conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
-
 summary_cols = st.columns(4)
 summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
 summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
-summary_cols[2].metric("PPA", f"{ppa:.2f}")
-summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
+summary_cols[3].metric("Modo de curva", "REAL" if wave_df is not None else "BLOQUEADO")
 
-st.markdown("### Conclusiones clínicas continuas")
-for title, body in conclusion_blocks_preview:
-    st.markdown(f"**{title}**")
-    st.write(body)
+st.markdown("### Análisis de presión central y métricas")
+st.write(dx)
+st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
 
-st.markdown("---")
-st.markdown("### Gráficos")
-st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+if wave_df is not None:
+    hdf = harmonic_analysis(wave_df)
+    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+    conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
-g1, g2 = st.columns(2)
-with g1:
-    st.image(plot_waveform(wave_df), caption="Onda central", use_container_width=True)
-    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado redondeado", use_container_width=True)
-with g2:
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
-    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central", use_container_width=True)
+    summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
 
-st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+    st.markdown("### Conclusiones clínicas continuas")
+    for title, body in conclusion_blocks_preview:
+        st.markdown(f"**{title}**")
+        st.write(body)
 
-final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
-st.markdown("---")
-st.markdown("### Fenotipo final de presión central")
-st.success(final_phenotype_preview)
-st.write(final_phenotype_text_preview)
-st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+    st.markdown("---")
+    st.markdown("### Gráficos")
+    st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
+        st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
+    with g2:
+        st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
+        st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
+
+    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+
+    final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
+    st.markdown("---")
+    st.markdown("### Fenotipo final de presión central")
+    st.success(final_phenotype_preview)
+    st.write(final_phenotype_text_preview)
+    st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+else:
+    st.warning("Carga obligatoria pendiente: archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin esa curva no se habilita el PDF final.")
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
 
 st.subheader("Historial y exportación")
 if st.button("Guardar en historial"):
@@ -1468,14 +1479,17 @@ if HISTORIAL_FILE.exists():
     st.dataframe(hist, use_container_width=True)
     st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
-if not pdf_download_bytes:
-    st.error("No se pudo generar el PDF médico integrado.")
+if wave_df is None:
+    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente. No se generará reporte con curvas simuladas.")
 else:
-    st.download_button(
-        "Generar y descargar PDF médico integrado",
-        data=pdf_download_bytes,
-        file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
-        mime="application/pdf"
-    )
+    pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
+    pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
+    if not pdf_download_bytes:
+        st.error("No se pudo generar el PDF médico integrado.")
+    else:
+        st.download_button(
+            "Generar y descargar PDF médico integrado",
+            data=pdf_download_bytes,
+            file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+            mime="application/pdf"
+        )
