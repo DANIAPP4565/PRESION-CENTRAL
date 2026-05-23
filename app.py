@@ -31,6 +31,34 @@ from reportlab.platypus import (
 )
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
+def ensure_download_bytes(obj):
+    """Convierte salida de PDF a bytes válidos para st.download_button."""
+    if obj is None:
+        return b""
+    if isinstance(obj, bytes):
+        return obj
+    if isinstance(obj, bytearray):
+        return bytes(obj)
+    if hasattr(obj, "getvalue"):
+        val = obj.getvalue()
+        if isinstance(val, str):
+            return val.encode("latin-1", errors="ignore")
+        return bytes(val)
+    if isinstance(obj, str):
+        # Si es una ruta a archivo, leer bytes. Si es contenido, codificar.
+        try:
+            p = Path(obj)
+            if p.exists() and p.is_file():
+                return p.read_bytes()
+        except Exception:
+            pass
+        return obj.encode("latin-1", errors="ignore")
+    try:
+        return bytes(obj)
+    except Exception:
+        return str(obj).encode("latin-1", errors="ignore")
+
+
 st.set_page_config(page_title="PAC IA - Presión Aórtica Central", layout="wide")
 
 APP_TITLE = "PAC IA - Informe médico integrado de Presión Aórtica Central"
@@ -585,4 +613,13 @@ if HISTORIAL_FILE.exists():
     st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-st.download_button("Generar y descargar PDF médico integrado", pdf_bytes_out, file_name=f"PAC_IA_{row.get('paciente','paciente').replace(' ','_')}.pdf", mime="application/pdf")
+pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
+if not pdf_download_bytes:
+    st.error("No se pudo generar el PDF médico integrado.")
+else:
+    st.download_button(
+        "Generar y descargar PDF médico integrado",
+        data=pdf_download_bytes,
+        file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+        mime="application/pdf"
+    )
