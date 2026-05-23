@@ -70,6 +70,88 @@ def to_float(x):
     except Exception:
         return np.nan
 
+
+def read_curve_file_robust(uploaded_file):
+    """Lee CSV/TXT de curva sin fallar por codificación.
+    Acepta UTF-8, UTF-8-SIG, CP1252, Latin-1 e ISO-8859-1.
+    Detecta separadores coma, punto y coma, tabulador o espacios.
+    Devuelve DataFrame normalizado: tiempo_ms, presion_mmHg.
+    """
+    raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    text = None
+    last_error = None
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError as e:
+            last_error = e
+    if text is None:
+        text = raw.decode("latin-1", errors="replace")
+
+    text = text.replace("\x00", "").strip()
+    if not text:
+        raise ValueError("El archivo de curva está vacío.")
+
+    # Intento 1: tabla con separador flexible.
+    for sep in (None, ";", ",", "\t", r"\s+"):
+        try:
+            df = pd.read_csv(
+                io.StringIO(text),
+                sep=sep,
+                engine="python",
+                decimal=",",
+                on_bad_lines="skip"
+            )
+            if df is not None and df.shape[0] > 0 and df.shape[1] >= 2:
+                return normalize_wave_dataframe(df)
+        except Exception:
+            pass
+
+    # Intento 2: extraer pares numéricos de texto sin formato.
+    rows = []
+    for line in text.splitlines():
+        nums = re.findall(r"[-+]?\d+(?:[\.,]\d+)?", line)
+        if len(nums) >= 2:
+            rows.append([to_float(nums[0]), to_float(nums[1])])
+    if len(rows) >= 3:
+        return normalize_wave_dataframe(pd.DataFrame(rows, columns=["tiempo_ms", "presion_mmHg"]))
+
+    raise ValueError("No se pudieron reconocer columnas de tiempo y presión en el archivo CSV/TXT.")
+
+
+def normalize_wave_dataframe(df):
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    time_candidates = [c for c in df.columns if any(k in c for k in ["tiempo", "time", "ms", "seg", "sec", "x"])]
+    pressure_candidates = [c for c in df.columns if any(k in c for k in ["pres", "pressure", "pao", "pac", "central", "mmhg", "y"])]
+
+    tcol = time_candidates[0] if time_candidates else df.columns[0]
+    pcol = None
+    for c in pressure_candidates:
+        if c != tcol:
+            pcol = c
+            break
+    if pcol is None:
+        pcol = df.columns[1]
+
+    out = pd.DataFrame({
+        "tiempo_ms": df[tcol].map(to_float),
+        "presion_mmHg": df[pcol].map(to_float),
+    }).dropna()
+
+    out = out.sort_values("tiempo_ms").drop_duplicates("tiempo_ms")
+    if len(out) < 3:
+        raise ValueError("La curva debe tener al menos 3 pares válidos de tiempo-presión.")
+
+    # Si el tiempo parece estar en segundos, pasarlo a ms.
+    if out["tiempo_ms"].max() <= 5:
+        out["tiempo_ms"] = out["tiempo_ms"] * 1000.0
+
+    return out.reset_index(drop=True)
+
+
 def extract_pdf_text(pdf_bytes):
     text = ""
     if pdfplumber is not None:
@@ -328,7 +410,7 @@ st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segu
 with st.sidebar:
     st.header("1) Importar estudio")
     pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-    wave_file = st.file_uploader("Opcional: CSV curva central (tiempo_ms, presion_mmHg)", type=["csv"])
+    wave_file = st.file_uploader("Opcional: CSV/TXT curva central (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
     st.info("Si la extracción automática no detecta algún dato, corríjalo manualmente antes de generar el PDF.")
 
 base = {}
@@ -354,9 +436,11 @@ for i, f in enumerate(fields):
             row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
 
 if wave_file:
-    wave_df = pd.read_csv(wave_file)
-    if wave_df.shape[1] < 2:
-        st.error("El CSV debe tener al menos dos columnas: tiempo y presión.")
+    try:
+        wave_df = read_curve_file_robust(wave_file)
+        st.success("Curva importada correctamente con lector robusto CSV/TXT.")
+    except Exception as e:
+        st.error(f"No se pudo importar la curva. Se generará una curva sintética desde las métricas. Detalle: {e}")
         wave_df = make_waveform(row)
 else:
     wave_df = make_waveform(row)
