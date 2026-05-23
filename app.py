@@ -160,7 +160,7 @@ def calibrate_waveform_to_metrics(wave_df, row):
 
     ymin, ymax = float(np.nanmin(y)), float(np.nanmax(y))
     if ymax - ymin < 1:
-        return make_waveform(row)
+        raise ValueError("Curva real inválida: amplitud de presión insuficiente para calibración. No se generará curva sintética.")
 
     ycal = pad + (y - ymin) * (pas - pad) / (ymax - ymin)
 
@@ -179,7 +179,7 @@ def read_curve_file_robust(uploaded_file, row=None):
 
     Acepta columnas nombradas como tiempo/time/ms y presión/pressure/PAC/mmHg.
     También acepta TXT/CSV sin encabezado si contiene una serie real de al menos 20-50 puntos.
-    Si el archivo no contiene una curva fisiológica, se usa curva sintética calibrada.
+    Modo estricto: si no hay curva real válida, se detiene el análisis de ondas/armónicos y no se usa curva sintética.
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
 
@@ -572,138 +572,189 @@ def plot_pressure_comparison(row):
 
 
 
-def estimate_wave_separation(wave_df, row):
-    """Separación estimada de onda anterógrada (Pf) y retrógrada (Pb) desde presión central.
 
-    Versión reforzada:
-    - Evita curvas iguales entre pacientes usando un vector morfológico individual: PP central,
-      Au, IAu, PE, FC, PPA y amplificación PAS periférico-central.
-    - Pf/Pb quedan superpuestas sobre la línea diastólica de la presión aórtica central.
-    - La onda de flujo aórtico deja de ser triangular en punta y usa una forma beta/ejectiva
-      redondeada con ascenso y descenso fisiológicos.
+def _curve_fingerprint(t, p):
+    """Firma numérica corta de la morfología real para verificar que cada paciente use su propia curva."""
+    try:
+        t = np.asarray(t, dtype=float)
+        p = np.asarray(p, dtype=float)
+        ok = np.isfinite(t) & np.isfinite(p)
+        t, p = t[ok], p[ok]
+        if len(p) < 20:
+            return "curva_insuficiente"
+        x = np.linspace(0, 1, 48)
+        tn = (t - np.nanmin(t)) / max(np.nanmax(t) - np.nanmin(t), 1e-6)
+        pn = (p - np.nanmin(p)) / max(np.nanmax(p) - np.nanmin(p), 1e-6)
+        sig = np.interp(x, tn, pn)
+        sig = np.round(sig, 3)
+        return str(abs(hash(tuple(sig))) % 10_000_000).zfill(7)
+    except Exception:
+        return "sin_firma"
+
+
+def _first_true_index(mask, default=0):
+    idx = np.where(mask)[0]
+    return int(idx[0]) if len(idx) else int(default)
+
+
+def _last_true_index(mask, default=0):
+    idx = np.where(mask)[0]
+    return int(idx[-1]) if len(idx) else int(default)
+
+
+def _regularize_real_pressure_curve(wave_df, row, n=720):
+    """Regulariza la curva real importada sin inventar morfología.
+
+    La única calibración permitida es lineal contra PAS/PAD central reales del estudio.
+    Si no hay suficientes puntos reales, la función falla y bloquea el informe.
     """
     df = wave_df.copy()
     t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
     p = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
     ok = np.isfinite(t) & np.isfinite(p)
     t, p = t[ok], p[ok]
+    if len(p) < 40:
+        raise ValueError("Curva real insuficiente: se requieren al menos 40 puntos válidos del paciente.")
 
-    if len(p) < 20:
-        df = make_waveform(row)
-        t = df["tiempo_ms"].to_numpy(dtype=float)
-        p = df["presion_central_mmHg"].to_numpy(dtype=float)
+    order = np.argsort(t)
+    t, p = t[order], p[order]
+    keep = np.r_[True, np.diff(t) > 0]
+    t, p = t[keep], p[keep]
+    if len(p) < 40:
+        raise ValueError("Curva real insuficiente luego de quitar tiempos duplicados.")
 
-    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t)-np.nanmin(t), 1e-6) * 1000.0
-    t0 = np.linspace(0, 1000, 640)
+    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t) - np.nanmin(t), 1e-6) * 1000.0
+    t0 = np.linspace(0, 1000, n)
     p0 = np.interp(t0, t_norm, p)
-    p0 = pd.Series(p0).rolling(9, center=True, min_periods=1).mean().to_numpy()
 
-    pad = to_float(row.get("pad_central"))
+    # Suavizado mínimo, proporcional a la cantidad de puntos, para no borrar morfología individual.
+    win = max(5, min(17, (n // 90) * 2 + 1))
+    p0 = pd.Series(p0).rolling(win, center=True, min_periods=1).median().to_numpy()
+    p0 = pd.Series(p0).rolling(win, center=True, min_periods=1).mean().to_numpy()
+
     pas = to_float(row.get("pas_central"))
-    if np.isnan(pad): pad = float(np.nanmin(p0))
-    if np.isnan(pas): pas = float(np.nanmax(p0))
-    if pas <= pad:
-        pas = float(np.nanmax(p0)); pad = float(np.nanmin(p0))
-    pp = max(pas - pad, 1.0)
+    pad = to_float(row.get("pad_central"))
+    raw_min, raw_max = float(np.nanmin(p0)), float(np.nanmax(p0))
+    if raw_max - raw_min < 5:
+        raise ValueError("La curva real tiene amplitud insuficiente; se bloquea análisis para evitar curvas genéricas.")
 
-    p0 = pad + (p0 - np.nanmin(p0)) * (pas - pad) / max(np.nanmax(p0)-np.nanmin(p0), 1e-6)
-    excess = np.clip(p0 - pad, 0, None)
-
-    au = to_float(row.get("au"))
-    iau = to_float(row.get("iau"))
-    pe_pct = to_float(row.get("pe"))
-    fc = to_float(row.get("fc"))
-    pSBP = to_float(row.get("pas_radial"))
-    pp_r = to_float(row.get("pp_radial"))
-
-    stiffness = _norm01_from_value(iau, -10, 45, 0.42)
-    au_rel = 0.0 if np.isnan(au) else float(np.clip(au / max(pp, 1.0), -0.35, 0.65))
-    pp_load = _norm01_from_value(pp, 22, 82, 0.45)
-    fc_load = _norm01_from_value(fc, 50, 110, 0.45)
-    cycle_ms = 60000.0 / fc if not np.isnan(fc) and fc > 20 else 1000.0
-    ppa = np.nan if np.isnan(pp_r) or pp <= 0 else pp_r / pp
-    amp_load = 0.50 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.75, 0, 1))
-    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - pas) / 40.0, -0.35, 1.15))
-
-    # Evitar valores de PE demasiado fijos: la duración eyectiva cambia con PE/FC y carga.
-    if not np.isnan(pe_pct) and pe_pct > 10:
-        ej_ms = float(np.clip(cycle_ms * pe_pct / 100.0, 210, 460))
+    if not np.isnan(pas) and not np.isnan(pad) and pas > pad:
+        p0 = pad + (p0 - raw_min) * (pas - pad) / max(raw_max - raw_min, 1e-6)
     else:
-        ej_ms = float(np.clip(300 + 70*(1-fc_load) + 35*(1-stiffness), 240, 430))
+        pad, pas = raw_min, raw_max
+
+    return t0, p0, _curve_fingerprint(t0, p0)
+
+
+def estimate_wave_separation(wave_df, row):
+    """Separación morfológica Pf/Pb derivada de la curva real del paciente.
+
+    Modo estricto:
+    - No usa curva sintética.
+    - No usa plantilla fija entre pacientes.
+    - Pf + Pb reconstruyen la onda real sobre PAD.
+    - El flujo aórtico se deriva de la pendiente positiva real de la curva, no de una onda triangular.
+    """
+    t0, p0, curve_id = _regularize_real_pressure_curve(wave_df, row, n=720)
+
+    pad = float(np.nanmin(p0))
+    pas = float(np.nanmax(p0))
+    pp = max(pas - pad, 1.0)
+    excess = np.clip(p0 - pad, 0, None)
 
     peak_i = int(np.nanargmax(p0))
     t_peak = float(t0[peak_i])
 
-    # Retorno reflejado individualizado: IAu/Au altos + PPA baja => retorno más precoz y más prominente.
-    tref = t_peak + 180 - 2.6*(0 if np.isnan(iau) else iau) - 42*amp_load + 24*(1-pp_load) - 20*max(au_rel, 0)
-    tref = float(np.clip(tref, t_peak + 48, min(560, ej_ms + 180)))
+    # Landmarks reales por derivadas: pie sistólico, punto de máxima pendiente y hombro/retorno reflejo.
+    dt = float(np.nanmedian(np.diff(t0)))
+    dp = np.gradient(p0, dt)
+    d2 = np.gradient(dp, dt)
 
-    # Pico retrógrado con fuerte dependencia de Au/IAu/PPA/PP. Permite diferencias visuales claras.
-    if not np.isnan(au):
-        pb_peak = 0.08*pp + max(au, -0.12*pp) + 0.24*pp*stiffness + 0.13*pp*amp_load + 0.04*pp_load*pp
-    elif not np.isnan(iau):
-        pb_peak = pp * (0.09 + iau/90.0 + 0.12*amp_load + 0.05*pp_load)
+    pre = np.arange(0, max(peak_i, 1))
+    foot_i = _first_true_index(excess[:max(peak_i, 1)] > 0.04 * pp, default=0)
+    max_dp_i = int(pre[np.nanargmax(dp[pre])]) if len(pre) else max(0, peak_i // 2)
+
+    post_start = min(len(t0)-1, peak_i + max(8, int(25/dt)))
+    post_end = min(len(t0)-1, peak_i + max(45, int(380/dt)))
+    post = np.arange(post_start, post_end)
+    if len(post) > 10:
+        # El retorno reflejo se ubica en la mayor convexidad/meseta pospico real, no en un tiempo fijo.
+        curv_score = d2[post] - 0.20 * np.abs(dp[post])
+        refl_i = int(post[np.nanargmax(curv_score)])
     else:
-        pb_peak = pp * (0.18 + 0.16*amp_load + 0.10*stiffness)
-    pb_peak = float(np.clip(pb_peak, 0.05*pp, 0.72*pp))
+        refl_i = min(len(t0)-1, peak_i + int(140/dt))
 
-    # Pb: no una gaussiana única fija; combina hombro sistólico y cola tardía con anchura variable.
-    pb_width = float(np.clip(82 + 92*(1-stiffness) + 28*(1-pp_load), 72, 190))
-    pb = pb_peak * np.exp(-((t0 - tref) / pb_width) ** 2)
-    tail_center = 610 + 90*(1-stiffness) - 40*fc_load
-    pb += (0.06 + 0.13*(1-stiffness)) * pb_peak * np.exp(-((t0 - tail_center) / (220 + 70*(1-stiffness))) ** 2)
+    # Si la curva tiene hombro tardío visible, priorizar máximo local tardío.
+    local_max = []
+    for i in range(post_start + 1, post_end - 1):
+        if p0[i-1] <= p0[i] >= p0[i+1] and t0[i] > t_peak + 45:
+            local_max.append(i)
+    if local_max:
+        refl_i = int(local_max[0])
 
-    # Pf: componente anterógrado ancho/estrecho según FC, PE y rigidez; conserva la silueta de la curva madre.
-    pf = np.clip(excess - pb, 0, None)
-    pf_peak_target = pp * float(np.clip(0.84 - 0.30*stiffness + 0.08*amp_sbp + 0.07*(1-amp_load), 0.48, 0.95))
-    pf_width = float(np.clip(68 + 58*(1-stiffness) + 0.10*ej_ms - 22*fc_load, 62, 160))
-    pf_template = pf_peak_target * np.exp(-((t0 - t_peak) / pf_width) ** 2)
-    pf_template += 0.05 * pf_peak_target * np.exp(-((t0 - (t_peak + 135 + 40*(1-stiffness))) / 175.0) ** 2)
-    # Mezcla adaptativa: si la resta queda pobre, predomina la plantilla individual.
-    if np.nanmax(pf) < 0.32*pp:
-        pf = pf_template
-    else:
-        pf = 0.72*pf + 0.28*pf_template
+    t_ref = float(t0[refl_i])
+    transition = float(np.clip(28 + 0.10 * max(t_ref - t_peak, 40), 28, 85))
 
-    # Escala sin borrar la relación Pf/Pb. La suma puede no coincidir perfecto, pero conserva PAS/PAD y diferencias.
-    summed = pf + pb
-    if np.nanmax(summed) > 0:
-        scale = pp / max(np.nanmax(summed), 1e-6)
-        pf *= scale
-        pb *= scale
+    # Pesos temporales derivados de la curva real: antes de t_ref domina Pf; después domina Pb.
+    late_weight = 1.0 / (1.0 + np.exp(-(t0 - t_ref) / transition))
+    early_weight = 1.0 - late_weight
+
+    # La reflexión no aparece antes del pie sistólico ni domina al inicio.
+    early_weight[t0 < t0[foot_i]] = 1.0
+    late_weight[t0 < t0[foot_i]] = 0.0
+
+    # Reparto estricto del exceso real: no se inventa presión. Pf + Pb = presión real - PAD.
+    pf = excess * early_weight
+    pb = excess * late_weight
+
+    # Refuerzo de hombro reflejado real: si hay convexidad/segunda meseta, se asigna a Pb con forma tomada del exceso real.
+    shoulder_window = np.exp(-((t0 - t_ref) / max(transition * 2.2, 80)) ** 2)
+    pb = np.maximum(pb, excess * shoulder_window * np.clip(0.35 + 0.45 * (excess / max(pp, 1)), 0.20, 0.80))
+    # Rebalancear para que no exceda la presión real.
+    total = pf + pb
+    over = total > excess
+    scale = np.ones_like(total)
+    scale[over] = excess[over] / np.maximum(total[over], 1e-6)
+    pf *= scale
+    pb *= scale
 
     pf_abs = pad + pf
     pb_abs = pad + pb
-    p_model = pad + np.clip(pf + pb, 0, None)
-    p_model = pad + (p_model - np.nanmin(p_model)) * (pas - pad) / max(np.nanmax(p_model)-np.nanmin(p_model), 1e-6)
+    p_model = pad + pf + pb  # exactamente la curva real suavizada/calibrada
 
     pf_peak = float(np.nanmax(pf))
     pb_peak = float(np.nanmax(pb))
-    tfor = float(t0[int(np.nanargmax(pf))])
-    tref_m = float(t0[int(np.nanargmax(pb))])
+    tfor = float(t0[int(np.nanargmax(pf))]) if pf_peak > 0 else np.nan
+    tref_m = float(t0[int(np.nanargmax(pb))]) if pb_peak > 0 else np.nan
     rm = pb_peak / pf_peak if pf_peak > 0 else np.nan
     ri = pb_peak / (pf_peak + pb_peak) if (pf_peak + pb_peak) > 0 else np.nan
-    t_ratio = tfor / tref_m if tref_m > 0 else np.nan
+    t_ratio = tfor / tref_m if not np.isnan(tref_m) and tref_m > 0 else np.nan
 
-    # Flujo aórtico redondeado tipo eyección, no triangular. Usa forma beta con parámetros variables.
-    flow = np.zeros_like(t0)
-    ej_start = max(0.0, t_peak - (100 + 18*(1-stiffness)))
-    ej_end = float(np.clip(ej_ms, max(t_peak+120, 250), 540))
+    # Flujo aórtico del paciente: derivado de la pendiente positiva real, redondeado, sin triángulo fijo.
+    fc = to_float(row.get("fc"))
+    pe_pct = to_float(row.get("pe"))
+    cycle_ms = 60000.0 / fc if not np.isnan(fc) and fc > 20 else 1000.0
+    if not np.isnan(pe_pct) and pe_pct > 10:
+        ej_duration = float(np.clip(cycle_ms * pe_pct / 100.0, 190, 520))
+    else:
+        # Fin de eyección estimado por caída pospico al 35% de PP o por mínimo de dp/dt.
+        post_peak = np.arange(peak_i, len(t0))
+        fall_idx = post_peak[excess[post_peak] < 0.35 * pp]
+        ej_duration = float(np.clip((t0[fall_idx[0]] - t0[foot_i]) if len(fall_idx) else 330, 210, 520))
+    ej_start = float(t0[foot_i])
+    ej_end = float(np.clip(ej_start + ej_duration, t_peak + 80, min(1000, ej_start + 540)))
+
+    q = np.zeros_like(t0)
     eject = (t0 >= ej_start) & (t0 <= ej_end)
-    u = np.zeros_like(t0)
-    u[eject] = (t0[eject] - ej_start) / max(ej_end - ej_start, 1e-6)
-    # alpha/beta modulan punta: más rigidez/FC = pico algo más temprano, pero siempre romo.
-    alpha = 2.05 + 0.55*(1-stiffness) + 0.15*(1-fc_load)
-    beta = 3.15 + 0.65*stiffness + 0.25*fc_load
-    flow_shape = np.zeros_like(t0)
-    flow_shape[eject] = (u[eject] ** (alpha-1)) * ((1-u[eject]) ** (beta-1))
-    # Meseta sistólica suave para evitar aspecto en punta.
-    flow_shape[eject] = pd.Series(flow_shape[eject]).rolling(23, center=True, min_periods=1).mean().to_numpy()
-    if np.nanmax(flow_shape) > 0:
-        flow_shape = flow_shape / np.nanmax(flow_shape)
-    qp = np.clip(210 + 3.4*pp + (0 if np.isnan(fc) else 0.75*fc) - 36*stiffness + 18*(1-amp_load), 170, 560)
-    flow = flow_shape * qp
-    flow = pd.Series(flow).rolling(17, center=True, min_periods=1).mean().to_numpy()
+    positive_dp = np.clip(dp, 0, None)
+    # Se agrega pequeña contribución por presión excedente durante eyección para producir pico romo fisiológico.
+    q[eject] = positive_dp[eject] + 0.012 * excess[eject]
+    q = pd.Series(q).rolling(21, center=True, min_periods=1).mean().to_numpy()
+    q = pd.Series(q).rolling(21, center=True, min_periods=1).mean().to_numpy()
+    if np.nanmax(q) > 0:
+        # Escala orientativa individual por PP y FC; la forma sigue siendo de la curva real.
+        qp = np.clip(190 + 3.0 * pp + (0 if np.isnan(fc) else 0.65 * fc), 160, 560)
+        q = q / np.nanmax(q) * qp
 
     sep_df = pd.DataFrame({
         "tiempo_ms": t0,
@@ -713,8 +764,13 @@ def estimate_wave_separation(wave_df, row):
         "onda_retrograda_pb": pb,
         "onda_anterograda_pf_abs": pf_abs,
         "onda_retrograda_pb_abs": pb_abs,
-        "flujo_aortico_estimado_ml_s": flow,
+        "flujo_aortico_estimado_ml_s": q,
     })
+
+    # Métricas de morfología real para auditar que no se repita la misma curva.
+    systolic_area = float(np.trapz(excess[(t0 >= ej_start) & (t0 <= ej_end)], t0[(t0 >= ej_start) & (t0 <= ej_end)]))
+    total_area = float(np.trapz(excess, t0))
+    ai_morph = float((p0[refl_i] - p0[max_dp_i]) / pp * 100.0) if pp > 0 else np.nan
 
     metrics = {
         "pf_pico": pf_peak,
@@ -724,15 +780,19 @@ def estimate_wave_separation(wave_df, row):
         "rm": rm,
         "ri": ri,
         "tfor_tref": t_ratio,
-        "qp_ml_s": float(np.nanmax(flow)),
+        "qp_ml_s": float(np.nanmax(q)) if len(q) else np.nan,
         "pe_ms": float(ej_end - ej_start),
-        "ppa": ppa,
-        "rigidez_modelo": stiffness,
-        "t_ej_inicio_ms": float(ej_start),
-        "t_ej_fin_ms": float(ej_end),
+        "curve_id": curve_id,
+        "t_pico_ms": t_peak,
+        "t_pie_ms": float(t0[foot_i]),
+        "t_max_dpdt_ms": float(t0[max_dp_i]),
+        "area_sistolica": systolic_area,
+        "area_total": total_area,
+        "ai_morfologico_%": ai_morph,
+        "t_ej_inicio_ms": ej_start,
+        "t_ej_fin_ms": ej_end,
     }
     return sep_df, metrics
-
 
 def interpret_wave_separation(sep_metrics):
     rm = sep_metrics.get("rm", np.nan)
@@ -1384,8 +1444,8 @@ st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segu
 with st.sidebar:
     st.header("1) Importar estudio")
     pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-    wave_file = st.file_uploader("Opcional: CSV/TXT curva central (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
-    st.info("Si la extracción automática no detecta algún dato, corríjalo manualmente antes de generar el PDF.")
+    wave_file = st.file_uploader("OBLIGATORIO: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+    st.info("Modo estricto: las curvas, separación Pf/Pb, flujo y armónicos solo se generan con puntos reales de curva del paciente. No se aceptan curvas sintéticas ni genéricas.")
 
 base = {}
 screenshot = None
@@ -1409,54 +1469,68 @@ for i, f in enumerate(fields):
         else:
             row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
 
+wave_df = None
+curve_error = None
 if wave_file:
     try:
         wave_df = read_curve_file_robust(wave_file, row)
-        st.success("Curva importada correctamente con lector robusto CSV/TXT.")
+        st.success("Curva real importada y validada correctamente. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
     except Exception as e:
-        st.warning(f"El archivo importado no contiene una curva válida. Se usará curva fisiológica calibrada con las métricas del estudio. Detalle: {e}")
-        wave_df = make_waveform(row)
+        curve_error = str(e)
+        st.error("El archivo importado no contiene una curva real válida. No se generarán gráficos de onda, separación Pf/Pb, armónicos ni PDF médico con curva sintética.")
+        st.caption(f"Detalle técnico: {curve_error}")
 else:
-    wave_df = make_waveform(row)
+    st.error("Para generar informe, separación de ondas y armónicos se debe cargar la curva real del paciente en CSV/TXT. La app queda en modo estricto: no usa curva sintética ni genérica.")
 
-hdf = harmonic_analysis(wave_df)
 dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
 st.subheader("Vista clínica previa")
-sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
-conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
-
 summary_cols = st.columns(4)
 summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
 summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
-summary_cols[2].metric("PPA", f"{ppa:.2f}")
-summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
+summary_cols[3].metric("Modo de curva", "REAL" if wave_df is not None else "BLOQUEADO")
 
-st.markdown("### Conclusiones clínicas continuas")
-for title, body in conclusion_blocks_preview:
-    st.markdown(f"**{title}**")
-    st.write(body)
+st.markdown("### Análisis de presión central y métricas")
+st.write(dx)
+st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
 
-st.markdown("---")
-st.markdown("### Gráficos")
-st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+if wave_df is not None:
+    hdf = harmonic_analysis(wave_df)
+    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+    conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
-g1, g2 = st.columns(2)
-with g1:
-    st.image(plot_waveform(wave_df), caption="Onda central", use_container_width=True)
-    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado redondeado", use_container_width=True)
-with g2:
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
-    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central", use_container_width=True)
+    summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+    st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
-st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+    st.markdown("### Conclusiones clínicas continuas")
+    for title, body in conclusion_blocks_preview:
+        st.markdown(f"**{title}**")
+        st.write(body)
 
-final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
-st.markdown("---")
-st.markdown("### Fenotipo final de presión central")
-st.success(final_phenotype_preview)
-st.write(final_phenotype_text_preview)
-st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+    st.markdown("---")
+    st.markdown("### Gráficos")
+    st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
+        st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
+    with g2:
+        st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
+        st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
+
+    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+
+    final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
+    st.markdown("---")
+    st.markdown("### Fenotipo final de presión central")
+    st.success(final_phenotype_preview)
+    st.write(final_phenotype_text_preview)
+    st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+else:
+    st.warning("Carga obligatoria pendiente: archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin esa curva no se habilita el PDF final.")
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
 
 st.subheader("Historial y exportación")
 if st.button("Guardar en historial"):
@@ -1468,14 +1542,17 @@ if HISTORIAL_FILE.exists():
     st.dataframe(hist, use_container_width=True)
     st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
-if not pdf_download_bytes:
-    st.error("No se pudo generar el PDF médico integrado.")
+if wave_df is None:
+    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente. No se generará reporte con curvas simuladas.")
 else:
-    st.download_button(
-        "Generar y descargar PDF médico integrado",
-        data=pdf_download_bytes,
-        file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
-        mime="application/pdf"
-    )
+    pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
+    pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
+    if not pdf_download_bytes:
+        st.error("No se pudo generar el PDF médico integrado.")
+    else:
+        st.download_button(
+            "Generar y descargar PDF médico integrado",
+            data=pdf_download_bytes,
+            file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+            mime="application/pdf"
+        )
