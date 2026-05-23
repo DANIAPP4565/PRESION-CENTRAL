@@ -100,17 +100,86 @@ def to_float(x):
 
 
 
-def read_curve_file_robust(uploaded_file):
-    """Lee CSV/TXT de curva sin fallar por codificación ni por formato irregular.
 
-    Soporta:
-    - UTF-8, UTF-8-SIG, CP1252, Latin-1, ISO-8859-1.
-    - CSV con coma, punto y coma, tabulador o espacios.
-    - Archivos TXT sin encabezado.
-    - Archivos con una sola columna de presión.
-    - Archivos con texto del equipo mezclado con números.
-    - Decimales con coma o punto.
-    Devuelve DataFrame normalizado: tiempo_ms, presion_mmHg.
+def is_physiologic_waveform(df, row=None):
+    """Valida que la curva tenga morfología fisiológica y no sea una tabla de métricas mal leída."""
+    try:
+        if df is None or len(df) < 20:
+            return False, "menos de 20 puntos útiles"
+        t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+        p = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(t) & np.isfinite(p)
+        t, p = t[ok], p[ok]
+        if len(p) < 20:
+            return False, "menos de 20 pares tiempo-presión"
+        if np.nanmax(t) - np.nanmin(t) < 250:
+            return False, "duración menor a 250 ms"
+        pmin, pmax = float(np.nanmin(p)), float(np.nanmax(p))
+        pp = pmax - pmin
+        if not (35 <= pmin <= 140 and 70 <= pmax <= 240 and 10 <= pp <= 120):
+            return False, f"rango no fisiológico: mínimo {pmin:.1f}, máximo {pmax:.1f}"
+        # Evitar curvas con saltos erráticos como las de la captura.
+        dif = np.abs(np.diff(p))
+        if len(dif) > 0 and np.nanpercentile(dif, 95) > max(18, 0.45 * pp):
+            return False, "saltos bruscos no compatibles con onda de presión central"
+        # Debe tener un ascenso sistólico claro.
+        peak_i = int(np.nanargmax(p))
+        if peak_i < 2 or peak_i > int(len(p) * 0.75):
+            return False, "pico sistólico mal ubicado"
+        if (pmax - p[0]) < 0.35 * pp:
+            return False, "no hay ascenso sistólico claro"
+        return True, "curva fisiológica"
+    except Exception as e:
+        return False, str(e)
+
+
+def calibrate_waveform_to_metrics(wave_df, row):
+    """Escala la curva para que coincida exactamente con PAD/PAS central del estudio."""
+    df = wave_df.copy()
+    df.columns = ["tiempo_ms", "presion_central_mmHg"]
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    df = df.sort_values("tiempo_ms").drop_duplicates("tiempo_ms").reset_index(drop=True)
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    if np.isnan(pas) or pas <= 0:
+        pas = float(df["presion_central_mmHg"].max())
+    if np.isnan(pad) or pad <= 0:
+        pad = float(df["presion_central_mmHg"].min())
+    if pas <= pad:
+        pas = pad + max(25.0, to_float(row.get("pp_central")) if not np.isnan(to_float(row.get("pp_central"))) else 35.0)
+
+    y = pd.to_numeric(df["presion_central_mmHg"], errors="coerce").to_numpy(dtype=float)
+    y = pd.Series(y).interpolate(limit_direction="both").to_numpy(dtype=float)
+
+    # Suavizado conservador para preservar morfología y quitar dientes del TXT/CSV.
+    if len(y) >= 9:
+        win = max(5, min(31, (len(y)//20)*2 + 1))
+        y = pd.Series(y).rolling(win, center=True, min_periods=1).median().to_numpy()
+        y = pd.Series(y).rolling(win, center=True, min_periods=1).mean().to_numpy()
+
+    ymin, ymax = float(np.nanmin(y)), float(np.nanmax(y))
+    if ymax - ymin < 1:
+        return make_waveform(row)
+
+    ycal = pad + (y - ymin) * (pas - pad) / (ymax - ymin)
+
+    t = pd.to_numeric(df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    t = pd.Series(t).interpolate(limit_direction="both").to_numpy(dtype=float)
+    if np.nanmax(t) - np.nanmin(t) <= 0:
+        t = np.linspace(0, 1000, len(ycal))
+    else:
+        t = (t - np.nanmin(t)) / (np.nanmax(t) - np.nanmin(t)) * 1000.0
+
+    return pd.DataFrame({"tiempo_ms": t, "presion_central_mmHg": ycal})
+
+
+def read_curve_file_robust(uploaded_file, row=None):
+    """Lee CSV/TXT de curva y rechaza tablas de métricas mal interpretadas como curva.
+
+    Acepta columnas nombradas como tiempo/time/ms y presión/pressure/PAC/mmHg.
+    También acepta TXT/CSV sin encabezado si contiene una serie real de al menos 20-50 puntos.
+    Si el archivo no contiene una curva fisiológica, se usa curva sintética calibrada.
     """
     raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
 
@@ -128,176 +197,147 @@ def read_curve_file_robust(uploaded_file):
     if not text:
         raise ValueError("El archivo de curva está vacío.")
 
-    # 1) Intento estructurado: CSV/TXT con separadores habituales.
+    candidates = []
+
+    # CSV/TXT estructurado con separadores habituales.
     for sep in (None, ";", ",", "\t", r"\s+"):
         try:
-            df = pd.read_csv(
-                io.StringIO(text),
-                sep=sep,
-                engine="python",
-                decimal=",",
-                on_bad_lines="skip"
-            )
-            if df is not None and df.shape[0] >= 3:
+            df = pd.read_csv(io.StringIO(text), sep=sep, engine="python", decimal=",", on_bad_lines="skip")
+            if df is not None and df.shape[0] >= 20:
                 try:
-                    return normalize_wave_dataframe(df)
+                    candidates.append(normalize_wave_dataframe(df))
                 except Exception:
                     pass
         except Exception:
             pass
 
-    # 2) Intento sin encabezado: todas las líneas con números.
+    # Sin encabezado: solo si hay muchos pares y tiempo monótono.
     numeric_rows = []
     for line in text.splitlines():
         nums = re.findall(r"[-+]?\d+(?:[\.,]\d+)?", line)
-        if nums:
-            numeric_rows.append([to_float(n) for n in nums if not np.isnan(to_float(n))])
+        vals = [to_float(n) for n in nums]
+        vals = [v for v in vals if not np.isnan(v)]
+        if vals:
+            numeric_rows.append(vals)
 
-    # 2a) Pares tiempo-presión en líneas.
-    pair_rows = []
-    for row in numeric_rows:
-        if len(row) >= 2:
-            pair_rows.append([row[0], row[1]])
-    if len(pair_rows) >= 3:
+    pair_rows = [r[:2] for r in numeric_rows if len(r) >= 2]
+    if len(pair_rows) >= 20:
         try:
-            return normalize_wave_dataframe(pd.DataFrame(pair_rows, columns=["tiempo_ms", "presion_mmHg"]))
+            candidates.append(normalize_wave_dataframe(pd.DataFrame(pair_rows, columns=["tiempo_ms", "presion_mmHg"])))
         except Exception:
             pass
 
-    # 2b) Secuencia larga de presiones sin tiempo: una presión por línea o vector.
+    # Una columna / vector de presión: solo si hay suficientes puntos fisiológicos.
     flat = []
-    for row in numeric_rows:
-        flat.extend(row)
+    for r in numeric_rows:
+        if len(r) == 1:
+            flat.append(r[0])
+    if len(flat) >= 50:
+        pressure_like = [v for v in flat if 35 <= v <= 240]
+        if len(pressure_like) >= 50:
+            candidates.append(pd.DataFrame({"tiempo_ms": np.linspace(0, 1000, len(pressure_like)), "presion_central_mmHg": pressure_like}))
 
-    # Filtra valores fisiológicos compatibles con presión arterial de curva.
-    pressure_like = [v for v in flat if 20 <= v <= 260]
-    if len(pressure_like) >= 8:
-        tiempo = np.linspace(0, 1000, len(pressure_like))
-        return pd.DataFrame({"tiempo_ms": tiempo, "presion_mmHg": pressure_like})
+    errors = []
+    for cand in candidates:
+        cand = calibrate_waveform_to_metrics(cand, row or {})
+        ok, msg = is_physiologic_waveform(cand, row)
+        if ok:
+            return cand
+        errors.append(msg)
 
-    raise ValueError(
-        "No se pudieron reconocer columnas de tiempo y presión en el archivo CSV/TXT. "
-        "El lector acepta columnas como tiempo/time/ms/x y presión/pressure/PAC/mmHg/y, "
-        "o una secuencia simple de valores de presión."
-    )
+    raise ValueError("El archivo no contiene una curva de presión central fisiológica reconocible. " + ("; ".join(errors[:3]) if errors else ""))
 
 
 def normalize_wave_dataframe(df):
-    """Normaliza cualquier tabla de curva a tiempo_ms/presion_mmHg."""
+    """Normaliza cualquier tabla de curva a tiempo_ms/presion_central_mmHg."""
     df = df.copy()
 
-    # Si pandas tomó todo como una única columna con separadores internos, reintentar expandir.
     if df.shape[1] == 1:
         col = df.columns[0]
         joined = "\n".join(df[col].astype(str).tolist())
         for sep in (";", ",", "\t", r"\s+"):
             try:
                 tmp = pd.read_csv(io.StringIO(joined), sep=sep, engine="python", header=None, on_bad_lines="skip")
-                if tmp.shape[1] >= 2 and tmp.shape[0] >= 3:
+                if tmp.shape[1] >= 2 and tmp.shape[0] >= 20:
                     df = tmp
                     break
             except Exception:
                 pass
 
-    original_cols = list(df.columns)
     df.columns = [str(c).strip().lower() for c in df.columns]
 
-    # Convertir todo lo posible a numérico.
     num = pd.DataFrame()
     for c in df.columns:
         num[c] = df[c].map(to_float)
 
-    valid_numeric_cols = [c for c in num.columns if num[c].notna().sum() >= 3]
+    valid_numeric_cols = [c for c in num.columns if num[c].notna().sum() >= 20]
+    if len(valid_numeric_cols) < 2:
+        # una sola columna con presión
+        valid_one = [c for c in num.columns if num[c].notna().sum() >= 50]
+        if len(valid_one) == 1:
+            pressure = num[valid_one[0]].dropna().astype(float)
+            pressure = pressure[(pressure >= 35) & (pressure <= 240)]
+            if len(pressure) >= 50:
+                return pd.DataFrame({"tiempo_ms": np.linspace(0, 1000, len(pressure)), "presion_central_mmHg": pressure.values})
+        raise ValueError("No se detectaron columnas de curva con suficientes puntos.")
 
-    if len(valid_numeric_cols) >= 2:
-        time_candidates = [
-            c for c in valid_numeric_cols
-            if any(k in str(c).lower() for k in ["tiempo", "time", "ms", "mseg", "miliseg", "seg", "sec", "x"])
-        ]
-        pressure_candidates = [
-            c for c in valid_numeric_cols
-            if any(k in str(c).lower() for k in ["pres", "pressure", "pao", "pac", "central", "mmhg", "aort", "y"])
-        ]
+    time_keys = ["tiempo", "time", "ms", "mseg", "miliseg", "seg", "sec", "x"]
+    press_keys = ["pres", "pressure", "pao", "pac", "central", "mmhg", "aort", "ao", "y"]
 
-        # Si no hay nombres claros, detectar por comportamiento:
-        # tiempo = columna más monótonamente creciente; presión = rango fisiológico arterial.
-        if time_candidates:
-            tcol = time_candidates[0]
-        else:
-            monotonic_scores = {}
-            for c in valid_numeric_cols:
-                s = num[c].dropna().astype(float)
-                if len(s) >= 3:
-                    diffs = np.diff(s.values)
-                    monotonic_scores[c] = np.mean(diffs >= 0)
-            tcol = max(monotonic_scores, key=monotonic_scores.get)
+    time_candidates = [c for c in valid_numeric_cols if any(k in str(c).lower() for k in time_keys)]
+    pressure_candidates = [c for c in valid_numeric_cols if any(k in str(c).lower() for k in press_keys)]
 
-        pcol = None
-        for c in pressure_candidates:
-            if c != tcol:
-                pcol = c
-                break
-
-        if pcol is None:
-            candidates = []
-            for c in valid_numeric_cols:
-                if c == tcol:
-                    continue
-                s = num[c].dropna().astype(float)
-                if len(s) >= 3:
-                    med = float(np.nanmedian(s))
-                    amp = float(np.nanmax(s) - np.nanmin(s))
-                    # presión arterial central/radial plausible
-                    score = 0
-                    if 40 <= med <= 180:
-                        score += 2
-                    if 10 <= amp <= 140:
-                        score += 1
-                    candidates.append((score, c))
-            if candidates:
-                pcol = sorted(candidates, reverse=True)[0][1]
-            else:
-                pcol = [c for c in valid_numeric_cols if c != tcol][0]
-
-        out = pd.DataFrame({
-            "tiempo_ms": num[tcol],
-            "presion_mmHg": num[pcol],
-        }).dropna()
-
-    elif len(valid_numeric_cols) == 1:
-        # Una sola columna numérica: interpretarla como presión y generar tiempo 0-1000 ms.
-        pcol = valid_numeric_cols[0]
-        pressure = num[pcol].dropna().astype(float)
-        pressure = pressure[(pressure >= 20) & (pressure <= 260)]
-        if len(pressure) < 3:
-            raise ValueError("La columna única no contiene suficientes valores fisiológicos de presión.")
-        out = pd.DataFrame({
-            "tiempo_ms": np.linspace(0, 1000, len(pressure)),
-            "presion_mmHg": pressure.values,
-        })
+    if time_candidates:
+        tcol = time_candidates[0]
     else:
-        raise ValueError("No se detectaron columnas numéricas válidas en el archivo de curva.")
+        # Escoger columna más monótona y con rango compatible con tiempo.
+        scores = {}
+        for c in valid_numeric_cols:
+            s = num[c].dropna().astype(float).to_numpy()
+            diffs = np.diff(s)
+            mono = np.mean(diffs >= 0)
+            rng = np.nanmax(s) - np.nanmin(s)
+            scores[c] = mono + (0.5 if rng >= 250 else 0)
+        tcol = max(scores, key=scores.get)
 
-    out = out.sort_values("tiempo_ms").drop_duplicates("tiempo_ms")
-    out = out.replace([np.inf, -np.inf], np.nan).dropna()
+    pcol = None
+    for c in pressure_candidates:
+        if c != tcol:
+            pcol = c
+            break
 
-    if len(out) < 3:
-        raise ValueError("La curva debe tener al menos 3 pares válidos de tiempo-presión.")
+    if pcol is None:
+        # Escoger columna con rango de presión fisiológico.
+        ranked = []
+        for c in valid_numeric_cols:
+            if c == tcol:
+                continue
+            s = num[c].dropna().astype(float)
+            med = float(np.nanmedian(s)); rng = float(np.nanmax(s)-np.nanmin(s))
+            score = 0
+            if 50 <= med <= 160: score += 2
+            if 10 <= rng <= 120: score += 2
+            ranked.append((score, c))
+        if not ranked:
+            raise ValueError("No se detectó columna de presión.")
+        pcol = sorted(ranked, reverse=True)[0][1]
 
-    # Si el tiempo parece estar en segundos, pasarlo a ms.
+    out = pd.DataFrame({"tiempo_ms": num[tcol], "presion_central_mmHg": num[pcol]}).dropna()
+    out = out.sort_values("tiempo_ms").drop_duplicates("tiempo_ms").reset_index(drop=True)
+
+    if len(out) < 20:
+        raise ValueError("Curva con menos de 20 puntos válidos.")
+
     if out["tiempo_ms"].max() <= 5:
-        out["tiempo_ms"] = out["tiempo_ms"] * 1000.0
+        out["tiempo_ms"] *= 1000.0
 
-    # Si el tiempo no cubre un ciclo razonable, reescalar a 0-1000 ms preservando forma.
-    if out["tiempo_ms"].max() - out["tiempo_ms"].min() <= 0:
+    tmin, tmax = out["tiempo_ms"].min(), out["tiempo_ms"].max()
+    if tmax - tmin <= 0:
         out["tiempo_ms"] = np.linspace(0, 1000, len(out))
-    else:
-        tmin = out["tiempo_ms"].min()
-        tmax = out["tiempo_ms"].max()
-        if tmax > 5000 or tmax < 100:
-            out["tiempo_ms"] = (out["tiempo_ms"] - tmin) / (tmax - tmin) * 1000.0
+    elif tmax > 5000 or tmax < 250:
+        out["tiempo_ms"] = (out["tiempo_ms"] - tmin) / (tmax - tmin) * 1000.0
 
-    return out.reset_index(drop=True)
+    return out
 
 def extract_pdf_text(pdf_bytes):
     text = ""
@@ -404,19 +444,49 @@ def central_diagnosis(row):
     if not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25: risk.append("índice de aumentación elevado")
     return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
 
+
 def make_waveform(row, n=512):
-    cSBP = to_float(row.get("pas_central")); cDBP = to_float(row.get("pad_central"));
-    if np.isnan(cSBP): cSBP = 120
-    if np.isnan(cDBP): cDBP = 80
-    t = np.linspace(0, 1, n)
+    """Curva sintética fisiológica calibrada exactamente con PAS/PAD central del estudio."""
+    cSBP = to_float(row.get("pas_central"))
+    cDBP = to_float(row.get("pad_central"))
+    pp_c = to_float(row.get("pp_central"))
+    au = to_float(row.get("au"))
+    iau = to_float(row.get("iau"))
+    pe = to_float(row.get("pe"))
+
+    if np.isnan(cSBP) or cSBP <= 0:
+        cSBP = 120.0
+    if np.isnan(cDBP) or cDBP <= 0:
+        cDBP = 80.0
+    if cSBP <= cDBP:
+        if not np.isnan(pp_c) and pp_c > 10:
+            cSBP = cDBP + pp_c
+        else:
+            cSBP = cDBP + 35.0
+
     pp = cSBP - cDBP
-    # Onda sintética didáctica, reemplazable por CSV real de presión central.
-    primary = np.exp(-((t-0.22)/0.10)**2)
-    reflected = 0.35*np.exp(-((t-0.42)/0.13)**2)
-    diast = 0.20*np.exp(-((t-0.68)/0.23)**2)
-    raw = primary + reflected + diast
-    p = cDBP + pp*(raw - raw.min())/(raw.max()-raw.min())
-    return pd.DataFrame({"tiempo_ms": t*1000, "presion_central_mmHg": p})
+    t = np.linspace(0, 1, n)
+
+    # Morfología: ascenso sistólico rápido, hombro/onda reflejada y descenso diastólico.
+    peak_t = 0.22
+    refl_t = 0.40 + (0.04 if not np.isnan(pe) and pe < 35 else 0.0)
+    refl_amp = 0.22
+    if not np.isnan(iau):
+        refl_amp = np.clip(iau / 70.0, 0.12, 0.45)
+    if not np.isnan(au) and au > 0:
+        refl_amp = np.clip(au / max(pp, 1), 0.10, 0.45)
+
+    primary = np.exp(-((t - peak_t) / 0.095) ** 2)
+    reflected = refl_amp * np.exp(-((t - refl_t) / 0.125) ** 2)
+    diastolic_tail = 0.18 * np.exp(-((t - 0.68) / 0.27) ** 2)
+    runoff = 0.08 * (1 - t)
+
+    raw = primary + reflected + diastolic_tail + runoff
+    p = cDBP + pp * (raw - raw.min()) / (raw.max() - raw.min())
+
+    # Fijar exactamente PAD y PAS del estudio.
+    p = cDBP + (p - p.min()) * (cSBP - cDBP) / (p.max() - p.min())
+    return pd.DataFrame({"tiempo_ms": t * 1000, "presion_central_mmHg": p})
 
 def harmonic_analysis(wave_df):
     y = wave_df.iloc[:,1].astype(float).to_numpy()
@@ -444,10 +514,15 @@ def plot_pressure_comparison(row):
     ax.set_xticks(x); ax.set_xticklabels(labels); ax.set_ylabel("mmHg"); ax.set_title("Presiones periféricas vs centrales"); ax.legend(); ax.grid(axis="y", alpha=.25)
     return fig_to_png(fig)
 
+
 def plot_waveform(wave_df):
     fig, ax = plt.subplots(figsize=(7,4))
-    ax.plot(wave_df.iloc[:,0], wave_df.iloc[:,1], linewidth=2)
-    ax.set_xlabel("Tiempo (ms)"); ax.set_ylabel("Presión central (mmHg)"); ax.set_title("Onda de presión aórtica central")
+    x = pd.to_numeric(wave_df.iloc[:,0], errors="coerce")
+    y = pd.to_numeric(wave_df.iloc[:,1], errors="coerce")
+    ax.plot(x, y, color="red", linewidth=2.4)
+    ax.set_xlabel("Tiempo (ms)")
+    ax.set_ylabel("Presión central (mmHg)")
+    ax.set_title("Onda de presión aórtica central")
     ax.grid(alpha=.25)
     return fig_to_png(fig)
 
@@ -481,16 +556,25 @@ def plot_clinical_gauges(row, ppa):
     ax.grid(axis="x", alpha=.25)
     return fig_to_png(fig)
 
+
 def build_pdf(row, wave_df, hdf, screenshot_png=None):
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=14*mm, leftMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        rightMargin=14*mm, leftMargin=14*mm,
+        topMargin=12*mm, bottomMargin=12*mm
+    )
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="Small", fontSize=8, leading=10))
-    styles.add(ParagraphStyle(name="TitlePAC", fontSize=16, leading=20, alignment=1, textColor=colors.HexColor("#17365D")))
+    if "Small" not in styles:
+        styles.add(ParagraphStyle(name="Small", fontSize=8, leading=10))
+    if "TitlePAC" not in styles:
+        styles.add(ParagraphStyle(name="TitlePAC", fontSize=16, leading=20, alignment=1, textColor=colors.HexColor("#17365D")))
+
     story = []
     story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL - INFORME MÉDICO INTEGRADO", styles["TitlePAC"]))
     story.append(Spacer(1, 5*mm))
+
     datos = [
         ["Paciente", row.get("paciente",""), "Estudio", row.get("estudio","")],
         ["Fecha", row.get("fecha",""), "Hora", row.get("hora","")],
@@ -498,8 +582,10 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ["Peso", row.get("peso",""), "Altura", row.get("altura","")],
         ["IMC", row.get("imc",""), "Medicación", row.get("medicacion","")],
     ]
-    story.append(Table(datos, colWidths=[28*mm,55*mm,28*mm,55*mm], style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EAF2F8")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
+    story.append(Table(datos, colWidths=[28*mm,55*mm,28*mm,55*mm],
+        style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EAF2F8")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
     story.append(Spacer(1, 4*mm))
+
     vals = [["Variable", "Radial/Braquial", "Central", "Unidad"],
             ["PAS", row.get("pas_radial"), row.get("pas_central"), "mmHg"],
             ["PAD", row.get("pad_radial"), row.get("pad_central"), "mmHg"],
@@ -511,12 +597,30 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["RVSE", "", row.get("rvse"), "%"],
             ["PE", "", row.get("pe"), "%"]]
     story.append(Paragraph("Valores hemodinámicos centrales", styles["Heading2"]))
-    story.append(Table(vals, colWidths=[40*mm,42*mm,42*mm,30*mm], style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9EAF7")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
+    story.append(Table(vals, colWidths=[40*mm,42*mm,42*mm,30*mm],
+        style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9EAF7")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
     story.append(Spacer(1, 4*mm))
-    conclusion = f"Diagnóstico: {dx} Categoría braquial: {cat}. Referencia central operativa P50: {ref if not np.isnan(ref) else 'no disponible'} mmHg. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg. PPA: {ppa:.2f} si disponible. Perfil agregado: {risk}."
+
+    conclusion = (
+        f"Diagnóstico: {dx}. Categoría braquial: {cat}. "
+        f"Referencia central operativa P50: {ref if not np.isnan(ref) else 'no disponible'} mmHg. "
+        f"Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg. "
+        f"PPA: {ppa:.2f} si disponible. Perfil agregado: {risk}."
+    )
     story.append(Paragraph("Conclusión clínica", styles["Heading2"]))
     story.append(Paragraph(conclusion, styles["BodyText"]))
     story.append(Spacer(1, 4*mm))
+
+    story.append(Paragraph("Interpretación de la curva", styles["Heading2"]))
+    story.append(Paragraph(
+        "La curva de presión aórtica central se representa en rojo y se calibra con los valores centrales "
+        "medidos del estudio. Si el archivo de curva importado no supera los controles de morfología fisiológica "
+        "(puntos suficientes, rango de presión, duración, ausencia de saltos bruscos y pico sistólico coherente), "
+        "la app utiliza una curva sintética fisiológica calibrada con PAS/PAD/PP central, Au e IAu para evitar "
+        "informes con ondas erráticas o no clínicas.",
+        styles["BodyText"]
+    ))
+
     for title, png in [
         ("Gráfico comparativo de presiones", plot_pressure_comparison(row)),
         ("Onda de presión central", plot_waveform(wave_df)),
@@ -524,17 +628,45 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ("Semaforización clínica", plot_clinical_gauges(row, ppa)),
     ]:
         story.append(KeepTogether([Paragraph(title, styles["Heading3"]), Image(png, width=170*mm, height=90*mm)]))
+        story.append(Spacer(1, 3*mm))
+
     story.append(PageBreak())
     story.append(Paragraph("Análisis armónico de la onda de presión central", styles["Heading2"]))
     story.append(Paragraph(
-        "Se calcula por transformada rápida de Fourier sobre la onda central importada o, "
-        "si no se adjunta curva digitalizada, sobre una curva sintética calibrada con la presión "
-        "sistólica central, presión diastólica central, presión de pulso, aumentación aórtica e "
-        "índice de aumentación del estudio. El análisis armónico se interpreta como una estimación "
-        "fisiológica de la distribución espectral de energía de la onda de presión central.",
-        styles["Normal"]
+        "Se calcula por transformada rápida de Fourier sobre la onda central importada y validada o, "
+        "si no se adjunta una curva digitalizada válida, sobre una curva sintética calibrada con la presión "
+        "sistólica central, presión diastólica central, presión de pulso, aumentación aórtica e índice de aumentación. "
+        "El análisis armónico se interpreta como una estimación fisiológica de la distribución espectral de energía "
+        "de la onda de presión central.",
+        styles["BodyText"]
     ))
-    
+    harm_table = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]]
+    for i, r in hdf.iterrows():
+        harm_table.append([str(i+1), f"{r.get('frecuencia_hz',0):.2f}", f"{r.get('amplitud',0):.3f}", f"{r.get('energia_relativa_%',0):.1f}"])
+    story.append(Table(harm_table, colWidths=[25*mm,40*mm,40*mm,50*mm],
+        style=[("GRID",(0,0),(-1,-1),.25,colors.grey), ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#EAF2F8")), ("FONT",(0,0),(-1,-1),"Helvetica",8)]))
+
+    if screenshot_png:
+        story.append(PageBreak())
+        story.append(Paragraph("Captura pantalla de mediciones - segunda hoja del estudio original", styles["Heading2"]))
+        story.append(Image(io.BytesIO(screenshot_png), width=170*mm, height=220*mm))
+
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph("Referencias bibliográficas", styles["Heading2"]))
+    refs = [
+        "Agabiti-Rosei E, et al. Central blood pressure measurements and antihypertensive therapy. Hypertension. 2007.",
+        "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos derivados de la onda del pulso. 2014.",
+        "SAHA. Manual de Mecánica Vascular. Grupo de Trabajo de Mecánica Vascular. 2024.",
+        "Westerhof BE, et al. Quantification of wave reflection in the human aorta from pressure alone. Hypertension. 2006.",
+        "Herbert A, et al. Establishing reference values for central blood pressure and amplification. Eur Heart J. 2014.",
+        "Huang QF, et al. Outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024.",
+    ]
+    for i, ref_txt in enumerate(refs, 1):
+        story.append(Paragraph(f"{i}. {ref_txt}", styles["Small"]))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
 
 def save_history(row):
     new = pd.DataFrame([row])
@@ -579,10 +711,10 @@ for i, f in enumerate(fields):
 
 if wave_file:
     try:
-        wave_df = read_curve_file_robust(wave_file)
+        wave_df = read_curve_file_robust(wave_file, row)
         st.success("Curva importada correctamente con lector robusto CSV/TXT.")
     except Exception as e:
-        st.error(f"No se pudo importar la curva. Se generará una curva sintética desde las métricas. Detalle: {e}")
+        st.warning(f"El archivo importado no contiene una curva válida. Se usará curva fisiológica calibrada con las métricas del estudio. Detalle: {e}")
         wave_df = make_waveform(row)
 else:
     wave_df = make_waveform(row)
