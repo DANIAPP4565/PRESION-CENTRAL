@@ -1152,6 +1152,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     return phenotype, text, table
 
 def build_pdf(row, wave_df, hdf, screenshot_png=None):
+    """Construye un PDF compacto, con conclusiones primero y luego grilla gráfica profesional."""
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
     conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
     final_phenotype, final_phenotype_text, final_phenotype_table = classify_central_pressure_phenotype(row, sep_metrics, hdf)
@@ -1159,37 +1160,37 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
-        rightMargin=13*mm, leftMargin=13*mm,
-        topMargin=23*mm, bottomMargin=15*mm
+        rightMargin=11*mm, leftMargin=11*mm,
+        topMargin=21*mm, bottomMargin=13*mm
     )
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
         name="SmallPAC", parent=styles["BodyText"], fontName="Helvetica",
-        fontSize=7.5, leading=9.2, textColor=colors.HexColor("#263238")
+        fontSize=7.2, leading=8.5, textColor=colors.HexColor("#263238")
     ))
     styles.add(ParagraphStyle(
         name="BodyPAC", parent=styles["BodyText"], fontName="Helvetica",
-        fontSize=8.7, leading=11.2, textColor=colors.HexColor("#1F2D3D"), spaceAfter=3
+        fontSize=8.3, leading=10.1, textColor=colors.HexColor("#1F2D3D"), spaceAfter=2
     ))
     styles.add(ParagraphStyle(
         name="ConclusionPAC", parent=styles["BodyText"], fontName="Helvetica",
-        fontSize=8.4, leading=10.7, textColor=colors.HexColor("#1F2D3D"), spaceAfter=5
+        fontSize=8.15, leading=9.65, textColor=colors.HexColor("#1F2D3D"), spaceAfter=2
     ))
     styles.add(ParagraphStyle(
         name="TitlePAC", parent=styles["Title"], fontName="Helvetica-Bold",
-        fontSize=15.5, leading=19, alignment=1, textColor=colors.HexColor("#12355B"), spaceAfter=5
+        fontSize=14.7, leading=17.2, alignment=1, textColor=colors.HexColor("#12355B"), spaceAfter=2
     ))
     styles.add(ParagraphStyle(
         name="SectionPAC", parent=styles["Heading2"], fontName="Helvetica-Bold",
-        fontSize=10.5, leading=13, textColor=colors.white, leftIndent=0, spaceAfter=0
+        fontSize=9.8, leading=11.5, textColor=colors.white, spaceAfter=0
     ))
     styles.add(ParagraphStyle(
         name="H3PAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
-        fontSize=9, leading=11, textColor=colors.HexColor("#17365D"), spaceAfter=2
+        fontSize=8.15, leading=9.4, textColor=colors.HexColor("#17365D"), spaceAfter=1
     ))
     styles.add(ParagraphStyle(
         name="MiniTitlePAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
-        fontSize=8.8, leading=10.5, textColor=colors.HexColor("#12355B"), spaceBefore=2, spaceAfter=1
+        fontSize=8.25, leading=9.4, textColor=colors.HexColor("#12355B"), spaceBefore=1, spaceAfter=0
     ))
 
     def _fmt(v, dec=1):
@@ -1202,50 +1203,53 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             return safe_text(v)
 
     def _section(title):
-        return Table([[Paragraph(title, styles["SectionPAC"])]], colWidths=[184*mm], style=TableStyle([
+        return Table([[Paragraph(title, styles["SectionPAC"])]], colWidths=[188*mm], style=TableStyle([
             ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#17365D")),
-            ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#17365D")),
-            ("LEFTPADDING", (0,0), (-1,-1), 6),
-            ("RIGHTPADDING", (0,0), (-1,-1), 6),
-            ("TOPPADDING", (0,0), (-1,-1), 4),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("BOX", (0,0), (-1,-1), 0.35, colors.HexColor("#17365D")),
+            ("LEFTPADDING", (0,0), (-1,-1), 5),
+            ("RIGHTPADDING", (0,0), (-1,-1), 5),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
         ]))
 
-    def _table_style(header_color="#D9EAF7"):
+    def _table_style(header_color="#D9EAF7", font_size=7.2):
         return TableStyle([
             ("BACKGROUND", (0,0), (-1,0), colors.HexColor(header_color)),
             ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#17365D")),
-            ("FONT", (0,0), (-1,0), "Helvetica-Bold", 8),
-            ("FONT", (0,1), (-1,-1), "Helvetica", 7.6),
-            ("GRID", (0,0), (-1,-1), 0.25, colors.HexColor("#B0BEC5")),
+            ("FONT", (0,0), (-1,0), "Helvetica-Bold", font_size),
+            ("FONT", (0,1), (-1,-1), "Helvetica", font_size),
+            ("GRID", (0,0), (-1,-1), 0.22, colors.HexColor("#B0BEC5")),
             ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
             ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F7FAFC")]),
-            ("LEFTPADDING", (0,0), (-1,-1), 4),
-            ("RIGHTPADDING", (0,0), (-1,-1), 4),
-            ("TOPPADDING", (0,0), (-1,-1), 3),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ("LEFTPADDING", (0,0), (-1,-1), 3),
+            ("RIGHTPADDING", (0,0), (-1,-1), 3),
+            ("TOPPADDING", (0,0), (-1,-1), 2),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 2),
         ])
 
     def _header_footer(canvas, doc_obj):
         canvas.saveState()
         width, height = A4
         canvas.setFillColor(colors.HexColor("#12355B"))
-        canvas.rect(0, height-17*mm, width, 17*mm, stroke=0, fill=1)
+        canvas.rect(0, height-15*mm, width, 15*mm, stroke=0, fill=1)
         canvas.setFillColor(colors.white)
-        canvas.setFont("Helvetica-Bold", 9)
-        canvas.drawString(13*mm, height-10*mm, "PAC IA | Presión Aórtica Central")
-        canvas.setFont("Helvetica", 7.5)
-        canvas.drawRightString(width-13*mm, height-10*mm, datetime.now().strftime("%d/%m/%Y"))
+        canvas.setFont("Helvetica-Bold", 8.8)
+        canvas.drawString(11*mm, height-9*mm, "PAC IA | Presión Aórtica Central")
+        canvas.setFont("Helvetica", 7.2)
+        canvas.drawRightString(width-11*mm, height-9*mm, datetime.now().strftime("%d/%m/%Y"))
         canvas.setFillColor(colors.HexColor("#607D8B"))
-        canvas.setFont("Helvetica", 7)
-        canvas.drawString(13*mm, 8*mm, "Informe médico integrado - conclusiones continuas antes de gráficos")
-        canvas.drawRightString(width-13*mm, 8*mm, f"Página {doc_obj.page}")
+        canvas.setFont("Helvetica", 6.8)
+        canvas.drawString(11*mm, 7*mm, "Informe médico integrado - diseño compacto profesional")
+        canvas.drawRightString(width-11*mm, 7*mm, f"Página {doc_obj.page}")
         canvas.restoreState()
+
+    def _graph_cell(title, img, width=91*mm, height=50*mm):
+        return [Paragraph(title, styles["H3PAC"]), Image(img, width=width, height=height)]
 
     story = []
     story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL", styles["TitlePAC"]))
-    story.append(Paragraph("Informe médico integrado con conclusiones clínicas continuas y panel gráfico posterior", styles["BodyPAC"]))
-    story.append(Spacer(1, 3*mm))
+    story.append(Paragraph("Informe médico integrado con conclusiones clínicas continuas y panel gráfico compacto", styles["BodyPAC"]))
+    story.append(Spacer(1, 1.7*mm))
 
     story.append(_section("1. Datos del paciente y valores principales"))
     datos = [
@@ -1255,9 +1259,6 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ["Peso", _fmt(row.get("peso",""),1), "Altura", _fmt(row.get("altura",""),1)],
         ["IMC", _fmt(row.get("imc",""),1), "Medicación", safe_text(row.get("medicacion",""))],
     ]
-    story.append(Table(datos, colWidths=[28*mm, 59*mm, 28*mm, 69*mm], style=_table_style("#EAF2F8")))
-    story.append(Spacer(1, 2*mm))
-
     vals = [["Variable", "Radial/Braquial", "Central", "Unidad"],
             ["PAS", _fmt(row.get("pas_radial")), _fmt(row.get("pas_central")), "mmHg"],
             ["PAD", _fmt(row.get("pad_radial")), _fmt(row.get("pad_central")), "mmHg"],
@@ -1268,89 +1269,93 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["IAu", "", _fmt(row.get("iau")), "%"],
             ["RVSE", "", _fmt(row.get("rvse")), "%"],
             ["PE", "", _fmt(row.get("pe")), "%"]]
-    story.append(Table(vals, colWidths=[42*mm, 47*mm, 47*mm, 30*mm], style=_table_style()))
-    story.append(Spacer(1, 3*mm))
+    patient_table = Table(datos, colWidths=[22*mm, 54*mm, 22*mm, 42*mm], style=_table_style("#EAF2F8", 6.9))
+    values_table = Table(vals, colWidths=[20*mm, 24*mm, 23*mm, 16*mm], style=_table_style("#D9EAF7", 6.9))
+    story.append(Table([[patient_table, values_table]], colWidths=[101*mm, 87*mm], style=TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 2),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ])))
+    story.append(Spacer(1, 1.8*mm))
 
     story.append(_section("2. Conclusiones clínicas continuas"))
-    # Caja clínica continua: las cuatro conclusiones van juntas, antes de cualquier gráfico.
     conclusion_rows = []
     for title, body in conclusion_blocks:
         conclusion_rows.append([Paragraph(title, styles["MiniTitlePAC"])])
         conclusion_rows.append([Paragraph(body, styles["ConclusionPAC"])])
-    story.append(Table(conclusion_rows, colWidths=[184*mm], style=TableStyle([
+    story.append(Table(conclusion_rows, colWidths=[188*mm], style=TableStyle([
         ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
-        ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#90A4AE")),
-        ("INNERGRID", (0,0), (-1,-1), 0.15, colors.HexColor("#ECEFF1")),
+        ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
+        ("INNERGRID", (0,0), (-1,-1), 0.12, colors.HexColor("#ECEFF1")),
         ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (-1,-1), 7),
-        ("RIGHTPADDING", (0,0), (-1,-1), 7),
-        ("TOPPADDING", (0,0), (-1,-1), 4),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ("LEFTPADDING", (0,0), (-1,-1), 5),
+        ("RIGHTPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 2.4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
     ])))
 
-    story.append(PageBreak())
+    # Sin salto forzado: ReportLab decide el pase de página y evita blancos grandes.
+    story.append(Spacer(1, 2.5*mm))
     story.append(_section("3. Gráficos del informe"))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1.5*mm))
     story.append(KeepTogether([
-        Paragraph("Presión aórtica central con Pf y Pb superpuestas", styles["H3PAC"]),
-        Image(plot_wave_separation(sep_df), width=182*mm, height=101*mm)
+        Paragraph("Presión aórtica central con ondas Pf/Pb superpuestas", styles["H3PAC"]),
+        Image(plot_wave_separation(sep_df), width=188*mm, height=88*mm)
     ]))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1.5*mm))
 
-    img_w = 88*mm
-    img_h = 51*mm
-    graph_table = [
-        [Paragraph("Presiones periféricas vs centrales", styles["H3PAC"]), Paragraph("Onda de presión aórtica central", styles["H3PAC"])],
-        [Image(plot_pressure_comparison(row), width=img_w, height=img_h), Image(plot_waveform(wave_df), width=img_w, height=img_h)],
-        [Paragraph("Flujo aórtico estimado", styles["H3PAC"]), Paragraph("Análisis armónico", styles["H3PAC"])],
-        [Image(plot_aortic_flow(sep_df), width=img_w, height=img_h), Image(plot_harmonics(hdf), width=img_w, height=img_h)],
-        [Paragraph("Semaforización clínica", styles["H3PAC"]), ""],
-        [Image(plot_clinical_gauges(row, ppa), width=img_w, height=img_h), ""],
-    ]
-    story.append(Table(graph_table, colWidths=[92*mm, 92*mm], style=TableStyle([
+    img_w = 91*mm
+    img_h = 47*mm
+    graph_table = Table([
+        [_graph_cell("Presiones periféricas vs centrales", plot_pressure_comparison(row), img_w, img_h),
+         _graph_cell("Onda de presión aórtica central", plot_waveform(wave_df), img_w, img_h)],
+        [_graph_cell("Flujo aórtico estimado", plot_aortic_flow(sep_df), img_w, img_h),
+         _graph_cell("Análisis armónico", plot_harmonics(hdf), img_w, img_h)],
+        [_graph_cell("Semaforización clínica", plot_clinical_gauges(row, ppa), img_w, img_h),
+         [Paragraph("Fenotipo final de presión central", styles["H3PAC"]), Paragraph(final_phenotype, styles["BodyPAC"]), Paragraph(final_phenotype_text, styles["SmallPAC"])]],
+    ], colWidths=[94*mm, 94*mm], rowHeights=[59*mm, 59*mm, 59*mm], style=TableStyle([
         ("VALIGN", (0,0), (-1,-1), "TOP"),
         ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
         ("INNERGRID", (0,0), (-1,-1), 0.15, colors.HexColor("#ECEFF1")),
-        ("LEFTPADDING", (0,0), (-1,-1), 4),
-        ("RIGHTPADDING", (0,0), (-1,-1), 4),
-        ("TOPPADDING", (0,0), (-1,-1), 3),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-    ])))
+        ("LEFTPADDING", (0,0), (-1,-1), 3),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 2),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ]))
+    story.append(graph_table)
 
-    story.append(PageBreak())
-    story.append(_section("4. Tabla de análisis armónico"))
+    story.append(Spacer(1, 2.5*mm))
+    story.append(_section("4. Tabla de análisis armónico y fenotipo final"))
     harm_table = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]]
     for i, r in hdf.iterrows():
         harm_table.append([str(i+1), f"{r.get('frecuencia_hz',0):.2f}", f"{r.get('amplitud',0):.3f}", f"{r.get('energia_relativa_%',0):.1f}"])
-    story.append(Table(harm_table, colWidths=[30*mm, 45*mm, 45*mm, 55*mm], style=_table_style("#EAF2F8")))
-    story.append(Spacer(1, 4*mm))
+    phenotype_rows = [[Paragraph(str(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in final_phenotype_table]
+    story.append(Table([
+        [Table(harm_table, colWidths=[18*mm, 25*mm, 24*mm, 28*mm], style=_table_style("#EAF2F8", 6.6)),
+         Table(phenotype_rows, colWidths=[31*mm, 14*mm, 42*mm], style=_table_style("#D9EAF7", 6.4))]
+    ], colWidths=[98*mm, 90*mm], style=TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 2),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ])))
+    story.append(Spacer(1, 1.5*mm))
     story.append(Paragraph(
-        "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. En el gráfico integrado, Pf y Pb se muestran sobre la línea diastólica basal para permitir comparación directa con la presión aórtica central completa.",
+        "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. Pf y Pb se muestran sobre la línea diastólica basal para comparar directamente su contribución con la presión aórtica central completa. El fenotipo final integra presión/carga pulsátil central, magnitud y temporalidad de onda retrógrada, y complejidad armónica.",
         styles["SmallPAC"]
     ))
 
     if screenshot_png:
         story.append(PageBreak())
         story.append(_section("5. Captura pantalla de mediciones"))
-        story.append(Spacer(1, 3*mm))
-        story.append(Image(io.BytesIO(screenshot_png), width=170*mm, height=220*mm))
+        story.append(Spacer(1, 2*mm))
+        story.append(Image(io.BytesIO(screenshot_png), width=182*mm, height=215*mm))
 
-    story.append(PageBreak())
-    story.append(_section("6. Fenotipo final de presión central"))
     story.append(Spacer(1, 3*mm))
-    story.append(Paragraph(final_phenotype, styles["H3PAC"]))
-    story.append(Paragraph(final_phenotype_text, styles["BodyPAC"]))
-    story.append(Spacer(1, 3*mm))
-    phenotype_rows = [[Paragraph(str(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in final_phenotype_table]
-    story.append(Table(phenotype_rows, colWidths=[45*mm, 22*mm, 108*mm], style=_table_style("#D9EAF7")))
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph(
-        "Criterio operativo: el fenotipo final integra tres dimensiones complementarias: presión/carga pulsátil central, magnitud y temporalidad de la onda retrógrada, y complejidad armónica de la señal. No reemplaza el juicio clínico ni la validación del trazado original.",
-        styles["SmallPAC"]
-    ))
-
-    story.append(PageBreak())
-    story.append(_section("7. Referencias bibliográficas"))
+    story.append(_section("6. Referencias bibliográficas"))
     refs = [
         "Agabiti-Rosei E, et al. Central blood pressure measurements and antihypertensive therapy. Hypertension. 2007.",
         "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos derivados de la onda del pulso. 2014.",
@@ -1359,22 +1364,19 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         "Herbert A, et al. Establishing reference values for central blood pressure and amplification. Eur Heart J. 2014.",
         "Huang QF, et al. Outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024.",
     ]
-    for i, ref_txt in enumerate(refs, 1):
-        story.append(Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"]))
+    ref_table = [[Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"])] for i, ref_txt in enumerate(refs, 1)]
+    story.append(Table(ref_table, colWidths=[188*mm], style=TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FAFAFA")),
+        ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 1.6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 1.6),
+    ])))
 
     doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
     buf.seek(0)
     return buf.getvalue()
-
-def save_history(row):
-    new = pd.DataFrame([row])
-    if HISTORIAL_FILE.exists():
-        old = pd.read_excel(HISTORIAL_FILE)
-        out = pd.concat([old, new], ignore_index=True)
-    else:
-        out = new
-    out.to_excel(HISTORIAL_FILE, index=False)
-    return out
 
 st.title(APP_TITLE)
 st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
