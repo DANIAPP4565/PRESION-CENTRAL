@@ -864,10 +864,150 @@ def plot_clinical_gauges(row, ppa):
     return fig_to_png(fig)
 
 
-def build_pdf(row, wave_df, hdf, screenshot_png=None):
+
+def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
+    """Conclusión textual continua del bloque de presión central y métricas."""
+    pas_c = to_float(row.get("pas_central")); pad_c = to_float(row.get("pad_central")); pp_c = to_float(row.get("pp_central"))
+    pam_c = to_float(row.get("pam_central")); iau = to_float(row.get("iau")); au = to_float(row.get("au")); fc = to_float(row.get("fc"))
+
+    def fmt(v, dec=1):
+        try:
+            f = float(v)
+            if np.isnan(f): return "no disponible"
+            return f"{f:.{dec}f}"
+        except Exception:
+            return "no disponible"
+
+    pressure_flags = []
+    if not np.isnan(pas_c):
+        if pas_c >= 130:
+            pressure_flags.append("PAS central elevada por umbral operativo de 130 mmHg")
+        else:
+            pressure_flags.append("PAS central por debajo del umbral operativo de 130 mmHg")
+    if not np.isnan(pp_c):
+        if pp_c >= 50:
+            pressure_flags.append("presión de pulso central aumentada")
+        else:
+            pressure_flags.append("presión de pulso central no aumentada")
+    if not np.isnan(iau):
+        if iau >= 25:
+            pressure_flags.append("IAu elevado, compatible con mayor aumentación sistólica")
+        elif iau >= 10:
+            pressure_flags.append("IAu intermedio")
+        else:
+            pressure_flags.append("IAu bajo")
+    if not np.isnan(ppa):
+        if ppa < 1.30:
+            pressure_flags.append("amplificación de presión de pulso reducida")
+        else:
+            pressure_flags.append("amplificación de presión de pulso conservada")
+
+    return (
+        f"El análisis de presión central muestra PAS central {fmt(pas_c,0)} mmHg, PAD central {fmt(pad_c,0)} mmHg, "
+        f"PAM central {fmt(pam_c,0)} mmHg y PP central {fmt(pp_c,0)} mmHg. La categoría tensional periférica/braquial es {cat}. "
+        f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(ppa,2)}. "
+        f"Au: {fmt(au,1)} mmHg, IAu: {fmt(iau,1)}%, FC: {fmt(fc,0)} lpm. "
+        f"Conclusión operativa: {dx}. Perfil hemodinámico agregado: {risk}. "
+        f"Síntesis: {'; '.join(pressure_flags) if pressure_flags else 'sin marcadores suficientes para estratificación central completa'}."
+    )
+
+
+def interpret_harmonic_profile(hdf):
+    """Conclusión clínica simple del análisis armónico."""
+    try:
+        df = hdf.copy()
+        if df is None or len(df) == 0:
+            return "No fue posible calcular un perfil armónico interpretable por falta de datos válidos de la onda central."
+        e = pd.to_numeric(df.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+        f = pd.to_numeric(df.get("frecuencia_hz"), errors="coerce").to_numpy(dtype=float)
+        a = pd.to_numeric(df.get("amplitud"), errors="coerce").to_numpy(dtype=float)
+        if len(e) == 0 or np.all(~np.isfinite(e)):
+            return "No fue posible estimar la distribución espectral de energía de la onda central."
+        e1 = e[0] if len(e) > 0 and np.isfinite(e[0]) else np.nan
+        e2 = e[1] if len(e) > 1 and np.isfinite(e[1]) else np.nan
+        e_high = np.nansum(e[3:]) if len(e) > 4 else np.nan
+        dom_i = int(np.nanargmax(e)) if np.any(np.isfinite(e)) else 0
+        dom_freq = f[dom_i] if len(f) > dom_i and np.isfinite(f[dom_i]) else np.nan
+        dom_amp = a[dom_i] if len(a) > dom_i and np.isfinite(a[dom_i]) else np.nan
+
+        if not np.isnan(e_high) and e_high >= 25:
+            spectral_note = "mayor contenido de alta frecuencia, hallazgo compatible con morfología más abrupta o mayor complejidad de la onda de presión"
+        elif not np.isnan(e_high) and e_high >= 12:
+            spectral_note = "contenido de alta frecuencia intermedio"
+        else:
+            spectral_note = "predominio de componentes armónicos bajos, compatible con onda más suavizada"
+
+        return (
+            f"El análisis armónico muestra una energía relativa del primer armónico de {e1:.1f}% "
+            f"y del segundo armónico de {e2:.1f}% cuando está disponible. El armónico dominante se ubica en torno a "
+            f"{dom_freq:.2f} Hz, con amplitud {dom_amp:.3f}. La suma aproximada de armónicos altos desde el cuarto componente es "
+            f"{e_high:.1f}%. Interpretación: {spectral_note}. Este bloque debe interpretarse como complemento morfológico de la onda central, "
+            f"no como sustituto de la interpretación clínica de presión central, aumentación y separación de ondas."
+        )
+    except Exception:
+        return "El perfil armónico no pudo interpretarse en forma estable, aunque se conserva el gráfico y la tabla espectral para revisión visual."
+
+
+def build_continuous_conclusions(row, wave_df, hdf):
+    """Devuelve las cuatro conclusiones continuas solicitadas antes de los gráficos."""
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
     sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
     sep_interp = interpret_wave_separation(sep_metrics)
+
+    def fmt(v, dec=1):
+        try:
+            f = float(v)
+            if np.isnan(f): return "no disponible"
+            return f"{f:.{dec}f}"
+        except Exception:
+            return "no disponible"
+
+    c1 = interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk)
+
+    c2 = (
+        f"La separación de ondas estima un componente anterógrado Pf pico de {fmt(sep_metrics.get('pf_pico', np.nan),1)} mmHg "
+        f"y un componente retrógrado Pb pico de {fmt(sep_metrics.get('pb_pico', np.nan),1)} mmHg. "
+        f"La magnitud de reflexión RM Pb/Pf es {fmt(sep_metrics.get('rm', np.nan),2)}, el índice de reflexión RI es "
+        f"{fmt(sep_metrics.get('ri', np.nan),2)}, Tfor es {fmt(sep_metrics.get('tfor_ms', np.nan),0)} ms, "
+        f"Tref es {fmt(sep_metrics.get('tref_ms', np.nan),0)} ms y la relación Tfor/Tref es "
+        f"{fmt(sep_metrics.get('tfor_tref', np.nan),2)}. {sep_interp}"
+    )
+
+    c3 = interpret_harmonic_profile(hdf)
+
+    rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan)
+    pp_c = to_float(row.get("pp_central")); iau = to_float(row.get("iau")); pas_c = to_float(row.get("pas_central"))
+    integrated_flags = []
+    if not np.isnan(pas_c) and pas_c >= 130:
+        integrated_flags.append("presión central elevada")
+    if not np.isnan(pp_c) and pp_c >= 50:
+        integrated_flags.append("carga pulsátil central aumentada")
+    if not np.isnan(iau) and iau >= 25:
+        integrated_flags.append("aumentación sistólica elevada")
+    if not np.isnan(rm) and rm >= 0.45:
+        integrated_flags.append("reflexión de onda aumentada")
+    if not np.isnan(ri) and ri >= 0.32:
+        integrated_flags.append("mayor contribución retrógrada")
+    if not integrated_flags:
+        integrated_flags.append("sin marcadores mayores simultáneos de sobrecarga pulsátil central en los parámetros disponibles")
+
+    c4 = (
+        "La interpretación final integrada combina presión central, métricas de aumentación, separación Pf/Pb y análisis armónico. "
+        f"En este registro predominan los siguientes elementos: {', '.join(integrated_flags)}. "
+        "El resultado debe integrarse con edad, sexo, presión braquial, tratamiento, lesión de órgano blanco y contexto clínico. "
+        "La lectura más relevante es la concordancia entre presión central, carga pulsátil y temporalidad de la onda reflejada, porque esa combinación orienta el fenotipo vascular y la carga hemodinámica central."
+    )
+
+    return [
+        ("1. Análisis de presión central y métricas", c1),
+        ("2. Análisis de separación de ondas", c2),
+        ("3. Análisis de armónicos", c3),
+        ("4. Interpretación final integrada", c4),
+    ], sep_df, sep_metrics, sep_interp
+
+def build_pdf(row, wave_df, hdf, screenshot_png=None):
+    dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+    conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -885,6 +1025,10 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         fontSize=8.7, leading=11.2, textColor=colors.HexColor("#1F2D3D"), spaceAfter=3
     ))
     styles.add(ParagraphStyle(
+        name="ConclusionPAC", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8.4, leading=10.7, textColor=colors.HexColor("#1F2D3D"), spaceAfter=5
+    ))
+    styles.add(ParagraphStyle(
         name="TitlePAC", parent=styles["Title"], fontName="Helvetica-Bold",
         fontSize=15.5, leading=19, alignment=1, textColor=colors.HexColor("#12355B"), spaceAfter=5
     ))
@@ -895,6 +1039,10 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     styles.add(ParagraphStyle(
         name="H3PAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
         fontSize=9, leading=11, textColor=colors.HexColor("#17365D"), spaceAfter=2
+    ))
+    styles.add(ParagraphStyle(
+        name="MiniTitlePAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
+        fontSize=8.8, leading=10.5, textColor=colors.HexColor("#12355B"), spaceBefore=2, spaceAfter=1
     ))
 
     def _fmt(v, dec=1):
@@ -943,16 +1091,16 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         canvas.drawRightString(width-13*mm, height-10*mm, datetime.now().strftime("%d/%m/%Y"))
         canvas.setFillColor(colors.HexColor("#607D8B"))
         canvas.setFont("Helvetica", 7)
-        canvas.drawString(13*mm, 8*mm, "Informe médico integrado - análisis no invasivo de presión central y componentes de onda")
+        canvas.drawString(13*mm, 8*mm, "Informe médico integrado - conclusiones continuas antes de gráficos")
         canvas.drawRightString(width-13*mm, 8*mm, f"Página {doc_obj.page}")
         canvas.restoreState()
 
     story = []
     story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL", styles["TitlePAC"]))
-    story.append(Paragraph("Informe médico integrado con curvas individualizadas, flujo aórtico redondeado y separación Pf/Pb superpuesta", styles["BodyPAC"]))
+    story.append(Paragraph("Informe médico integrado con conclusiones clínicas continuas y panel gráfico posterior", styles["BodyPAC"]))
     story.append(Spacer(1, 3*mm))
 
-    story.append(_section("1. Datos del paciente y del estudio"))
+    story.append(_section("1. Datos del paciente y valores principales"))
     datos = [
         ["Paciente", safe_text(row.get("paciente","")), "Estudio", safe_text(row.get("estudio",""))],
         ["Fecha", safe_text(row.get("fecha","")), "Hora", safe_text(row.get("hora",""))],
@@ -961,25 +1109,8 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ["IMC", _fmt(row.get("imc",""),1), "Medicación", safe_text(row.get("medicacion",""))],
     ]
     story.append(Table(datos, colWidths=[28*mm, 59*mm, 28*mm, 69*mm], style=_table_style("#EAF2F8")))
-    story.append(Spacer(1, 3*mm))
+    story.append(Spacer(1, 2*mm))
 
-    story.append(_section("2. Resumen ejecutivo"))
-    resumen = [[
-        Paragraph(f"<b>Diagnóstico:</b> {dx}", styles["BodyPAC"]),
-        Paragraph(f"<b>Categoría braquial:</b> {cat}<br/><b>PPA:</b> {_fmt(ppa,2)}<br/><b>Perfil agregado:</b> {risk}", styles["BodyPAC"])
-    ]]
-    story.append(Table(resumen, colWidths=[112*mm, 72*mm], style=TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F4F8FB")),
-        ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#90A4AE")),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (-1,-1), 7),
-        ("RIGHTPADDING", (0,0), (-1,-1), 7),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-    ])))
-    story.append(Spacer(1, 3*mm))
-
-    story.append(_section("3. Valores hemodinámicos centrales"))
     vals = [["Variable", "Radial/Braquial", "Central", "Unidad"],
             ["PAS", _fmt(row.get("pas_radial")), _fmt(row.get("pas_central")), "mmHg"],
             ["PAD", _fmt(row.get("pad_radial")), _fmt(row.get("pad_central")), "mmHg"],
@@ -993,26 +1124,32 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     story.append(Table(vals, colWidths=[42*mm, 47*mm, 47*mm, 30*mm], style=_table_style()))
     story.append(Spacer(1, 3*mm))
 
-    story.append(_section("4. Separación de ondas superpuesta sobre la presión aórtica central"))
-    sep_text = (
-        f"Pf pico: {_fmt(sep_metrics.get('pf_pico', np.nan),1)} mmHg. "
-        f"Pb pico: {_fmt(sep_metrics.get('pb_pico', np.nan),1)} mmHg. "
-        f"RM: {_fmt(sep_metrics.get('rm', np.nan),2)}. "
-        f"RI: {_fmt(sep_metrics.get('ri', np.nan),2)}. "
-        f"Tfor: {_fmt(sep_metrics.get('tfor_ms', np.nan),0)} ms. "
-        f"Tref: {_fmt(sep_metrics.get('tref_ms', np.nan),0)} ms. "
-        f"Tfor/Tref: {_fmt(sep_metrics.get('tfor_tref', np.nan),2)}. "
-        f"Flujo pico estimado: {_fmt(sep_metrics.get('qp_ml_s', np.nan),0)} mL/s."
-    )
-    story.append(Paragraph(sep_text, styles["BodyPAC"]))
-    story.append(Paragraph(sep_interp, styles["BodyPAC"]))
+    story.append(_section("2. Conclusiones clínicas continuas"))
+    # Caja clínica continua: las cuatro conclusiones van juntas, antes de cualquier gráfico.
+    conclusion_rows = []
+    for title, body in conclusion_blocks:
+        conclusion_rows.append([Paragraph(title, styles["MiniTitlePAC"])])
+        conclusion_rows.append([Paragraph(body, styles["ConclusionPAC"])])
+    story.append(Table(conclusion_rows, colWidths=[184*mm], style=TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
+        ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#90A4AE")),
+        ("INNERGRID", (0,0), (-1,-1), 0.15, colors.HexColor("#ECEFF1")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 7),
+        ("RIGHTPADDING", (0,0), (-1,-1), 7),
+        ("TOPPADDING", (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ])))
+
+    story.append(PageBreak())
+    story.append(_section("3. Gráficos del informe"))
+    story.append(Spacer(1, 2*mm))
     story.append(KeepTogether([
         Paragraph("Presión aórtica central con Pf y Pb superpuestas", styles["H3PAC"]),
         Image(plot_wave_separation(sep_df), width=182*mm, height=101*mm)
     ]))
     story.append(Spacer(1, 2*mm))
 
-    story.append(_section("5. Panel gráfico integrado"))
     img_w = 88*mm
     img_h = 51*mm
     graph_table = [
@@ -1034,37 +1171,25 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     ])))
 
     story.append(PageBreak())
-    story.append(_section("6. Interpretación metodológica de la curva"))
-    story.append(Paragraph(
-        "La curva de presión aórtica central se calibra con los valores centrales medidos del estudio. "
-        "La separación de ondas es una estimación clínica no invasiva: Pf representa el componente anterógrado "
-        "dominante en el ascenso sistólico y Pb el componente retrógrado que se superpone al hombro sistólico/tardío. "
-        "En el gráfico integrado, Pf y Pb se muestran sobre la línea diastólica basal para facilitar la comparación directa "
-        "con la presión aórtica central completa.",
-        styles["BodyPAC"]
-    ))
-    story.append(Spacer(1, 3*mm))
-
-    story.append(_section("7. Análisis armónico de la onda de presión central"))
-    story.append(Paragraph(
-        "Se calcula por transformada rápida de Fourier sobre la onda central importada y validada o, si no se adjunta "
-        "una curva digitalizada válida, sobre una curva sintética calibrada con presión sistólica central, presión diastólica "
-        "central, presión de pulso, aumentación aórtica e índice de aumentación.",
-        styles["BodyPAC"]
-    ))
+    story.append(_section("4. Tabla de análisis armónico"))
     harm_table = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]]
     for i, r in hdf.iterrows():
         harm_table.append([str(i+1), f"{r.get('frecuencia_hz',0):.2f}", f"{r.get('amplitud',0):.3f}", f"{r.get('energia_relativa_%',0):.1f}"])
     story.append(Table(harm_table, colWidths=[30*mm, 45*mm, 45*mm, 55*mm], style=_table_style("#EAF2F8")))
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph(
+        "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. En el gráfico integrado, Pf y Pb se muestran sobre la línea diastólica basal para permitir comparación directa con la presión aórtica central completa.",
+        styles["SmallPAC"]
+    ))
 
     if screenshot_png:
         story.append(PageBreak())
-        story.append(_section("8. Captura pantalla de mediciones"))
+        story.append(_section("5. Captura pantalla de mediciones"))
         story.append(Spacer(1, 3*mm))
         story.append(Image(io.BytesIO(screenshot_png), width=170*mm, height=220*mm))
 
     story.append(PageBreak())
-    story.append(_section("9. Referencias bibliográficas"))
+    story.append(_section("6. Referencias bibliográficas"))
     refs = [
         "Agabiti-Rosei E, et al. Central blood pressure measurements and antihypertensive therapy. Hypertension. 2007.",
         "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos derivados de la onda del pulso. 2014.",
@@ -1136,6 +1261,7 @@ dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
 st.subheader("Vista clínica previa")
 sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
 summary_cols = st.columns(4)
 summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
@@ -1143,9 +1269,13 @@ summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmH
 summary_cols[2].metric("PPA", f"{ppa:.2f}")
 summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
 
-st.info(f"{dx} | Categoría braquial: {cat} | Amplificación PAS: {amp_sbp:.1f} mmHg | Perfil: {risk}")
+st.markdown("### Conclusiones clínicas continuas")
+for title, body in conclusion_blocks_preview:
+    st.markdown(f"**{title}**")
+    st.write(body)
 
-st.markdown("#### Curvas principales")
+st.markdown("---")
+st.markdown("### Gráficos")
 st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
 
 g1, g2 = st.columns(2)
@@ -1156,8 +1286,6 @@ with g2:
     st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
     st.image(plot_harmonics(hdf), caption="Armónicos de la onda central", use_container_width=True)
 
-st.markdown("#### Interpretación automática")
-st.info(interpret_wave_separation(sep_metrics_preview))
 st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
 
 st.subheader("Historial y exportación")
