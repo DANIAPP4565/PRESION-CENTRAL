@@ -5,4 +5,5 @@ matplotlib
 openpyxl
 reportlab
 pdfplumber
-pymupdf
+PyMuPDF
+Pillow
