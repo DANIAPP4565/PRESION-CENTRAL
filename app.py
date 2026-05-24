@@ -659,6 +659,182 @@ def _collapse_spaces(s):
     return re.sub(r"\s+", " ", safe_text(s)).strip()
 
 
+
+def _line_text_after_label(line_text, label_regex):
+    """Devuelve texto a la derecha de una etiqueta dentro de una línea visual."""
+    m = re.search(label_regex, line_text, flags=re.I)
+    if not m:
+        return ""
+    return _collapse_spaces(line_text[m.end():]).strip(" :#-")
+
+
+def _layout_lines_from_pdf(pdf_bytes, preferred_page_index=1):
+    """Extrae líneas visuales con coordenadas usando PyMuPDF.
+
+    Esto corrige el problema típico de pdfplumber en estos informes: mezcla columnas y
+    hace que Paciente tome valores de otra etiqueta como 'Número de estudio'.
+    """
+    if fitz is None or not pdf_bytes:
+        return []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_indices = []
+    if len(doc) > preferred_page_index:
+        page_indices.append(preferred_page_index)
+    page_indices += [i for i in range(len(doc)) if i not in page_indices]
+    all_lines = []
+    for pi in page_indices:
+        page = doc[pi]
+        words = page.get_text("words") or []
+        # words: x0, y0, x1, y1, text, block, line, word_no
+        grouped = {}
+        for w in words:
+            if len(w) < 8:
+                continue
+            x0, y0, x1, y1, txt, block, line, word_no = w[:8]
+            key = (pi, int(block), int(line))
+            grouped.setdefault(key, []).append((float(x0), float(y0), float(x1), float(y1), str(txt)))
+        for key, ws in grouped.items():
+            ws = sorted(ws, key=lambda z: z[0])
+            text = _collapse_spaces(" ".join(w[4] for w in ws))
+            if not text:
+                continue
+            x0 = min(w[0] for w in ws); y0 = min(w[1] for w in ws)
+            x1 = max(w[2] for w in ws); y1 = max(w[3] for w in ws)
+            all_lines.append({"page": key[0], "x0": x0, "y0": y0, "x1": x1, "y1": y1, "text": text, "words": ws})
+    all_lines.sort(key=lambda d: (d["page"], d["y0"], d["x0"]))
+    return all_lines
+
+
+def _numeric_values_in_text(txt):
+    return [to_float(x) for x in re.findall(r"[-+]?\d+(?:[\.,]\d+)?", txt)]
+
+
+def _extract_layout_fields_from_pdf(pdf_bytes):
+    """Extractor visual de cabecera y métricas desde el PDF original.
+
+    Prioriza la segunda página porque allí está el panel del estudio mostrado por el usuario.
+    Extrae paciente, estudio, demografía, tabla Radial/Central y aumentaciones desde líneas
+    visuales, no desde texto plano concatenado.
+    """
+    out = {}
+    lines = _layout_lines_from_pdf(pdf_bytes, preferred_page_index=1)
+    if not lines:
+        return out
+
+    # 1) Paciente y estudio por línea visual.
+    patient_candidates = []
+    for ln in lines:
+        txt = ln["text"]
+        if re.search(r"\bPaciente\b", txt, flags=re.I):
+            cand = _line_text_after_label(txt, r"\bPaciente\b")
+            cand = re.split(r"\b(?:Estudio\s*#?|N[úu]mero\s+de\s+estudio|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand, flags=re.I)[0]
+            cand = _clean_patient_name(cand)
+            if cand and not _is_bad_patient_value(cand):
+                # preferir nombres con al menos dos tokens alfabéticos y ubicación derecha/superior del informe
+                alpha_tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", cand)
+                score = len(alpha_tokens) + (2 if ln["page"] == 1 else 0) + (1 if ln["y0"] < 180 else 0)
+                patient_candidates.append((score, cand))
+    if patient_candidates:
+        out["paciente"] = sorted(patient_candidates, reverse=True)[0][1]
+
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bEstudio\s*#?\b\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", txt, re.I)
+        if m:
+            val = _collapse_spaces(m.group(1)).strip(" :#-")
+            if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                out["estudio"] = val
+                break
+
+    # 2) Demografía/antropometría por línea visual.
+    def put_num_from_line(label, key):
+        for ln in lines:
+            txt = ln["text"]
+            if re.search(rf"\b{label}\b", txt, flags=re.I):
+                valtxt = _line_text_after_label(txt, rf"\b{label}\b")
+                vals = _numeric_values_in_text(valtxt)
+                if vals:
+                    out[key] = vals[0]
+                    return
+    for label, key in [("Edad", "edad"), ("Peso", "peso"), ("Altura", "altura"), ("IMC", "imc"), ("SC", "sc")]:
+        put_num_from_line(label, key)
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", txt, re.I)
+        if m:
+            out["sexo"] = m.group(1).upper(); break
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", txt, re.I)
+        if m:
+            out["fecha"] = m.group(1); break
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", txt, re.I)
+        if m:
+            out["hora"] = m.group(1); break
+
+    # 3) Tabla Radial/Central: buscar filas PAS/PAD/PAM/PP con dos primeros números.
+    rc_keys = {"PAS": ("pas_radial", "pas_central"), "PAD": ("pad_radial", "pad_central"),
+               "PAM": ("pam_radial", "pam_central"), "PP": ("pp_radial", "pp_central")}
+    for ln in lines:
+        txt = ln["text"]
+        for lab, (kr, kc) in rc_keys.items():
+            if re.match(rf"^\s*{lab}\b", txt, flags=re.I):
+                vals = _numeric_values_in_text(txt)
+                # En la tabla Radial/Central, la fila contiene dos valores: radial y central.
+                if len(vals) >= 2:
+                    # Evitar capturar la sección de parámetros centrales; allí la línea tiene unidad mmHg y +/-.
+                    if not re.search(r"\+/-|mmHg|%", txt, flags=re.I) or lab in ["PAS", "PP"] and len(vals) >= 2:
+                        # Si está en parámetros centrales, x suele estar más abajo y cerca del título. Se prioriza solo si no hay valor todavía.
+                        if kr not in out or kc not in out:
+                            out[kr] = vals[0]; out[kc] = vals[1]
+    # FC: línea de la tabla principal.
+    for ln in lines:
+        txt = ln["text"]
+        if re.match(r"^\s*FC\b", txt, flags=re.I):
+            vals = _numeric_values_in_text(txt)
+            if vals:
+                out["fc"] = vals[0]
+                break
+
+    # 4) Parámetros hemodinámicos centrales / aumentaciones. Buscar filas específicas.
+    central_map = {
+        "PAS": "pas_central", "PP": "pp_central", "Au": "au", "IAu": "iau",
+        "RVSE": "rvse", "PE": "pe", "APC": "apc"
+    }
+    for ln in lines:
+        txt = ln["text"]
+        for lab, key in central_map.items():
+            if re.match(rf"^\s*{lab}\b", txt, flags=re.I):
+                # Las filas centrales suelen traer unidad y/o +/-: 'Au mmHg +8 +/-1'
+                if lab in ["Au", "IAu", "RVSE", "PE", "APC"] or re.search(r"mmHg|%|\+/-", txt, flags=re.I):
+                    vals = _numeric_values_in_text(txt)
+                    if vals:
+                        # Para PAS/PP central, no pisar si la tabla radial/central ya extrajo lo correcto salvo que sea sección central con unidad.
+                        out[key] = vals[0]
+    return out
+
+
+def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
+    """Parser principal: texto plano + corrección visual por coordenadas del PDF."""
+    data = parse_model_pac(fallback_text or "")
+    try:
+        layout = _extract_layout_fields_from_pdf(pdf_bytes)
+        for k, v in layout.items():
+            if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
+                if v not in [None, ""] and not _is_bad_patient_value(v if k == "paciente" else str(v)):
+                    data[k] = v
+            else:
+                fv = to_float(v)
+                if not np.isnan(fv):
+                    data[k] = fv
+        data = _validate_and_repair_pac_data(data)
+    except Exception:
+        pass
+    return data
+
+
 def _strip_trailing_labels(value):
     """Corta valores que quedaron contaminados por la etiqueta siguiente."""
     v = _collapse_spaces(value)
@@ -2086,7 +2262,7 @@ curve_meta = {}
 if pdf_file:
     pdf_bytes = pdf_file.read()
     text = extract_pdf_text(pdf_bytes)
-    base = parse_model_pac(text)
+    base = parse_model_pac_from_pdf(pdf_bytes, text)
     screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
 else:
     base = parse_model_pac("")
