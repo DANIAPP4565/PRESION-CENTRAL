@@ -1395,11 +1395,11 @@ def _parse_central_parameters(flat_text, data):
     mapping = {
         "pas_central": val("PAS"),
         "pp_central": val("PP"),
-        "au": val("Au", aliases=["Aumentaci[oó]n\s+A[oó]rtica\s+Central"]),
-        "iau": val("IAu", aliases=["Indice\s+de\s+Aumentaci[oó]n\s+Central", "Índice\s+de\s+Aumentaci[oó]n\s+Central"]),
-        "rvse": val("RVSE", aliases=["Relaci[oó]n\s+de\s+Viabilidad\s+Sub\s*Endoc[aá]rdica"]),
-        "pe": val("PE", aliases=["Periodo\s+Eyectivo", "Per[ií]odo\s+Eyectivo"]),
-        "apc": val("APC", aliases=["Amplificaci[oó]n\s+Perif[eé]rico\s*Central"]),
+        "au": val("Au", aliases=[r"Aumentaci[oó]n\s+A[oó]rtica\s+Central"]),
+        "iau": val("IAu", aliases=[r"Indice\s+de\s+Aumentaci[oó]n\s+Central", r"Índice\s+de\s+Aumentaci[oó]n\s+Central"]),
+        "rvse": val("RVSE", aliases=[r"Relaci[oó]n\s+de\s+Viabilidad\s+Sub\s*Endoc[aá]rdica"]),
+        "pe": val("PE", aliases=[r"Periodo\s+Eyectivo", r"Per[ií]odo\s+Eyectivo"]),
+        "apc": val("APC", aliases=[r"Amplificaci[oó]n\s+Perif[eé]rico\s*Central"]),
     }
 
     # Respaldo por patrón posicional de la tabla central en la captura:
@@ -2593,4 +2593,4 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     story.append(_section("6. Referencias bibliográficas"))
     refs = [
         "Agabiti-Rosei E, et al. Central blood pressure measurements and antihypertensive therapy. Hypertension. 2007.",
-        "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos 
+        "Zócalo Y, Bia D. Presión aórtica central y parámetros cl
