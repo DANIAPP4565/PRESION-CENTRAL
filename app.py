@@ -2794,6 +2794,40 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     buf.seek(0)
     return buf.getvalue()
 
+
+
+def save_history(row):
+    """Guarda el registro actual en historial Excel de forma robusta.
+
+    Esta función se mantiene separada del generador de PDF para evitar
+    errores NameError cuando el usuario presiona "Guardar en historial".
+    """
+    try:
+        clean_row = {}
+        for k, v in dict(row).items():
+            if isinstance(v, (np.generic,)):
+                v = v.item()
+            if isinstance(v, float) and np.isnan(v):
+                v = ""
+            clean_row[k] = v
+
+        new = pd.DataFrame([clean_row])
+        if HISTORIAL_FILE.exists():
+            try:
+                old = pd.read_excel(HISTORIAL_FILE)
+                out = pd.concat([old, new], ignore_index=True)
+            except Exception:
+                out = new
+        else:
+            out = new
+
+        out.to_excel(HISTORIAL_FILE, index=False)
+        return out
+    except Exception as e:
+        st.error(f"No se pudo guardar el historial Excel: {e}")
+        return pd.DataFrame([row])
+
+
 st.title(APP_TITLE)
 st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
 
