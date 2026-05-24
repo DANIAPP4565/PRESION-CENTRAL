@@ -2322,12 +2322,7 @@ def build_continuous_conclusions(row, wave_df, hdf):
     if not integrated_flags:
         integrated_flags.append("sin marcadores mayores simultáneos de sobrecarga pulsátil central en los parámetros disponibles")
 
-    c4 = (
-        "La interpretación final integrada combina presión central, métricas de aumentación, separación Pf/Pb y análisis armónico. "
-        f"En este registro predominan los siguientes elementos: {', '.join(integrated_flags)}. "
-        "El resultado debe integrarse con edad, sexo, presión braquial, tratamiento, lesión de órgano blanco y contexto clínico. "
-        "La lectura más relevante es la concordancia entre presión central, carga pulsátil y temporalidad de la onda reflejada, porque esa combinación orienta el fenotipo vascular y la carga hemodinámica central."
-    )
+    _, c4, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
 
     return [
         ("1. Análisis de presión central y métricas", c1),
@@ -2338,8 +2333,30 @@ def build_continuous_conclusions(row, wave_df, hdf):
 
 
 
+
 def classify_central_pressure_phenotype(row, sep_metrics, hdf):
-    """Define fenotipo final integrando presión central, separación de ondas y armónicos."""
+    """Define fenotipo final explícito integrando presión central, RVSE/SEVR, separación de ondas y armónicos."""
+    def fmt(v, dec=1, unit=""):
+        try:
+            f = float(v)
+            if np.isnan(f):
+                return "no disponible"
+            return f"{f:.{dec}f}{unit}"
+        except Exception:
+            return "no disponible"
+
+    def add_metric(bucket, altered, label, value, threshold_text, interpretation, points):
+        item = {
+            "label": label,
+            "value": value,
+            "threshold": threshold_text,
+            "interpretation": interpretation,
+            "points": points,
+            "altered": altered,
+        }
+        bucket.append(item)
+        return points if altered else 0
+
     pas_c = to_float(row.get("pas_central"))
     pad_c = to_float(row.get("pad_central"))
     pp_c = to_float(row.get("pp_central"))
@@ -2349,148 +2366,184 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     pp_r = to_float(row.get("pp_radial"))
     ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
     amp_sbp = pas_r - pas_c if not np.isnan(pas_r) and not np.isnan(pas_c) else np.nan
+
     rm = sep_metrics.get("rm", np.nan)
     ri = sep_metrics.get("ri", np.nan)
     tref = sep_metrics.get("tref_ms", np.nan)
     pb = sep_metrics.get("pb_pico", np.nan)
     pf = sep_metrics.get("pf_pico", np.nan)
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    t_pico = sep_metrics.get("t_pico_ms", np.nan)
+    t_max_dpdt = sep_metrics.get("t_max_dpdt_ms", np.nan)
+    area_sis = sep_metrics.get("area_sistolica_pti", sep_metrics.get("area_sistolica", np.nan))
+    area_dias = sep_metrics.get("area_diastolica_pti", np.nan)
 
     e_high = np.nan
     e1 = np.nan
+    e2 = np.nan
     try:
         e = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
         if len(e) > 0:
             e1 = e[0]
+        if len(e) > 1:
+            e2 = e[1]
         if len(e) > 4:
             e_high = np.nansum(e[3:])
     except Exception:
         pass
 
-    pressure_score = 0
-    wave_score = 0
-    harmonic_score = 0
-    reasons_pressure = []
-    reasons_wave = []
-    reasons_harm = []
+    pressure_metrics = []
+    wave_metrics = []
+    harmonic_metrics = []
 
+    pressure_score = 0
     if not np.isnan(pas_c):
         if pas_c >= 130:
-            pressure_score += 2; reasons_pressure.append("PAS central elevada")
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "alterada si ≥130 mmHg", "presión central sistólica elevada", 2)
         elif pas_c >= 120:
-            pressure_score += 1; reasons_pressure.append("PAS central limítrofe")
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "limítrofe 120-129 mmHg", "presión central sistólica limítrofe", 1)
         else:
-            reasons_pressure.append("PAS central no elevada")
+            add_metric(pressure_metrics, False, "PAS central", fmt(pas_c, 0, " mmHg"), "normal si <120-130 mmHg según contexto", "no elevada", 0)
     if not np.isnan(pp_c):
         if pp_c >= 60:
-            pressure_score += 2; reasons_pressure.append("PP central marcadamente aumentada")
+            pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "marcadamente alterada si ≥60 mmHg", "carga pulsátil central alta", 2)
         elif pp_c >= 50:
-            pressure_score += 1; reasons_pressure.append("PP central aumentada")
+            pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "alterada si ≥50 mmHg", "carga pulsátil central aumentada", 1)
         else:
-            reasons_pressure.append("PP central no aumentada")
+            add_metric(pressure_metrics, False, "PP central", fmt(pp_c, 0, " mmHg"), "no aumentada si <50 mmHg", "sin aumento mayor de carga pulsátil", 0)
     if not np.isnan(iau):
         if iau >= 35:
-            pressure_score += 2; reasons_pressure.append("IAu alto")
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alto si ≥35%", "aumentación sistólica marcada", 2)
         elif iau >= 25:
-            pressure_score += 1; reasons_pressure.append("IAu aumentado")
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alterado si ≥25%", "aumentación sistólica elevada", 1)
         else:
-            reasons_pressure.append("IAu no aumentado")
+            add_metric(pressure_metrics, False, "IAu", fmt(iau, 1, "%"), "no aumentado si <25%", "sin aumentación sistólica relevante", 0)
+    if not np.isnan(au):
+        if au > 0:
+            pressure_score += add_metric(pressure_metrics, True, "Au", fmt(au, 1, " mmHg"), "alterada si positiva y clínicamente relevante", "aumentación aórtica positiva", 1)
+        else:
+            add_metric(pressure_metrics, False, "Au", fmt(au, 1, " mmHg"), "sin aumentación positiva", "sin aumento sistólico adicional por Au", 0)
     if not np.isnan(ppa):
         if ppa < 1.20:
-            pressure_score += 2; reasons_pressure.append("PPA francamente reducida")
+            pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa, 2), "francamente reducida si <1.20", "pérdida de amplificación periférico-central", 2)
         elif ppa < 1.30:
-            pressure_score += 1; reasons_pressure.append("PPA reducida")
+            pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa, 2), "reducida si <1.30", "amplificación de presión de pulso reducida", 1)
         else:
-            reasons_pressure.append("PPA conservada")
+            add_metric(pressure_metrics, False, "PPA", fmt(ppa, 2), "conservada si ≥1.30", "amplificación conservada", 0)
+    if not np.isnan(rvse_calc):
+        if rvse_calc < 120:
+            pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "reducido si <120%", "menor reserva subendocárdica relativa / peor balance oferta-demanda", 2)
+        elif rvse_calc < 150:
+            pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "intermedio 120-149%", "balance subendocárdico intermedio", 1)
+        else:
+            add_metric(pressure_metrics, False, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "conservado si ≥150%", "balance subendocárdico conservado", 0)
 
+    wave_score = 0
     if not np.isnan(rm):
         if rm >= 0.50:
-            wave_score += 2; reasons_wave.append("RM elevada")
+            wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "elevada si ≥0.50", "onda retrógrada de gran magnitud relativa", 2)
         elif rm >= 0.35:
-            wave_score += 1; reasons_wave.append("RM intermedia")
+            wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "intermedia 0.35-0.49", "reflexión de onda intermedia", 1)
         else:
-            reasons_wave.append("RM baja")
+            add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm, 2), "baja si <0.35", "baja magnitud retrógrada", 0)
     if not np.isnan(ri):
         if ri >= 0.35:
-            wave_score += 2; reasons_wave.append("RI aumentado")
+            wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "aumentado si ≥0.35", "mayor contribución relativa de Pb", 2)
         elif ri >= 0.25:
-            wave_score += 1; reasons_wave.append("RI intermedio")
+            wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "intermedio 0.25-0.34", "contribución retrógrada intermedia", 1)
         else:
-            reasons_wave.append("RI bajo")
+            add_metric(wave_metrics, False, "RI", fmt(ri, 2), "bajo si <0.25", "menor peso retrógrado", 0)
     if not np.isnan(tref):
         if tref < 320:
-            wave_score += 2; reasons_wave.append("retorno reflejo precoz")
+            wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "precoz si <320 ms", "retorno reflejo precoz compatible con mayor rigidez/reflexión temprana", 2)
         elif tref <= 430:
-            wave_score += 1; reasons_wave.append("retorno reflejo intermedio")
+            wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "intermedio 320-430 ms", "retorno reflejo intermedio", 1)
         else:
-            reasons_wave.append("retorno reflejo tardío")
+            add_metric(wave_metrics, False, "Tref", fmt(tref, 0, " ms"), "tardío si >430 ms", "retorno reflejo tardío", 0)
+    if not np.isnan(pb) and not np.isnan(pf) and pf > 0:
+        add_metric(wave_metrics, pb / pf >= 0.35, "Pf/Pb pico", f"Pf {fmt(pf,1,' mmHg')} / Pb {fmt(pb,1,' mmHg')}", "Pb relevante si Pb/Pf ≥0.35", "relación directa de componentes anterógrado y retrógrado", 0)
 
+    harmonic_score = 0
     if not np.isnan(e_high):
         if e_high >= 25:
-            harmonic_score += 2; reasons_harm.append("alto contenido de armónicos superiores")
+            harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "alto si ≥25% desde cuarto componente", "alta complejidad espectral / onda más abrupta", 2)
         elif e_high >= 12:
-            harmonic_score += 1; reasons_harm.append("contenido armónico superior intermedio")
+            harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "intermedio 12-24%", "complejidad espectral intermedia", 1)
         else:
-            reasons_harm.append("predominio de armónicos bajos")
+            add_metric(harmonic_metrics, False, "Armónicos superiores", fmt(e_high, 1, "%"), "bajo si <12%", "predominio de componentes bajos", 0)
     if not np.isnan(e1):
         if e1 < 35:
-            harmonic_score += 1; reasons_harm.append("menor predominio del primer armónico")
+            harmonic_score += add_metric(harmonic_metrics, True, "Primer armónico", fmt(e1, 1, "%"), "menor predominio si <35%", "menor dominio de onda fundamental", 1)
         else:
-            reasons_harm.append("primer armónico predominante")
+            add_metric(harmonic_metrics, False, "Primer armónico", fmt(e1, 1, "%"), "predominante si ≥35%", "onda fundamental predominante", 0)
+    if not np.isnan(e2):
+        add_metric(harmonic_metrics, False, "Segundo armónico", fmt(e2, 1, "%"), "valor descriptivo", "componente espectral complementario", 0)
 
     total_score = pressure_score + wave_score + harmonic_score
     high_pressure = pressure_score >= 3
     high_wave = wave_score >= 3
     high_harm = harmonic_score >= 2
+    rvse_reduced = (not np.isnan(rvse_calc)) and rvse_calc < 120
 
-    if high_pressure and high_wave and high_harm:
-        phenotype = "Fenotipo central rígido-reflectivo con complejidad armónica aumentada"
-        clinical = "predomina una carga pulsátil central aumentada, con retorno retrógrado relevante/precoz y mayor complejidad espectral de la onda de presión."
+    if high_pressure and high_wave and high_harm and rvse_reduced:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con estrés subendocárdico y complejidad armónica aumentada"
+        mechanism = "sobrecarga pulsátil central, retorno retrógrado relevante/precoz, menor balance subendocárdico y mayor complejidad espectral"
+    elif high_pressure and high_wave and rvse_reduced:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con RVSE reducido"
+        mechanism = "carga pulsátil central aumentada asociada a reflexión de onda aumentada y peor balance oferta-demanda subendocárdico"
+    elif high_pressure and high_wave and high_harm:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con complejidad armónica aumentada"
+        mechanism = "carga pulsátil central aumentada, reflexión de onda aumentada y morfología espectral compleja"
     elif high_pressure and high_wave:
-        phenotype = "Fenotipo central rígido-reflectivo"
-        clinical = "predomina presión/carga pulsátil central elevada asociada a mayor contribución de onda retrógrada."
+        phenotype = "Fenotipo vascular central rígido-reflectivo"
+        mechanism = "presión/carga pulsátil central elevada asociada a mayor contribución de onda retrógrada"
+    elif high_pressure and rvse_reduced:
+        phenotype = "Fenotipo vascular de carga central elevada con compromiso subendocárdico relativo"
+        mechanism = "presión o pulsatilidad central aumentada con RVSE reducido"
+    elif high_wave and rvse_reduced:
+        phenotype = "Fenotipo vascular reflectivo con compromiso subendocárdico relativo"
+        mechanism = "predominio retrógrado/retorno reflejo precoz asociado a RVSE reducido"
     elif high_pressure and high_harm:
-        phenotype = "Fenotipo central de carga pulsátil elevada con distorsión armónica"
-        clinical = "predomina presión o presión de pulso central elevada con morfología espectral más compleja."
+        phenotype = "Fenotipo vascular de carga pulsátil central elevada con distorsión armónica"
+        mechanism = "presión/PP central elevada con mayor complejidad espectral"
     elif high_wave:
-        phenotype = "Fenotipo reflectivo predominante"
-        clinical = "la alteración principal se concentra en la separación de ondas, con mayor peso de Pb y/o retorno reflejo más precoz."
+        phenotype = "Fenotipo vascular reflectivo predominante"
+        mechanism = "mayor peso de Pb y/o retorno reflejo más precoz, aun sin clara sobrecarga central global"
     elif high_harm:
-        phenotype = "Fenotipo armónico complejo sin sobrecarga central mayor manifiesta"
-        clinical = "el hallazgo dominante es morfológico-espectral y debe correlacionarse con la calidad de señal y el contexto vascular."
+        phenotype = "Fenotipo vascular armónico complejo"
+        mechanism = "mayor contenido de armónicos superiores o menor predominio del primer armónico"
     elif high_pressure:
-        phenotype = "Fenotipo de presión central elevada no reflectivo predominante"
-        clinical = "predomina la elevación de presión/carga pulsátil central, sin evidencia fuerte de predominio retrógrado en los parámetros disponibles."
+        phenotype = "Fenotipo vascular de presión central elevada no reflectivo predominante"
+        mechanism = "elevación de presión/carga pulsátil central sin predominio retrógrado fuerte"
     else:
-        phenotype = "Fenotipo central conservado o de bajo impacto pulsátil"
-        clinical = "no se identifican marcadores simultáneos mayores de sobrecarga central, reflexión aumentada o complejidad armónica relevante en los datos disponibles."
+        phenotype = "Fenotipo vascular central conservado o de bajo impacto pulsátil"
+        mechanism = "sin combinación dominante de sobrecarga central, reflexión aumentada, RVSE reducido o complejidad armónica relevante"
 
-    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
-    if not np.isnan(rvse_calc):
-        if rvse_calc < 120:
-            reasons_pressure.append(f"RVSE calculado reducido ({rvse_calc:.1f}%)")
-            pressure_score += 1
-        elif rvse_calc >= 150:
-            reasons_pressure.append(f"RVSE calculado conservado ({rvse_calc:.1f}%)")
-        else:
-            reasons_pressure.append(f"RVSE calculado intermedio ({rvse_calc:.1f}%)")
-        total_score = pressure_score + wave_score + harmonic_score
+    altered = [m for m in pressure_metrics + wave_metrics + harmonic_metrics if m["altered"]]
+    altered_text = "; ".join([f"{m['label']} {m['value']} ({m['interpretation']})" for m in altered])
+    if not altered_text:
+        altered_text = "no se identifican métricas alteradas mayores con los puntos de corte operativos disponibles"
 
     table = [
-        ["Dominio", "Puntaje", "Elementos considerados"],
-        ["Presión central, métricas y RVSE", str(pressure_score), "; ".join(reasons_pressure) if reasons_pressure else "sin datos suficientes"],
-        ["Separación de ondas Pf/Pb", str(wave_score), "; ".join(reasons_wave) if reasons_wave else "sin datos suficientes"],
-        ["Armónicos", str(harmonic_score), "; ".join(reasons_harm) if reasons_harm else "sin datos suficientes"],
+        ["Dominio", "Puntaje", "Métricas alteradas / consideradas"],
+        ["Presión central, aumentación y RVSE", str(pressure_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in pressure_metrics]) if pressure_metrics else "sin datos suficientes"],
+        ["Separación de ondas Pf/Pb", str(wave_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in wave_metrics]) if wave_metrics else "sin datos suficientes"],
+        ["Armónicos", str(harmonic_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in harmonic_metrics]) if harmonic_metrics else "sin datos suficientes"],
         ["Puntaje integrado", str(total_score), phenotype],
     ]
 
     text = (
-        f"Fenotipo final: {phenotype}. La integración de presión central, separación de ondas y análisis armónico indica que {clinical} "
-        f"Valores integrados: PAS central {pas_c:.0f} mmHg si disponible, PAD central {pad_c:.0f} mmHg si disponible, "
-        f"PP central {pp_c:.0f} mmHg si disponible, IAu {iau:.1f}% si disponible, PPA {ppa:.2f} si disponible, "
-        f"RVSE calculado {rvse_calc:.1f}% si disponible, RM {rm:.2f}, RI {ri:.2f}, Tref {tref:.0f} ms, Pf pico {pf:.1f} mmHg y Pb pico {pb:.1f} mmHg. "
-        "Este fenotipo es una clasificación operativa de apoyo y debe integrarse con edad, sexo, presión braquial, tratamiento, riesgo cardiovascular y lesión de órgano blanco."
+        f"Fenotipo final de presión central: {phenotype}. "
+        f"Métricas que definen el fenotipo: {altered_text}. "
+        f"La combinación de estas variables configura un patrón de {mechanism}. "
+        f"Resumen cuantitativo: PAS central {fmt(pas_c,0,' mmHg')}, PAD central {fmt(pad_c,0,' mmHg')}, "
+        f"PP central {fmt(pp_c,0,' mmHg')}, Au {fmt(au,1,' mmHg')}, IAu {fmt(iau,1,'%')}, "
+        f"PPA {fmt(ppa,2)}, amplificación PAS {fmt(amp_sbp,1,' mmHg')}, RVSE/SEVR {fmt(rvse_calc,1,'%')}, "
+        f"RM {fmt(rm,2)}, RI {fmt(ri,2)}, Tref {fmt(tref,0,' ms')}, "
+        f"Pf pico {fmt(pf,1,' mmHg')}, Pb pico {fmt(pb,1,' mmHg')}, "
+        f"primer armónico {fmt(e1,1,'%')} y armónicos superiores {fmt(e_high,1,'%')}. "
+        "Esta clasificación es operativa y debe interpretarse junto con edad, sexo, presión braquial, tratamiento, riesgo cardiovascular y lesión de órgano blanco."
     )
-    text = text.replace("nan mmHg", "no disponible").replace("nan%", "no disponible").replace("nan", "no disponible")
     return phenotype, text, table
 
 def build_pdf(row, wave_df, hdf, screenshot_png=None):
