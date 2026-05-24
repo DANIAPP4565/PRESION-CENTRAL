@@ -719,12 +719,14 @@ def _normalize_sex(value):
 
 def _clean_patient_name(value):
     v = _strip_trailing_labels(value)
-    # Evitar que queden etiquetas como nombre del paciente.
-    if re.fullmatch(r"(?i)(número\s+de\s+estudio|estudio|fecha|hora|edad|sexo|m|f)", v or ""):
-        return ""
     v = re.sub(r"\s{2,}", " ", v).strip()
+    # Evitar que queden etiquetas administrativas como nombre del paciente.
+    if re.search(r"(?i)(número\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n)", v or ""):
+        return ""
+    if re.fullmatch(r"(?i)(m|f)", v or ""):
+        return ""
     # Nombre demasiado corto o puramente numérico: no aceptar.
-    if len(v) < 3 or re.fullmatch(r"\d+", v):
+    if len(v) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", v):
         return ""
     return v
 
@@ -795,9 +797,92 @@ def _parse_central_parameters(flat_text, data):
             data[k] = v
 
 
+
+def _is_bad_patient_value(v):
+    """Detecta valores que son etiquetas administrativas y no nombres de paciente."""
+    s = _collapse_spaces(v)
+    if not s:
+        return True
+    if re.search(r"(?i)\b(Número\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n|Radial|Central)\b", s):
+        return True
+    if len(s) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", s):
+        return True
+    return False
+
+
+def _parse_header_fields_from_lines(lines):
+    """Extrae cabecera paciente/estudio/demografía por líneas, más confiable que texto plano.
+
+    En los PDF tipo Exxer, pdfplumber puede mezclar columnas y hacer que "Paciente"
+    tome "Número de estudio" como valor. Este extractor prioriza la estructura visual
+    por líneas: Estudio # 684 / Paciente APELLIDO NOMBRE / Edad 54 / Sexo M, etc.
+    """
+    out = {}
+    clean_lines = [_collapse_spaces(x) for x in lines if _collapse_spaces(x)]
+
+    def take_num(label, key, pattern_suffix=r""):
+        for ln in clean_lines:
+            m = re.search(rf"\b{label}\b\s*[:#]?\s*([-+]?\d+(?:[\.,]\d+)?)\s*{pattern_suffix}", ln, re.I)
+            if m:
+                out[key] = to_float(m.group(1)); return
+
+    # Estudio: solo aceptar número/código inmediato luego de Estudio #, no letras sueltas como M.
+    for ln in clean_lines:
+        m = re.search(r"\bEstudio\s*#?\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", ln, re.I)
+        if m:
+            val = _collapse_spaces(m.group(1)).strip(":#- ")
+            if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                out["estudio"] = val
+                break
+
+    # Paciente: preferir línea que empieza o contiene Paciente + nombre.
+    for i, ln in enumerate(clean_lines):
+        m = re.search(r"\bPaciente\b\s*[:#]?\s*(.+)$", ln, re.I)
+        if m:
+            cand = m.group(1)
+            cand = re.split(r"\b(Estudio\s*#?|Número\s+de\s+estudio|Numero\s+de\s+estudio|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand, flags=re.I)[0]
+            cand = _clean_patient_name(cand)
+            if cand and not _is_bad_patient_value(cand):
+                out["paciente"] = cand
+                break
+            # Si el valor no está en la misma línea, mirar la línea siguiente.
+            if i + 1 < len(clean_lines):
+                nxt = _clean_patient_name(clean_lines[i+1])
+                if nxt and not _is_bad_patient_value(nxt):
+                    out["paciente"] = nxt
+                    break
+
+    # Fecha/hora
+    for ln in clean_lines:
+        m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", ln, re.I)
+        if m:
+            out["fecha"] = m.group(1); break
+    for ln in clean_lines:
+        m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", ln, re.I)
+        if m:
+            out["hora"] = m.group(1); break
+
+    take_num("Edad", "edad")
+    take_num("Peso", "peso", r"(?:kg|kilos)?")
+    take_num("Altura", "altura", r"(?:cm)?")
+    take_num("IMC", "imc")
+    take_num("SC", "sc", r"(?:m2|m²)?")
+
+    for ln in clean_lines:
+        m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", ln, re.I)
+        if m:
+            out["sexo"] = m.group(1).upper(); break
+
+    return out
+
 def _validate_and_repair_pac_data(data):
     """Repara valores mal cargados por columnas pegadas del PDF y limpia etiquetas contaminantes."""
     data["paciente"] = _clean_patient_name(data.get("paciente", ""))
+    if _is_bad_patient_value(data.get("paciente", "")):
+        data["paciente"] = ""
+    # Evitar que el número de estudio quede como sexo u otra etiqueta.
+    if re.fullmatch(r"(?i)(M|F)", _collapse_spaces(data.get("estudio", ""))):
+        data["estudio"] = ""
     data["sexo"] = _normalize_sex(data.get("sexo", ""))
 
     # Si falta PAD/PAM/PP central y hay periféricos, no inventar; solo completar PP si PAS/PAD central son reales.
@@ -849,6 +934,17 @@ def parse_model_pac(text):
         "sc": _number_after_label(flat, [r"SC"]),
         "fc": _number_after_label(flat, [r"FC"]),
     }
+
+    # Corrección prioritaria por líneas: evita que "Paciente" quede como "Número de estudio"
+    # y que "Estudio" tome "M" u otra etiqueta de la cabecera.
+    header_by_lines = _parse_header_fields_from_lines(lines)
+    for k, v in header_by_lines.items():
+        if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
+            if v not in [None, ""]:
+                data[k] = v
+        else:
+            if not np.isnan(to_float(v)):
+                data[k] = v
 
     _parse_radial_central_table(flat, data)
     _parse_central_parameters(flat, data)
