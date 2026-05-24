@@ -645,58 +645,230 @@ def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_pag
                 attempts.append(f"página {pi+1} sector superior izquierdo: panel de curva {color_name}: {e}")
     raise ValueError("No se pudo digitalizar una curva central válida desde la segunda hoja, sector superior izquierdo: panel de curva del PDF. " + " | ".join(attempts[:10]))
 
+
 def find_after(label, text, default=""):
     pat = re.compile(label + r"\s*[:#]?\s*([^\n]+)", re.I)
     m = pat.search(text)
     return safe_text(m.group(1)) if m else default
 
-def parse_model_pac(text):
-    # Parser orientado al patrón MODELO PAC / Exxer. Incluye fallback manual en la interfaz.
-    lines = [safe_text(x) for x in text.splitlines() if safe_text(x)]
-    joined = "\n".join(lines)
-    data = {
-        "paciente": find_after(r"Paciente|Nombre del paciente", joined),
-        "estudio": find_after(r"Estudio|Número de estudio", joined),
-        "fecha": find_after(r"Fecha", joined),
-        "hora": find_after(r"Hora", joined),
-        "hc": find_after(r"H\.C\.", joined),
-        "diagnostico_previo": find_after(r"Diagnóstico", joined),
-        "medicacion": find_after(r"Medicación", joined),
-        "edad": to_float(find_after(r"Edad", joined)),
-        "sexo": find_after(r"Sexo", joined).upper()[:1],
-        "peso": to_float(find_after(r"Peso", joined)),
-        "altura": to_float(find_after(r"Altura", joined)),
-        "imc": to_float(find_after(r"IMC", joined)),
-        "sc": to_float(find_after(r"SC", joined)),
-        "fc": to_float(find_after(r"FC", joined)),
-    }
-    # Patrón de tabla Radial Central del modelo: PAS PAD PAM PP en filas.
-    m = re.search(r"Radial\s+Central\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", joined, re.S|re.I)
+
+# -----------------------------
+# Parser robusto de datos PAC
+# -----------------------------
+def _collapse_spaces(s):
+    return re.sub(r"\s+", " ", safe_text(s)).strip()
+
+
+def _strip_trailing_labels(value):
+    """Corta valores que quedaron contaminados por la etiqueta siguiente."""
+    v = _collapse_spaces(value)
+    stop = r"\b(Estudio\s*#?|Número\s+de\s+estudio|Paciente|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagnóstico|Diagnostico|Medicación|Medicacion|Abdomen|Cuello|Realizado|Radial|Central|PAS|PAD|PAM|PP|FC|Parámetros)\b"
+    m = re.search(stop, v, flags=re.I)
     if m:
-        vals = list(map(float, m.groups()))
-        data.update({
-            "pas_radial": vals[0], "pas_central": vals[1],
-            "pad_radial": vals[2], "pad_central": vals[3],
-            "pp_radial": vals[4], "pp_central": vals[5],
-            "pam_radial": vals[6], "pam_central": vals[7],
-        })
-    # Parámetros centrales alrededor de PAS PP Au IAu RVSE PE APC.
-    m2 = re.search(r"Parámetros hemodinámicos centrales.*?PAS\s+PP\s+Au\s+IAu\s+PE\s+(\d+)\s+(\d+)\s+([+\-]?\d+)\s+([+\-]?\d+)\s+(\d+)\s+([\d.,]+)", joined, re.S|re.I)
-    if m2:
-        data.update({
-            "pas_central": to_float(m2.group(1)),
-            "pp_central": to_float(m2.group(2)),
-            "au": to_float(m2.group(3)),
-            "iau": to_float(m2.group(4)),
-            "rvse": to_float(m2.group(5)),
-            "pe": to_float(m2.group(6)),
-        })
-    data.setdefault("pas_radial", np.nan); data.setdefault("pad_radial", np.nan)
-    data.setdefault("pam_radial", np.nan); data.setdefault("pp_radial", np.nan)
-    data.setdefault("pas_central", np.nan); data.setdefault("pad_central", np.nan)
-    data.setdefault("pam_central", np.nan); data.setdefault("pp_central", np.nan)
-    data.setdefault("au", np.nan); data.setdefault("iau", np.nan); data.setdefault("rvse", np.nan); data.setdefault("pe", np.nan)
+        if m.start() == 0:
+            return ""
+        v = v[:m.start()].strip()
+    return v.strip(" :;,-")
+
+
+def _value_after_label(flat_text, label_patterns, stop_patterns=None, max_chars=80):
+    """Extrae texto posterior a una etiqueta, incluso cuando PDFPlumber une columnas en la misma línea."""
+    if isinstance(label_patterns, str):
+        label_patterns = [label_patterns]
+    if stop_patterns is None:
+        stop_patterns = [
+            r"Estudio\s*#?", r"Número\s+de\s+estudio", r"Paciente", r"Fecha", r"Hora", r"Edad", r"Sexo",
+            r"Peso", r"Altura", r"IMC", r"SC", r"Diagnóstico", r"Diagnostico", r"Medicación", r"Medicacion",
+            r"Abdomen", r"Cuello", r"Realizado", r"Radial", r"Central", r"PAS", r"PAD", r"PAM", r"PP", r"FC"
+        ]
+    stop_re = "|".join(f"(?:{p})" for p in stop_patterns)
+    for lab in label_patterns:
+        pat = re.compile(rf"(?:^|\b){lab}\s*(?:[:#])?\s*(.*?)(?=\s+(?:{stop_re})\b|$)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            val = _strip_trailing_labels(m.group(1)[:max_chars])
+            if val and val not in ["---", "--", "-"]:
+                return val
+    return ""
+
+
+def _number_after_label(flat_text, label_patterns, default=np.nan):
+    val = _value_after_label(flat_text, label_patterns, max_chars=50)
+    m = re.search(r"[-+]?\d+(?:[\.,]\d+)?", val)
+    if m:
+        return to_float(m.group(0))
+    if isinstance(label_patterns, str):
+        label_patterns = [label_patterns]
+    for lab in label_patterns:
+        # Respaldo: primer número razonable inmediatamente luego de la etiqueta.
+        pat = re.compile(rf"(?:^|\b){lab}\s*(?:[:#])?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            return to_float(m.group(1))
+    return default
+
+
+def _normalize_sex(value):
+    v = _collapse_spaces(value).upper()
+    if re.search(r"\b(F|FEMENINO|MUJER)\b", v):
+        return "F"
+    if re.search(r"\b(M|MASCULINO|VARON|VARÓN|HOMBRE)\b", v):
+        return "M"
+    return ""
+
+
+def _clean_patient_name(value):
+    v = _strip_trailing_labels(value)
+    # Evitar que queden etiquetas como nombre del paciente.
+    if re.fullmatch(r"(?i)(número\s+de\s+estudio|estudio|fecha|hora|edad|sexo|m|f)", v or ""):
+        return ""
+    v = re.sub(r"\s{2,}", " ", v).strip()
+    # Nombre demasiado corto o puramente numérico: no aceptar.
+    if len(v) < 3 or re.fullmatch(r"\d+", v):
+        return ""
+    return v
+
+
+def _parse_radial_central_table(flat_text, data):
+    """Extrae tabla Radial/Central por filas PAS/PAD/PAM/PP/FC. Evita intercambiar PAM con PP."""
+    # Patrón más seguro: cada fila con su etiqueta y dos valores.
+    def pair(label):
+        pat = re.compile(rf"\b{label}\b\s*(?:mmHg|lpm|%)?\s*([-+]?\d+(?:[\.,]\d+)?)\s*(?:\+/-\s*\d+(?:[\.,]\d+)?\s*)?([-+]?\d+(?:[\.,]\d+)?)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            return to_float(m.group(1)), to_float(m.group(2))
+        return np.nan, np.nan
+
+    # Recorte preferencial entre Radial/Central y parámetros centrales.
+    mblock = re.search(r"Radial\s+Central(.*?)(?:Parámetros\s+hemodinámicos\s+centrales|PAS\s+mmHg|Conclusiones|$)", flat_text, re.I)
+    block = mblock.group(1) if mblock else flat_text
+
+    pas_r, pas_c = pair("PAS") if not mblock else pair_from_block(block, "PAS")
+    pad_r, pad_c = pair("PAD") if not mblock else pair_from_block(block, "PAD")
+    pam_r, pam_c = pair("PAM") if not mblock else pair_from_block(block, "PAM")
+    pp_r, pp_c = pair("PP") if not mblock else pair_from_block(block, "PP")
+
+    for k, v in {
+        "pas_radial": pas_r, "pas_central": pas_c,
+        "pad_radial": pad_r, "pad_central": pad_c,
+        "pam_radial": pam_r, "pam_central": pam_c,
+        "pp_radial": pp_r, "pp_central": pp_c,
+    }.items():
+        if not np.isnan(v):
+            data[k] = v
+
+    # FC suele ser una sola fila, no radial/central.
+    mfc = re.search(r"\bFC\b\s*([-+]?\d+(?:[\.,]\d+)?)", block, re.I)
+    if mfc:
+        data["fc"] = to_float(mfc.group(1))
+
+
+def pair_from_block(block, label):
+    pat = re.compile(rf"\b{label}\b\s*([-+]?\d+(?:[\.,]\d+)?)\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+    m = pat.search(block)
+    if m:
+        return to_float(m.group(1)), to_float(m.group(2))
+    return np.nan, np.nan
+
+
+def _parse_central_parameters(flat_text, data):
+    """Extrae PAS/PP/Au/IAu/RVSE/PE de la sección de parámetros centrales."""
+    msec = re.search(r"Parámetros\s+hemodinámicos\s+centrales(.*?)(?:Conclusiones|Conclusión|PAS\s+Presión|Pulso|$)", flat_text, re.I)
+    sec = msec.group(1) if msec else flat_text
+
+    def val(label):
+        # Soporta: PAS mmHg 119 +/-1, Au mmHg +8 +/-1, PE 32.8
+        pat = re.compile(rf"\b{label}\b\s*(?:mmHg|%|lpm)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+        mm = pat.search(sec)
+        return to_float(mm.group(1)) if mm else np.nan
+
+    mapping = {
+        "pas_central": val("PAS"),
+        "pp_central": val("PP"),
+        "au": val("Au"),
+        "iau": val("IAu"),
+        "rvse": val("RVSE"),
+        "pe": val("PE"),
+    }
+    for k, v in mapping.items():
+        if not np.isnan(v):
+            data[k] = v
+
+
+def _validate_and_repair_pac_data(data):
+    """Repara valores mal cargados por columnas pegadas del PDF y limpia etiquetas contaminantes."""
+    data["paciente"] = _clean_patient_name(data.get("paciente", ""))
+    data["sexo"] = _normalize_sex(data.get("sexo", ""))
+
+    # Si falta PAD/PAM/PP central y hay periféricos, no inventar; solo completar PP si PAS/PAD central son reales.
+    pas_c, pad_c = to_float(data.get("pas_central")), to_float(data.get("pad_central"))
+    if (np.isnan(data.get("pp_central", np.nan)) or data.get("pp_central", 0) == 0) and not np.isnan(pas_c) and not np.isnan(pad_c) and pas_c > pad_c:
+        data["pp_central"] = pas_c - pad_c
+    pas_r, pad_r = to_float(data.get("pas_radial")), to_float(data.get("pad_radial"))
+    if (np.isnan(data.get("pp_radial", np.nan)) or data.get("pp_radial", 0) == 0) and not np.isnan(pas_r) and not np.isnan(pad_r) and pas_r > pad_r:
+        data["pp_radial"] = pas_r - pad_r
+
+    # Rango fisiológico/administrativo: si falla, dejar editable como vacío en la interfaz.
+    for k, lo, hi in [
+        ("edad", 1, 120), ("peso", 20, 250), ("altura", 80, 230), ("imc", 10, 80), ("sc", 0.5, 3.5),
+        ("pas_radial", 50, 260), ("pad_radial", 30, 160), ("pam_radial", 40, 200), ("pp_radial", 10, 120),
+        ("pas_central", 50, 260), ("pad_central", 30, 160), ("pam_central", 40, 200), ("pp_central", 10, 120),
+        ("fc", 25, 180), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 10, 60)
+    ]:
+        v = to_float(data.get(k))
+        if np.isnan(v) or not (lo <= v <= hi):
+            data[k] = np.nan
+        else:
+            data[k] = v
     return data
+
+
+def parse_model_pac(text):
+    """Parser robusto para PDF PAC/Exxer.
+
+    Corrige errores frecuentes de pdfplumber: etiquetas pegadas al valor, paciente cargado como
+    'Número de estudio', sexo dentro de estudio, altura/IMC mezclados y PAM/PP intercambiados.
+    """
+    lines = [_collapse_spaces(x) for x in text.splitlines() if _collapse_spaces(x)]
+    joined = "\n".join(lines)
+    flat = _collapse_spaces(" ".join(lines))
+
+    data = {
+        "paciente": _clean_patient_name(_value_after_label(flat, [r"Paciente", r"Nombre\s+del\s+paciente"], max_chars=90)),
+        "estudio": _value_after_label(flat, [r"Estudio\s*#", r"Número\s+de\s+estudio"], max_chars=30),
+        "fecha": _value_after_label(flat, [r"Fecha"], max_chars=25),
+        "hora": _value_after_label(flat, [r"Hora"], max_chars=20),
+        "hc": _value_after_label(flat, [r"H\.C\."], max_chars=30),
+        "diagnostico_previo": _value_after_label(flat, [r"Diagnóstico", r"Diagnostico"], max_chars=80),
+        "medicacion": _value_after_label(flat, [r"Medicación", r"Medicacion"], max_chars=80),
+        "edad": _number_after_label(flat, [r"Edad"]),
+        "sexo": _normalize_sex(_value_after_label(flat, [r"Sexo"], max_chars=20)),
+        "peso": _number_after_label(flat, [r"Peso"]),
+        "altura": _number_after_label(flat, [r"Altura"]),
+        "imc": _number_after_label(flat, [r"IMC"]),
+        "sc": _number_after_label(flat, [r"SC"]),
+        "fc": _number_after_label(flat, [r"FC"]),
+    }
+
+    _parse_radial_central_table(flat, data)
+    _parse_central_parameters(flat, data)
+
+    # Respaldo para el patrón compacto antiguo: Radial Central 127 119 87 88 102 102 40 31.
+    if any(np.isnan(to_float(data.get(k))) for k in ["pas_radial","pas_central","pad_radial","pad_central","pam_radial","pam_central","pp_radial","pp_central"]):
+        m = re.search(r"Radial\s+Central\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", flat, re.I)
+        if m:
+            vals = list(map(float, m.groups()))
+            data.update({
+                "pas_radial": vals[0], "pas_central": vals[1],
+                "pad_radial": vals[2], "pad_central": vals[3],
+                "pam_radial": vals[4], "pam_central": vals[5],
+                "pp_radial": vals[6], "pp_central": vals[7],
+            })
+
+    for k in ["pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","au","iau","rvse","pe"]:
+        data.setdefault(k, np.nan)
+
+    return _validate_and_repair_pac_data(data)
 
 def brachial_bp_category(pas, pad):
     if np.isnan(pas) or np.isnan(pad): return "No clasificable"
