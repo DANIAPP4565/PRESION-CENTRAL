@@ -527,41 +527,45 @@ def _annotate_digitized_region_png(arr, bbox, label):
 
 
 def _restrict_mask_to_pdf_curve_roi(mask, arr_shape, page_index):
-    """Limita la búsqueda al sector donde el equipo PAC muestra la curva.
+    """Limita la búsqueda al panel real de curva del equipo PAC.
 
-    Corrección actual: la curva de presión central está en la SEGUNDA HOJA,
-    sector IZQUIERDO-SUPERIOR de la página. Esta restricción evita que el
-    algoritmo capture tablas, textos, logos u otros gráficos del PDF.
+    Corrección por captura aportada:
+    - La curva está en la SEGUNDA HOJA.
+    - El panel se ubica ARRIBA A LA IZQUIERDA.
+    - Debe incluir el gráfico completo "Pulso aórtico y radial promediado" y excluir
+      la tabla central/derecha de métricas para no capturar números, barras o textos.
+
+    Coordenadas relativas estimadas sobre la página renderizada:
+    x: 0% a 50% de ancho
+    y: 7% a 69% de alto
     """
     h, w = arr_shape[:2]
     roi = np.zeros_like(mask, dtype=bool)
 
     if page_index == 1:
-        # Segunda hoja: región izquierda y superior. Se deja un margen hacia el
-        # centro por si la curva ocupa parte del panel medio, pero se evita el
-        # sector izquierdo-superior/inferior donde suelen aparecer tablas y otros gráficos.
-        x0 = int(0.015 * w)
-        x1 = int(0.565 * w)
-        y0 = int(0.030 * h)
-        y1 = int(0.520 * h)
+        # Segunda hoja, panel superior izquierdo: gráfico de pulso aórtico/radial.
+        # En la imagen ejemplo ocupa aproximadamente desde el margen izquierdo hasta
+        # antes de la tabla de datos, y desde debajo del encabezado hasta la base del gráfico.
+        x0 = int(0.000 * w)
+        x1 = int(0.500 * w)
+        y0 = int(0.070 * h)
+        y1 = int(0.690 * h)
     else:
-        # Respaldo para páginas no esperadas: mantener búsqueda en cuadrante
-        # izquierdo-superior con una ventana algo más amplia.
-        x0 = int(0.010 * w)
-        x1 = int(0.600 * w)
-        y0 = int(0.025 * h)
-        y1 = int(0.570 * h)
+        # Respaldo conservador: mismo sector, apenas más amplio si cambia escala.
+        x0 = int(0.000 * w)
+        x1 = int(0.520 * w)
+        y0 = int(0.060 * h)
+        y1 = int(0.710 * h)
 
     roi[y0:y1, x0:x1] = True
     return mask & roi, (x0, y0, x1, y1)
-
 
 def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_page_index=1):
     """Extrae/digitaliza la curva real desde la imagen del PDF cuando no hay CSV/TXT.
 
     Regla principal para MODELO PAC/Exxer:
     - Buscar primero en la segunda hoja del PDF.
-    - Limitar la detección al sector izquierdo-superior de esa hoja.
+    - Limitar la detección al sector superior izquierdo: panel de curva de esa hoja.
     - Calibrar exclusivamente con PAS/PAD central reales del paciente.
 
     Devuelve: wave_df, debug_png, metadata.
@@ -577,8 +581,8 @@ def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_pag
 
     attempts = []
 
-    # Prioridad absoluta: segunda hoja, sector izquierdo-superior. Luego, si falla, páginas siguientes
-    # también con ROI derecho. No vuelve a la hoja 1 salvo como último respaldo.
+    # Prioridad absoluta: segunda hoja, sector superior izquierdo: panel de curva. Luego, si falla, páginas siguientes
+    # también con ROI del panel superior izquierdo. No vuelve a la hoja 1 salvo como último respaldo.
     page_order = []
     if len(doc) > preferred_page_index:
         page_order.append(preferred_page_index)
@@ -593,7 +597,7 @@ def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_pag
             raw_mask, roi_bbox = _restrict_mask_to_pdf_curve_roi(raw_mask, arr.shape, pi)
             comp = _best_curve_component(raw_mask, arr.shape, color_name)
             if comp is None:
-                attempts.append(f"página {pi+1} sector izquierdo-superior {color_name}: sin componente compatible")
+                attempts.append(f"página {pi+1} sector superior izquierdo: panel de curva {color_name}: sin componente compatible")
                 continue
             x0, y0, x1, y1, comp_mask = comp
             # Expandir un poco para conservar extremos del trazo, no para calibrar contra ejes.
@@ -606,7 +610,7 @@ def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_pag
                 debug = _annotate_digitized_region_png(
                     arr,
                     (x0e, y0e, x1e, y1e),
-                    f"pág. {pi+1} / sector izquierdo-superior / {color_name}"
+                    f"pág. {pi+1} / sector superior izquierdo: panel de curva / {color_name}"
                 )
                 meta = {
                     "pagina": pi + 1,
@@ -616,12 +620,12 @@ def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_pag
                     "bbox_px": (x0, y0, x1, y1),
                     "roi_px": roi_bbox,
                     "puntos": int(len(wave)),
-                    "metodo": "digitalización automática desde segunda hoja, sector izquierdo-superior, calibrada con PAS/PAD central",
+                    "metodo": "digitalización automática desde segunda hoja, sector superior izquierdo: panel de curva, calibrada con PAS/PAD central",
                 }
                 return wave, debug, meta
             except Exception as e:
-                attempts.append(f"página {pi+1} sector izquierdo-superior {color_name}: {e}")
-    raise ValueError("No se pudo digitalizar una curva central válida desde la segunda hoja, sector izquierdo-superior del PDF. " + " | ".join(attempts[:10]))
+                attempts.append(f"página {pi+1} sector superior izquierdo: panel de curva {color_name}: {e}")
+    raise ValueError("No se pudo digitalizar una curva central válida desde la segunda hoja, sector superior izquierdo: panel de curva del PDF. " + " | ".join(attempts[:10]))
 
 def find_after(label, text, default=""):
     pat = re.compile(label + r"\s*[:#]?\s*([^\n]+)", re.I)
@@ -1751,13 +1755,13 @@ if wave_file:
 
 if wave_df is None and pdf_bytes:
     try:
-        with st.spinner("Digitalizando curva real desde la segunda hoja, sector izquierdo-superior del PDF..."):
+        with st.spinner("Digitalizando curva real desde la segunda hoja, sector superior izquierdo: panel de curva del PDF..."):
             wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
         curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / sector {curve_meta.get('sector', 'izquierdo-superior')} / trazo {curve_meta.get('color_detectado')}"
-        st.success("Curva real digitalizada desde la segunda hoja, sector izquierdo-superior del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
+        st.success("Curva real digitalizada desde la segunda hoja, sector superior izquierdo: panel de curva del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
         st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
         if curve_debug_png:
-            st.image(curve_debug_png, caption="Control visual: segunda hoja, sector izquierdo-superior usado para digitalizar la curva", use_container_width=True)
+            st.image(curve_debug_png, caption="Control visual: segunda hoja, sector superior izquierdo: panel de curva usado para digitalizar la curva", use_container_width=True)
     except Exception as e:
         curve_error = str(e)
         st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
