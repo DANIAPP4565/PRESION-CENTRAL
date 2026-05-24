@@ -2666,15 +2666,28 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
             ["PE", "", _fmt(row.get("pe")), "%"],
             ["APC", "", _fmt(row.get("apc")), "relación"]]
-    patient_table = Table(datos, colWidths=[22*mm, 54*mm, 22*mm, 42*mm], style=_table_style("#EAF2F8", 6.9))
-    values_table = Table(vals, colWidths=[20*mm, 24*mm, 23*mm, 16*mm], style=_table_style("#D9EAF7", 6.9))
-    story.append(Table([[patient_table, values_table]], colWidths=[101*mm, 87*mm], style=TableStyle([
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING", (0,0), (-1,-1), 0),
-        ("RIGHTPADDING", (0,0), (-1,-1), 3),
-        ("TOPPADDING", (0,0), (-1,-1), 2),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-    ])))
+    # Tablas apiladas en ancho completo para evitar superposición de columnas.
+    # La versión anterior colocaba patient_table y values_table lado a lado:
+    # 140 mm + 83 mm dentro de un contenedor de 188 mm, produciendo solapamiento.
+    def _wrap_table_cells(table_rows, style_name="SmallPAC"):
+        wrapped = []
+        for row_cells in table_rows:
+            wrapped.append([Paragraph(safe_text(c), styles[style_name]) for c in row_cells])
+        return wrapped
+
+    patient_table = Table(
+        _wrap_table_cells(datos),
+        colWidths=[25*mm, 70*mm, 25*mm, 68*mm],
+        style=_table_style("#EAF2F8", 7.0)
+    )
+    values_table = Table(
+        _wrap_table_cells(vals),
+        colWidths=[36*mm, 50*mm, 50*mm, 52*mm],
+        style=_table_style("#D9EAF7", 7.0)
+    )
+    story.append(patient_table)
+    story.append(Spacer(1, 1.1*mm))
+    story.append(values_table)
     story.append(Spacer(1, 1.8*mm))
 
     story.append(_section("2. Conclusiones clínicas continuas"))
