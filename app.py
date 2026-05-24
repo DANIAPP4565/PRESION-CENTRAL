@@ -110,6 +110,24 @@ def to_float(x):
         return np.nan
 
 
+def safe_trapezoid(y, x):
+    """Integración compatible con NumPy 2.x/Streamlit Cloud.
+
+    np.trapz fue retirado en algunas versiones recientes de NumPy; por eso
+    usamos np.trapezoid si existe y dejamos fallback manual para evitar caídas
+    del informe en producción.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    ok = np.isfinite(y) & np.isfinite(x)
+    y, x = y[ok], x[ok]
+    if len(y) < 2:
+        return 0.0
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    return float(np.sum((y[1:] + y[:-1]) * 0.5 * np.diff(x)))
+
+
 
 
 def is_physiologic_waveform(df, row=None):
@@ -1035,8 +1053,8 @@ def estimate_wave_separation(wave_df, row):
     })
 
     # Métricas de morfología real para auditar que no se repita la misma curva.
-    systolic_area = float(np.trapz(excess[(t0 >= ej_start) & (t0 <= ej_end)], t0[(t0 >= ej_start) & (t0 <= ej_end)]))
-    total_area = float(np.trapz(excess, t0))
+    systolic_area = float(safe_trapezoid(excess[(t0 >= ej_start) & (t0 <= ej_end)], t0[(t0 >= ej_start) & (t0 <= ej_end)]))
+    total_area = float(safe_trapezoid(excess, t0))
     ai_morph = float((p0[refl_i] - p0[max_dp_i]) / pp * 100.0) if pp > 0 else np.nan
 
     metrics = {
