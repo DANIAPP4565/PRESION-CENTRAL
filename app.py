@@ -21,6 +21,17 @@ try:
 except Exception:
     pdfplumber = None
 
+try:
+    from PIL import Image as PILImage, ImageDraw
+except Exception:
+    PILImage = None
+    ImageDraw = None
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
@@ -359,6 +370,205 @@ def render_pdf_page_png(pdf_bytes, page_index=1, zoom=2.0):
     page_index = min(max(page_index, 0), len(doc)-1)
     pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     return pix.tobytes("png")
+
+
+def _pixmap_to_rgb_array(page, zoom=3.0):
+    """Renderiza una página PDF a matriz RGB para digitalización de curvas."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if arr.shape[2] >= 3:
+        arr = arr[:, :, :3]
+    return arr
+
+
+def _curve_masks_from_rgb(arr):
+    """Máscaras candidatas para detectar la curva real dibujada en el PDF.
+
+    Se prioriza curva roja/magenta, típica en reportes PAC. Como respaldo se buscan
+    curvas azules/verdes y, solo si no hay color, una máscara oscura más restrictiva.
+    """
+    rgb = arr.astype(np.int16)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    # Curvas coloreadas: evita texto gris/negro y fondos claros.
+    red = (r > 115) & (r > g + 35) & (r > b + 35)
+    magenta = (r > 105) & (b > 80) & (r > g + 25) & (b > g + 15)
+    blue = (b > 115) & (b > r + 35) & (b > g + 20)
+    green = (g > 105) & (g > r + 25) & (g > b + 25)
+    # Respaldo para curva negra: exige vecindad dentro de un gráfico y evita bordes externos.
+    dark = (r < 70) & (g < 70) & (b < 70)
+    return [
+        ("roja", red | magenta),
+        ("azul", blue),
+        ("verde", green),
+        ("oscura_restrictiva", dark),
+    ]
+
+
+def _clean_mask(mask):
+    """Limpieza morfológica opcional sin exigir OpenCV en el entorno."""
+    mask = mask.astype(np.uint8)
+    if cv2 is None:
+        return mask.astype(bool)
+    kernel = np.ones((2, 2), np.uint8)
+    m = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return m.astype(bool)
+
+
+def _best_curve_component(mask, page_shape, color_name):
+    """Selecciona el componente más compatible con una curva de presión.
+
+    Puntúa componentes anchos, no demasiado altos, con aspecto horizontal y lejos de
+    márgenes extremos. Esto evita seleccionar títulos, logos o textos coloreados.
+    """
+    h, w = page_shape[:2]
+    mask = _clean_mask(mask)
+    if mask.sum() < 80:
+        return None
+
+    if cv2 is None:
+        ys, xs = np.where(mask)
+        if len(xs) < 80:
+            return None
+        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()), mask)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    best = None
+    best_score = -1
+    for lab in range(1, n):
+        x, y, bw, bh, area = stats[lab]
+        if area < 60 or bw < 80 or bh < 8:
+            continue
+        if bw > 0.95 * w or bh > 0.65 * h:
+            continue
+        aspect = bw / max(bh, 1)
+        if aspect < 1.6:
+            continue
+        # Para máscara oscura, ser más exigente porque hay mucho texto/ejes.
+        if color_name.startswith("oscura") and (bw < 0.20 * w or area < 120 or aspect < 2.5):
+            continue
+        margin_penalty = 0
+        if y < 0.04*h or y+bh > 0.96*h or x < 0.02*w or x+bw > 0.98*w:
+            margin_penalty = 0.55
+        density = area / max(bw * bh, 1)
+        score = (bw * 1.3 + area * 0.35 + aspect * 18) * (1 - margin_penalty) * (0.65 + min(density, 0.45))
+        if score > best_score:
+            comp = labels == lab
+            best = (int(x), int(y), int(x+bw), int(y+bh), comp)
+            best_score = score
+    return best
+
+
+def _digitize_curve_from_mask(mask, bbox, row, n_points=512):
+    """Convierte píxeles de curva en puntos tiempo-presión.
+
+    La presión se calibra linealmente contra PAS/PAD central reales del estudio. El
+    tiempo se escala al ciclo visible 0-1000 ms, preservando la morfología del trazo.
+    """
+    x0, y0, x1, y1 = bbox
+    sub = mask[y0:y1+1, x0:x1+1]
+    ys, xs = np.where(sub)
+    if len(xs) < 60:
+        raise ValueError("No se detectaron suficientes píxeles de curva para digitalizar.")
+    # Tomar una presión por columna: mediana de píxeles de trazo en esa columna.
+    data = []
+    for x in np.unique(xs):
+        yy = ys[xs == x]
+        if len(yy) == 0:
+            continue
+        data.append((float(x), float(np.median(yy))))
+    if len(data) < 30:
+        raise ValueError("La curva digitalizada tiene muy pocas columnas útiles.")
+    data = np.asarray(data, dtype=float)
+    xpix, ypix = data[:, 0], data[:, 1]
+
+    # Filtro de saltos: conserva el contorno principal del trazo.
+    y_s = pd.Series(ypix).rolling(5, center=True, min_periods=1).median().to_numpy()
+    bad = np.abs(y_s - np.nanmedian(y_s)) > 4 * max(np.nanstd(y_s), 1.0)
+    if np.mean(~bad) > 0.70:
+        xpix, y_s = xpix[~bad], y_s[~bad]
+
+    t = (xpix - np.nanmin(xpix)) / max(np.nanmax(xpix) - np.nanmin(xpix), 1e-6) * 1000.0
+    # En imagen, menor y = mayor presión. Escala preliminar 0-1 y luego calibra.
+    y_norm = (np.nanmax(y_s) - y_s) / max(np.nanmax(y_s) - np.nanmin(y_s), 1e-6)
+    tmp = pd.DataFrame({"tiempo_ms": t, "presion_central_mmHg": y_norm})
+    tmp = tmp.sort_values("tiempo_ms").drop_duplicates("tiempo_ms")
+    t_grid = np.linspace(0, 1000, n_points)
+    y_grid = np.interp(t_grid, tmp["tiempo_ms"], tmp["presion_central_mmHg"])
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    pp = to_float(row.get("pp_central"))
+    if np.isnan(pas) or np.isnan(pad) or pas <= pad:
+        if not np.isnan(pp) and pp > 10 and not np.isnan(pad):
+            pas = pad + pp
+        else:
+            raise ValueError("Para calibrar la curva digitalizada se requieren PAS/PAD central válidas.")
+    p_grid = pad + (y_grid - np.nanmin(y_grid)) * (pas - pad) / max(np.nanmax(y_grid) - np.nanmin(y_grid), 1e-6)
+    out = pd.DataFrame({"tiempo_ms": t_grid, "presion_central_mmHg": p_grid})
+    ok, msg = is_physiologic_waveform(out, row)
+    if not ok:
+        raise ValueError("Curva digitalizada no supera validación fisiológica: " + msg)
+    return out
+
+
+def _annotate_digitized_region_png(arr, bbox, label):
+    """Genera PNG diagnóstico con el rectángulo usado para digitalizar."""
+    if PILImage is None or ImageDraw is None:
+        return None
+    img = PILImage.fromarray(arr.astype(np.uint8), mode="RGB")
+    draw = ImageDraw.Draw(img)
+    x0, y0, x1, y1 = bbox
+    draw.rectangle([x0, y0, x1, y1], outline=(220, 30, 30), width=5)
+    draw.text((x0, max(0, y0-24)), f"Curva digitalizada: {label}", fill=(220, 30, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0):
+    """Extrae/digitaliza la curva real desde la imagen del PDF cuando no hay CSV/TXT.
+
+    Devuelve: wave_df, debug_png, metadata.
+    No genera curvas sintéticas: si no detecta una curva válida, falla con mensaje explícito.
+    """
+    if fitz is None:
+        raise ValueError("PyMuPDF/fitz no está disponible; no se puede renderizar el PDF para digitalizar la curva.")
+    if not pdf_bytes:
+        raise ValueError("No hay PDF cargado para digitalizar la curva.")
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if len(doc) == 0:
+        raise ValueError("El PDF no contiene páginas.")
+
+    attempts = []
+    for pi in range(min(len(doc), max_pages)):
+        page = doc[pi]
+        arr = _pixmap_to_rgb_array(page, zoom=zoom)
+        for color_name, raw_mask in _curve_masks_from_rgb(arr):
+            comp = _best_curve_component(raw_mask, arr.shape, color_name)
+            if comp is None:
+                attempts.append(f"página {pi+1} {color_name}: sin componente compatible")
+                continue
+            x0, y0, x1, y1, comp_mask = comp
+            # Expandir un poco para conservar extremos del trazo, no para calibrar contra ejes.
+            pad_x = int(max(3, 0.015 * (x1-x0)))
+            pad_y = int(max(3, 0.10 * (y1-y0)))
+            x0e = max(0, x0 - pad_x); x1e = min(arr.shape[1]-1, x1 + pad_x)
+            y0e = max(0, y0 - pad_y); y1e = min(arr.shape[0]-1, y1 + pad_y)
+            try:
+                wave = _digitize_curve_from_mask(comp_mask, (x0, y0, x1, y1), row)
+                debug = _annotate_digitized_region_png(arr, (x0e, y0e, x1e, y1e), f"pág. {pi+1} / {color_name}")
+                meta = {
+                    "pagina": pi + 1,
+                    "color_detectado": color_name,
+                    "bbox_px": (x0, y0, x1, y1),
+                    "puntos": int(len(wave)),
+                    "metodo": "digitalización automática desde imagen PDF calibrada con PAS/PAD central",
+                }
+                return wave, debug, meta
+            except Exception as e:
+                attempts.append(f"página {pi+1} {color_name}: {e}")
+    raise ValueError("No se pudo digitalizar una curva central válida desde el PDF. " + " | ".join(attempts[:8]))
 
 def find_after(label, text, default=""):
     pat = re.compile(label + r"\s*[:#]?\s*([^\n]+)", re.I)
@@ -1444,11 +1654,15 @@ st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segu
 with st.sidebar:
     st.header("1) Importar estudio")
     pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-    wave_file = st.file_uploader("OBLIGATORIO: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
-    st.info("Modo estricto: las curvas, separación Pf/Pb, flujo y armónicos solo se generan con puntos reales de curva del paciente. No se aceptan curvas sintéticas ni genéricas.")
+    wave_file = st.file_uploader("Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+    st.info("Modo datos reales: si no se carga CSV/TXT, la app digitaliza automáticamente la curva desde la imagen del PDF. No se aceptan curvas sintéticas ni genéricas.")
 
 base = {}
 screenshot = None
+pdf_bytes = None
+curve_debug_png = None
+curve_source = ""
+curve_meta = {}
 if pdf_file:
     pdf_bytes = pdf_file.read()
     text = extract_pdf_text(pdf_bytes)
@@ -1474,13 +1688,29 @@ curve_error = None
 if wave_file:
     try:
         wave_df = read_curve_file_robust(wave_file, row)
-        st.success("Curva real importada y validada correctamente. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
+        curve_source = "CSV/TXT real cargado por el usuario"
+        curve_meta = {"metodo": curve_source, "puntos": int(len(wave_df))}
+        st.success("Curva real importada y validada correctamente desde CSV/TXT. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
     except Exception as e:
         curve_error = str(e)
-        st.error("El archivo importado no contiene una curva real válida. No se generarán gráficos de onda, separación Pf/Pb, armónicos ni PDF médico con curva sintética.")
-        st.caption(f"Detalle técnico: {curve_error}")
-else:
-    st.error("Para generar informe, separación de ondas y armónicos se debe cargar la curva real del paciente en CSV/TXT. La app queda en modo estricto: no usa curva sintética ni genérica.")
+        st.error("El archivo CSV/TXT importado no contiene una curva real válida. Se intentará digitalizar la curva desde el PDF, si está cargado.")
+        st.caption(f"Detalle técnico CSV/TXT: {curve_error}")
+
+if wave_df is None and pdf_bytes:
+    try:
+        with st.spinner("Digitalizando curva real desde la imagen del PDF..."):
+            wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
+        curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / trazo {curve_meta.get('color_detectado')}"
+        st.success("Curva real digitalizada desde el PDF y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
+        st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
+        if curve_debug_png:
+            st.image(curve_debug_png, caption="Control visual: región del PDF usada para digitalizar la curva", use_container_width=True)
+    except Exception as e:
+        curve_error = str(e)
+        st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
+        st.caption(f"Detalle técnico digitalización PDF: {curve_error}")
+elif wave_df is None:
+    st.error("Para generar informe, separación de ondas y armónicos se debe cargar un PDF con curva visible o un CSV/TXT real del paciente. La app queda en modo estricto: no usa curva sintética ni genérica.")
 
 dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
@@ -1489,7 +1719,7 @@ summary_cols = st.columns(4)
 summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
 summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
 summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
-summary_cols[3].metric("Modo de curva", "REAL" if wave_df is not None else "BLOQUEADO")
+summary_cols[3].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
 
 st.markdown("### Análisis de presión central y métricas")
 st.write(dx)
@@ -1501,6 +1731,7 @@ if wave_df is not None:
     conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
     summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+    st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
     st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
     st.markdown("### Conclusiones clínicas continuas")
@@ -1529,7 +1760,7 @@ if wave_df is not None:
     st.write(final_phenotype_text_preview)
     st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
 else:
-    st.warning("Carga obligatoria pendiente: archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin esa curva no se habilita el PDF final.")
+    st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
     st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
 
 st.subheader("Historial y exportación")
@@ -1543,7 +1774,7 @@ if HISTORIAL_FILE.exists():
     st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 if wave_df is None:
-    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente. No se generará reporte con curvas simuladas.")
+    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
 else:
     pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
     pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
