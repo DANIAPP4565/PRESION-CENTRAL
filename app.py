@@ -742,6 +742,7 @@ def _extract_layout_fields_from_pdf(pdf_bytes):
         m = re.search(r"\bEstudio\s*#?\b\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", txt, re.I)
         if m:
             val = _collapse_spaces(m.group(1)).strip(" :#-")
+            val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", val, flags=re.I)[0].strip(" :#-")
             if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
                 out["estudio"] = val
                 break
@@ -816,22 +817,171 @@ def _extract_layout_fields_from_pdf(pdf_bytes):
     return out
 
 
+
+
+def _patient_name_strict(candidate):
+    """Acepta solo nombres reales; rechaza frases administrativas como 'en posición'."""
+    c = _clean_patient_name(candidate)
+    if not c:
+        return ""
+    bad = r"\b(en\s+posici[oó]n|posici[oó]n|realizado|paciente|estudio|fecha|hora|diagn[oó]stico|medicaci[oó]n|n[úu]mero)\b"
+    if re.search(bad, c, re.I):
+        return ""
+    toks = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", c)
+    if len(toks) < 2:
+        return ""
+    # Preferir nombres en mayúsculas del PDF. Si todo está minúscula, suele ser frase de sección.
+    upper_tokens = sum(1 for t in toks if t.upper() == t)
+    if upper_tokens < 2 and not any(t.istitle() for t in toks):
+        return ""
+    return " ".join(toks[:5]).upper()
+
+
+def _extract_patient_study_by_words(pdf_bytes):
+    """Extractor por palabras y coordenadas: toma texto a la derecha de Paciente/Estudio en la misma línea visual."""
+    out = {}
+    if fitz is None or not pdf_bytes:
+        return out
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_order = list(range(len(doc)))
+        # priorizar segunda página, luego primera
+        if len(page_order) > 1:
+            page_order = [1, 0] + [i for i in page_order if i not in (0,1)]
+        for pi in page_order:
+            words = page_order and (doc[pi].get_text("words") or [])
+            # agrupar por y aproximada para sort visual incluso si block/line se parte mal
+            rows = []
+            for w in words:
+                if len(w) < 5: continue
+                x0,y0,x1,y1,txt = float(w[0]),float(w[1]),float(w[2]),float(w[3]),str(w[4])
+                placed=False
+                for row in rows:
+                    if abs(row[0]-y0) <= 4.0:
+                        row[1].append((x0,y0,x1,y1,txt)); placed=True; break
+                if not placed:
+                    rows.append([y0, [(x0,y0,x1,y1,txt)]])
+            for _, rowwords in rows:
+                rowwords=sorted(rowwords, key=lambda z:z[0])
+                texts=[w[4] for w in rowwords]
+                line=_collapse_spaces(" ".join(texts))
+                # Estudio #: primer número posterior a Estudio
+                if "estudio" in line.lower() and "estudio" not in out:
+                    m=re.search(r"\bEstudio\s*#?\s*([0-9A-Za-z][0-9A-Za-z_\-/]*)", line, re.I)
+                    if m:
+                        val=re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", m.group(1), flags=re.I)[0].strip(" :#-")
+                        if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                            out["estudio"] = val
+                # Paciente: tomar tokens a la derecha de la palabra Paciente hasta próxima etiqueta
+                for idx, w in enumerate(rowwords):
+                    if re.fullmatch(r"Paciente:?", w[4], re.I):
+                        right=[]
+                        for ww in rowwords[idx+1:]:
+                            tx=ww[4]
+                            if re.search(r"(?i)^(Estudio|N[uú]mero|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn|Medic|Realizado|Abdomen|Cuello|H\.?C\.?)", tx):
+                                break
+                            right.append(tx)
+                        cand=_patient_name_strict(" ".join(right))
+                        if cand:
+                            out["paciente"] = cand
+                            return out if out.get("estudio") else out
+        return out
+    except Exception:
+        return out
+
+
+def _extract_central_params_global(flat_text):
+    """Extrae Au/IAu/RVSE/PE/APC y corrige PAS/PP centrales con patrones globales robustos."""
+    out={}
+    txt=_collapse_spaces(flat_text).replace("I Au", "IAu").replace("R V S E", "RVSE").replace("P E", "PE")
+    # APC aparece en el recuadro superior: APC: (1.08)
+    m=re.search(r"\bAPC\b\s*:?\s*\(?\s*([-+]?\d+(?:[\.,]\d+)?)", txt, re.I)
+    if m: out["apc"] = to_float(m.group(1))
+    # Parámetros centrales: usar aparición con unidad y +/- para evitar tabla radial/central
+    patterns={
+        "pas_central": r"\bPAS\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "pp_central": r"\bPP\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "au": r"(?<!I)\bAu\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "iau": r"\bIAu\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "rvse": r"\bRVSE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "pe": r"\bPE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+    }
+    for k,pat in patterns.items():
+        ms=list(re.finditer(pat, txt, re.I))
+        if ms:
+            # tomar la última suele corresponder a la tabla de parámetros, no a leyenda
+            out[k]=to_float(ms[-1].group(1))
+    return out
+
+
+def _repair_swapped_pam_pp(data):
+    """Repara intercambios PAM/PP frecuentes por extracción visual de tabla Radial/Central."""
+    pas_r,pad_r,pam_r,pp_r = [to_float(data.get(k)) for k in ("pas_radial","pad_radial","pam_radial","pp_radial")]
+    pas_c,pad_c,pam_c,pp_c = [to_float(data.get(k)) for k in ("pas_central","pad_central","pam_central","pp_central")]
+    # PAM esperada aproximada, PP esperada exacta = PAS-PAD.
+    def close(a,b,tol): return (not np.isnan(a)) and (not np.isnan(b)) and abs(a-b)<=tol
+    if not np.isnan(pas_r) and not np.isnan(pad_r):
+        pp_exp=pas_r-pad_r; pam_exp=(pas_r+2*pad_r)/3
+        if not np.isnan(pam_r) and not np.isnan(pp_r):
+            if close(pam_r, pp_exp, 8) and close(pp_r, pam_exp, 12):
+                data["pam_radial"], data["pp_radial"] = pp_r, pam_r
+        # si PP quedó excesiva y PAM ausente/baja, recalcular PP
+        if to_float(data.get("pp_radial")) > 80 or to_float(data.get("pp_radial")) < 10:
+            data["pp_radial"] = pp_exp
+    if not np.isnan(pas_c) and not np.isnan(pad_c):
+        pp_exp=pas_c-pad_c; pam_exp=(pas_c+2*pad_c)/3
+        if not np.isnan(pam_c) and not np.isnan(pp_c):
+            if close(pam_c, pp_exp, 8) and close(pp_c, pam_exp, 12):
+                data["pam_central"], data["pp_central"] = pp_c, pam_c
+        if np.isnan(to_float(data.get("pam_central"))) or to_float(data.get("pam_central")) < 40:
+            data["pam_central"] = pam_exp
+        if to_float(data.get("pp_central")) > 80 or to_float(data.get("pp_central")) < 10:
+            data["pp_central"] = pp_exp
+    return data
+
 def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
     """Parser principal: texto plano + corrección visual por coordenadas del PDF."""
     data = parse_model_pac(fallback_text or "")
     try:
+        # 1) Corregir paciente/estudio con palabras visuales; evita 'en posición' y 'H.C. #'.
+        head = _extract_patient_study_by_words(pdf_bytes)
+        for k, v in head.items():
+            if k == "paciente":
+                if _patient_name_strict(v):
+                    data[k] = _patient_name_strict(v)
+            elif v not in [None, ""]:
+                data[k] = v
+
+        # 2) Corrección visual amplia de variables numéricas.
         layout = _extract_layout_fields_from_pdf(pdf_bytes)
         for k, v in layout.items():
-            if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
-                if v not in [None, ""] and not _is_bad_patient_value(v if k == "paciente" else str(v)):
+            if k == "paciente":
+                cand = _patient_name_strict(v)
+                if cand:
+                    data[k] = cand
+            elif k in ["estudio", "fecha", "hora", "sexo"]:
+                if v not in [None, ""]:
+                    if k == "estudio":
+                        v = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", str(v), flags=re.I)[0].strip(" :#-")
                     data[k] = v
             else:
                 fv = to_float(v)
                 if not np.isnan(fv):
                     data[k] = fv
+
+        # 3) Aumentaciones y parámetros centrales desde texto global, más robusto que líneas partidas.
+        flat = _collapse_spaces(fallback_text or "")
+        for k, v in _extract_central_params_global(flat).items():
+            if not np.isnan(to_float(v)):
+                data[k] = v
+
+        # 4) Reparar PAM/PP intercambiadas y valores contaminados antes de validar.
+        data = _repair_swapped_pam_pp(data)
+        data = _validate_and_repair_pac_data(data)
+        data = _repair_swapped_pam_pp(data)
         data = _validate_and_repair_pac_data(data)
     except Exception:
-        pass
+        data = _validate_and_repair_pac_data(data)
     return data
 
 
@@ -897,7 +1047,7 @@ def _clean_patient_name(value):
     """Limpia y valida nombre de paciente evitando que entren etiquetas del PDF."""
     v = _strip_trailing_labels(value)
     v = re.sub(r"\s{2,}", " ", v).strip(" :;,-")
-    blacklist = r"\b(n[úu]mero\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n|radial|central|pas|pad|pam|pp|fc|par[aá]metros)\b"
+    blacklist = r"\b(n[úu]mero\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n|radial|central|pas|pad|pam|pp|fc|par[aá]metros|realizado|posici[oó]n|paciente\s+en\s+posici[oó]n|en\s+posici[oó]n)\b"
     if re.search(blacklist, v or "", flags=re.I):
         return ""
     if re.fullmatch(r"(?i)(m|f)", v or ""):
@@ -1053,7 +1203,7 @@ def _is_bad_patient_value(v):
     s = _collapse_spaces(v)
     if not s:
         return True
-    if re.search(r"(?i)\b(Número\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n|Radial|Central)\b", s):
+    if re.search(r"(?i)\b(Número\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n|Radial|Central|Realizado|posici[oó]n|en\s+posici[oó]n)\b", s):
         return True
     if len(s) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", s):
         return True
@@ -1081,6 +1231,7 @@ def _parse_header_fields_from_lines(lines):
         m = re.search(r"\bEstudio\s*#?\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", ln, re.I)
         if m:
             val = _collapse_spaces(m.group(1)).strip(":#- ")
+            val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", val, flags=re.I)[0].strip(" :#-")
             if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
                 out["estudio"] = val
                 break
@@ -1127,8 +1278,8 @@ def _parse_header_fields_from_lines(lines):
 
 def _validate_and_repair_pac_data(data):
     """Repara valores mal cargados por columnas pegadas del PDF y limpia etiquetas contaminantes."""
-    data["paciente"] = _clean_patient_name(data.get("paciente", ""))
-    if _is_bad_patient_value(data.get("paciente", "")):
+    data["paciente"] = _patient_name_strict(data.get("paciente", "")) or _clean_patient_name(data.get("paciente", ""))
+    if _is_bad_patient_value(data.get("paciente", "")) or re.search(r"(?i)\b(en\s+posici[oó]n|posici[oó]n|realizado)\b", str(data.get("paciente", ""))):
         data["paciente"] = ""
     # Evitar que el número de estudio quede como sexo u otra etiqueta.
     if re.fullmatch(r"(?i)(M|F)", _collapse_spaces(data.get("estudio", ""))):
