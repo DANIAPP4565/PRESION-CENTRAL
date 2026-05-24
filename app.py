@@ -2333,7 +2333,7 @@ def build_continuous_conclusions(row, wave_df, hdf):
         ("1. Análisis de presión central y métricas", c1),
         ("2. Análisis de separación de ondas", c2),
         ("3. Análisis de armónicos", c3),
-        ("4. Interpretación final integrada", c4),
+        ("4. Fenotipo final de presión central", c4),
     ], sep_df, sep_metrics, sep_interp
 
 
