@@ -718,18 +718,71 @@ def _normalize_sex(value):
 
 
 def _clean_patient_name(value):
+    """Limpia y valida nombre de paciente evitando que entren etiquetas del PDF."""
     v = _strip_trailing_labels(value)
-    v = re.sub(r"\s{2,}", " ", v).strip()
-    # Evitar que queden etiquetas administrativas como nombre del paciente.
-    if re.search(r"(?i)(número\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n)", v or ""):
+    v = re.sub(r"\s{2,}", " ", v).strip(" :;,-")
+    blacklist = r"\b(n[úu]mero\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n|radial|central|pas|pad|pam|pp|fc|par[aá]metros)\b"
+    if re.search(blacklist, v or "", flags=re.I):
         return ""
     if re.fullmatch(r"(?i)(m|f)", v or ""):
         return ""
-    # Nombre demasiado corto o puramente numérico: no aceptar.
     if len(v) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", v):
+        return ""
+    # Evitar valores muy largos provenientes de una fila entera del PDF.
+    if len(v.split()) > 8:
         return ""
     return v
 
+
+def _extract_header_by_regex(flat_text):
+    """Rescate fuerte de cabecera cuando pdfplumber mezcla columnas.
+
+    Busca patrones reales del PDF tipo Exxer:
+    Estudio # 684 / Paciente ABEL ALEJANDRO SANCHO / Edad 54 / Sexo M.
+    """
+    out = {}
+    flat = _collapse_spaces(flat_text)
+
+    m = re.search(r"\bEstudio\s*#?\s*[:#]?\s*([0-9A-Za-z][0-9A-Za-z_\-/]{0,20})", flat, re.I)
+    if m:
+        val = _collapse_spaces(m.group(1)).strip(" :#-;")
+        if val and not re.fullmatch(r"(?i)(m|f|paciente|fecha|hora|edad|sexo)", val):
+            out["estudio"] = val
+
+    # Captura el nombre hasta la próxima etiqueta demográfica/administrativa.
+    # Se recorren TODAS las ocurrencias de "Paciente" porque algunos PDFs traen primero
+    # un encabezado contaminado como "Paciente Número de estudio:".
+    patient_patterns = [
+        r"\bPaciente\b\s*[:#]?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ ,.'\-]{2,80}?)(?=\s+\b(?:Edad|Sexo|Peso|Altura|IMC|SC|Abdomen|Cuello|Diagn[oó]stico|Medicaci[oó]n|Realizado|Fecha|Hora|Estudio)\b|$)",
+        r"\bPaciente\b\s*[:#]?\s*([^\n\r]{3,90}?)(?=\s+\b(?:Edad|Sexo|Peso|Altura|IMC|SC|Abdomen|Cuello|Diagn[oó]stico|Medicaci[oó]n|Realizado|Fecha|Hora|Estudio)\b|$)",
+    ]
+    for pat in patient_patterns:
+        for m in re.finditer(pat, flat, re.I):
+            cand_raw = m.group(1)
+            cand_raw = re.split(r"\b(?:N[úu]mero\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand_raw, flags=re.I)[0]
+            cand = _clean_patient_name(cand_raw)
+            if cand and not _is_bad_patient_value(cand):
+                out["paciente"] = cand
+                break
+        if out.get("paciente"):
+            break
+
+    # Demografía y antropometría por patrones tolerantes.
+    for key, label in [("edad", "Edad"), ("peso", "Peso"), ("altura", "Altura"), ("imc", "IMC"), ("sc", "SC")]:
+        m = re.search(rf"\b{label}\b\s*[:#]?\s*([-+]?\d+(?:[\.,]\d+)?)", flat, re.I)
+        if m:
+            out[key] = to_float(m.group(1))
+    m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", flat, re.I)
+    if m:
+        out["sexo"] = m.group(1).upper()
+
+    m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", flat, re.I)
+    if m:
+        out["fecha"] = m.group(1)
+    m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", flat, re.I)
+    if m:
+        out["hora"] = m.group(1)
+    return out
 
 def _parse_radial_central_table(flat_text, data):
     """Extrae tabla Radial/Central por filas PAS/PAD/PAM/PP/FC. Evita intercambiar PAM con PP."""
@@ -774,28 +827,49 @@ def pair_from_block(block, label):
 
 
 def _parse_central_parameters(flat_text, data):
-    """Extrae PAS/PP/Au/IAu/RVSE/PE de la sección de parámetros centrales."""
-    msec = re.search(r"Parámetros\s+hemodinámicos\s+centrales(.*?)(?:Conclusiones|Conclusión|PAS\s+Presión|Pulso|$)", flat_text, re.I)
-    sec = msec.group(1) if msec else flat_text
+    """Extrae parámetros centrales con tolerancia a tablas partidas del PDF.
 
-    def val(label):
-        # Soporta: PAS mmHg 119 +/-1, Au mmHg +8 +/-1, PE 32.8
-        pat = re.compile(rf"\b{label}\b\s*(?:mmHg|%|lpm)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
-        mm = pat.search(sec)
-        return to_float(mm.group(1)) if mm else np.nan
+    Incluye PAS, PP, Au, IAu, RVSE, PE y APC si está disponible.
+    La prioridad es la sección 'Parámetros hemodinámicos centrales'.
+    """
+    msec = re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales(.*?)(?:Conclusiones|Conclusi[oó]n|PAS\s+Presi[oó]n|Pulso|$)", flat_text, re.I)
+    sec = msec.group(1) if msec else flat_text
+    sec = _collapse_spaces(sec)
+
+    def val(label, aliases=()):
+        labels = [label] + list(aliases)
+        for lab in labels:
+            # Label seguido opcionalmente de unidad y valor con signo. Evita que Au capture IAu usando lookbehind negativo.
+            if lab.lower() == "au":
+                pat = re.compile(r"(?<!I)\bAu\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+            else:
+                pat = re.compile(rf"\b{lab}\b\s*(?:mmHg|%|lpm|m/s)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+            mm = pat.search(sec)
+            if mm:
+                return to_float(mm.group(1))
+        return np.nan
 
     mapping = {
         "pas_central": val("PAS"),
         "pp_central": val("PP"),
-        "au": val("Au"),
-        "iau": val("IAu"),
-        "rvse": val("RVSE"),
-        "pe": val("PE"),
+        "au": val("Au", aliases=["Aumentaci[oó]n\s+A[oó]rtica\s+Central"]),
+        "iau": val("IAu", aliases=["Indice\s+de\s+Aumentaci[oó]n\s+Central", "Índice\s+de\s+Aumentaci[oó]n\s+Central"]),
+        "rvse": val("RVSE", aliases=["Relaci[oó]n\s+de\s+Viabilidad\s+Sub\s*Endoc[aá]rdica"]),
+        "pe": val("PE", aliases=["Periodo\s+Eyectivo", "Per[ií]odo\s+Eyectivo"]),
+        "apc": val("APC", aliases=["Amplificaci[oó]n\s+Perif[eé]rico\s*Central"]),
     }
+
+    # Respaldo por patrón posicional de la tabla central en la captura:
+    # PAS mmHg 119 +/-1  PP mmHg 31 +/-2  Au mmHg +8 +/-1  IAu % +25 +/-3  RVSE % 180 +/-3  PE % 32.8
+    positional = re.findall(r"\b(PAS|PP|Au|IAu|RVSE|PE|APC)\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", sec, flags=re.I)
+    for lab, num in positional:
+        key = {"pas":"pas_central", "pp":"pp_central", "au":"au", "iau":"iau", "rvse":"rvse", "pe":"pe", "apc":"apc"}.get(lab.lower())
+        if key and np.isnan(to_float(mapping.get(key, np.nan))):
+            mapping[key] = to_float(num)
+
     for k, v in mapping.items():
         if not np.isnan(v):
             data[k] = v
-
 
 
 def _is_bad_patient_value(v):
@@ -898,7 +972,7 @@ def _validate_and_repair_pac_data(data):
         ("edad", 1, 120), ("peso", 20, 250), ("altura", 80, 230), ("imc", 10, 80), ("sc", 0.5, 3.5),
         ("pas_radial", 50, 260), ("pad_radial", 30, 160), ("pam_radial", 40, 200), ("pp_radial", 10, 120),
         ("pas_central", 50, 260), ("pad_central", 30, 160), ("pam_central", 40, 200), ("pp_central", 10, 120),
-        ("fc", 25, 180), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 10, 60)
+        ("fc", 25, 180), ("au", -80, 100), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 10, 60), ("apc", 0.2, 3.5)
     ]:
         v = to_float(data.get(k))
         if np.isnan(v) or not (lo <= v <= hi):
@@ -938,13 +1012,15 @@ def parse_model_pac(text):
     # Corrección prioritaria por líneas: evita que "Paciente" quede como "Número de estudio"
     # y que "Estudio" tome "M" u otra etiqueta de la cabecera.
     header_by_lines = _parse_header_fields_from_lines(lines)
-    for k, v in header_by_lines.items():
-        if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
-            if v not in [None, ""]:
-                data[k] = v
-        else:
-            if not np.isnan(to_float(v)):
-                data[k] = v
+    header_by_regex = _extract_header_by_regex(flat)
+    for source in (header_by_lines, header_by_regex):
+        for k, v in source.items():
+            if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
+                if v not in [None, ""]:
+                    data[k] = v
+            else:
+                if not np.isnan(to_float(v)):
+                    data[k] = v
 
     _parse_radial_central_table(flat, data)
     _parse_central_parameters(flat, data)
@@ -961,7 +1037,7 @@ def parse_model_pac(text):
                 "pp_radial": vals[6], "pp_central": vals[7],
             })
 
-    for k in ["pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","au","iau","rvse","pe"]:
+    for k in ["pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","au","iau","rvse","pe","apc"]:
         data.setdefault(k, np.nan)
 
     return _validate_and_repair_pac_data(data)
@@ -1881,7 +1957,8 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["Au", "", _fmt(row.get("au")), "mmHg"],
             ["IAu", "", _fmt(row.get("iau")), "%"],
             ["RVSE", "", _fmt(row.get("rvse")), "%"],
-            ["PE", "", _fmt(row.get("pe")), "%"]]
+            ["PE", "", _fmt(row.get("pe")), "%"],
+            ["APC", "", _fmt(row.get("apc")), "relación"]]
     patient_table = Table(datos, colWidths=[22*mm, 54*mm, 22*mm, 42*mm], style=_table_style("#EAF2F8", 6.9))
     values_table = Table(vals, colWidths=[20*mm, 24*mm, 23*mm, 16*mm], style=_table_style("#D9EAF7", 6.9))
     story.append(Table([[patient_table, values_table]], colWidths=[101*mm, 87*mm], style=TableStyle([
@@ -2016,7 +2093,7 @@ else:
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","medicacion","diagnostico_previo"]
+fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
 row = {}
 for i, f in enumerate(fields):
     with cols[i%4]:
