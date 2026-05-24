@@ -128,6 +128,17 @@ def safe_trapezoid(y, x):
     return float(np.sum((y[1:] + y[:-1]) * 0.5 * np.diff(x)))
 
 
+def format_optional(v, dec=1):
+    """Formatea valores numéricos evitando mostrar nan en informes clínicos."""
+    try:
+        f = float(v)
+        if np.isnan(f):
+            return "no disponible"
+        return f"{f:.{dec}f}"
+    except Exception:
+        return "no disponible"
+
+
 
 
 def is_physiologic_waveform(df, row=None):
@@ -1942,8 +1953,22 @@ def estimate_wave_separation(wave_df, row):
     })
 
     # Métricas de morfología real para auditar que no se repita la misma curva.
-    systolic_area = float(safe_trapezoid(excess[(t0 >= ej_start) & (t0 <= ej_end)], t0[(t0 >= ej_start) & (t0 <= ej_end)]))
+    syst_mask = (t0 >= ej_start) & (t0 <= ej_end)
+    diast_mask = (t0 > ej_end) & (t0 <= 1000)
+
+    # Áreas de presión-tiempo sobre PAD: útiles para morfología de la onda.
+    systolic_area = float(safe_trapezoid(excess[syst_mask], t0[syst_mask]))
     total_area = float(safe_trapezoid(excess, t0))
+
+    # RVSE/SEVR operativo: relación de área diastólica/sistólica de la curva central real.
+    # Se calcula con la presión central absoluta porque representa una aproximación presión-tiempo
+    # del balance oferta/demanda subendocárdica. No se calcula desde valores aislados.
+    systolic_pti = float(safe_trapezoid(p0[syst_mask], t0[syst_mask]))
+    diastolic_pti = float(safe_trapezoid(p0[diast_mask], t0[diast_mask]))
+    rvse_calc = (diastolic_pti / systolic_pti * 100.0) if systolic_pti > 0 and np.sum(diast_mask) >= 2 else np.nan
+    rvse_pdf = to_float(row.get("rvse"))
+    rvse_delta = rvse_calc - rvse_pdf if not np.isnan(rvse_calc) and not np.isnan(rvse_pdf) else np.nan
+
     ai_morph = float((p0[refl_i] - p0[max_dp_i]) / pp * 100.0) if pp > 0 else np.nan
 
     metrics = {
@@ -1962,6 +1987,11 @@ def estimate_wave_separation(wave_df, row):
         "t_max_dpdt_ms": float(t0[max_dp_i]),
         "area_sistolica": systolic_area,
         "area_total": total_area,
+        "area_sistolica_pti": systolic_pti,
+        "area_diastolica_pti": diastolic_pti,
+        "rvse_calculado_%": rvse_calc,
+        "rvse_importado_%": rvse_pdf,
+        "rvse_delta_%": rvse_delta,
         "ai_morfologico_%": ai_morph,
         "t_ej_inicio_ms": ej_start,
         "t_ej_fin_ms": ej_end,
@@ -2047,6 +2077,34 @@ def plot_aortic_flow(sep_df):
     ax.fill_between(t, 0, q, color="#6A1B9A", alpha=0.08)
     _apply_professional_axes(ax, "Curva estimada de flujo aórtico", "Tiempo (ms)", "Flujo aórtico estimado (mL/s)")
     ax.set_ylim(bottom=0)
+    ax.margins(x=0.01)
+    return fig_to_png(fig)
+
+
+def plot_rvse_area(sep_df, sep_metrics):
+    """Gráfico de áreas presión-tiempo para RVSE/SEVR calculado desde la curva real."""
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    p = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
+    ej_start = float(sep_metrics.get("t_ej_inicio_ms", np.nan))
+    ej_end = float(sep_metrics.get("t_ej_fin_ms", np.nan))
+    ok = np.isfinite(t) & np.isfinite(p)
+    t, p = t[ok], p[ok]
+    ax.plot(t, p, color="#111111", linewidth=2.2, label="Presión central real")
+    if len(t) and not np.isnan(ej_start) and not np.isnan(ej_end):
+        syst = (t >= ej_start) & (t <= ej_end)
+        diast = t > ej_end
+        ax.fill_between(t[syst], 0, p[syst], color="#C62828", alpha=0.13, label="Área sistólica")
+        ax.fill_between(t[diast], 0, p[diast], color="#1565C0", alpha=0.12, label="Área diastólica")
+        ax.axvline(ej_start, color="#78909C", linewidth=0.9, linestyle=":")
+        ax.axvline(ej_end, color="#78909C", linewidth=0.9, linestyle="--")
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    title = "RVSE / SEVR por áreas presión-tiempo"
+    if not np.isnan(rvse_calc):
+        title += f" = {rvse_calc:.1f}%"
+    _apply_professional_axes(ax, title, "Tiempo (ms)", "Presión central (mmHg)")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
     ax.margins(x=0.01)
     return fig_to_png(fig)
 
@@ -2182,6 +2240,39 @@ def interpret_harmonic_profile(hdf):
         return "El perfil armónico no pudo interpretarse en forma estable, aunque se conserva el gráfico y la tabla espectral para revisión visual."
 
 
+def interpret_rvse_profile(row, sep_metrics):
+    """Interpreta RVSE/SEVR calculado desde la curva central real y lo compara con el valor importado."""
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    rvse_imp = to_float(row.get("rvse"))
+    syst_pti = sep_metrics.get("area_sistolica_pti", np.nan)
+    diast_pti = sep_metrics.get("area_diastolica_pti", np.nan)
+
+    if np.isnan(rvse_calc):
+        return "RVSE/SEVR: no calculable porque no se pudo definir en forma estable el área sistólica y diastólica de la curva central real."
+
+    if rvse_calc < 120:
+        grade = "reducido"
+        meaning = "sugiere menor reserva subendocárdica relativa o mayor demanda sistólica respecto del tiempo diastólico disponible"
+    elif rvse_calc < 150:
+        grade = "limítrofe/intermedio"
+        meaning = "sugiere balance subendocárdico intermedio, dependiente de la frecuencia cardíaca, presión diastólica central y poscarga sistólica"
+    else:
+        grade = "conservado"
+        meaning = "sugiere balance presión-tiempo diastólico/sistólico favorable en la curva analizada"
+
+    comparison = ""
+    if not np.isnan(rvse_imp) and rvse_imp > 0:
+        delta = rvse_calc - rvse_imp
+        comparison = f" El RVSE informado por el equipo es {rvse_imp:.1f}% y el RVSE recalculado por la app es {rvse_calc:.1f}% (diferencia {delta:+.1f} puntos), útil como control de consistencia de la digitalización."
+
+    return (
+        f"RVSE/SEVR calculado desde la curva central real: {rvse_calc:.1f}%. "
+        f"Área sistólica presión-tiempo: {format_optional(syst_pti, 0)} mmHg·ms; "
+        f"área diastólica presión-tiempo: {format_optional(diast_pti, 0)} mmHg·ms. "
+        f"Interpretación: RVSE {grade}, {meaning}.{comparison}"
+    )
+
+
 def build_continuous_conclusions(row, wave_df, hdf):
     """Devuelve las cuatro conclusiones continuas solicitadas antes de los gráficos."""
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
@@ -2196,7 +2287,8 @@ def build_continuous_conclusions(row, wave_df, hdf):
         except Exception:
             return "no disponible"
 
-    c1 = interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk)
+    rvse_interp = interpret_rvse_profile(row, sep_metrics)
+    c1 = interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk) + " " + rvse_interp
 
     c2 = (
         f"La separación de ondas estima un componente anterógrado Pf pico de {fmt(sep_metrics.get('pf_pico', np.nan),1)} mmHg "
@@ -2222,6 +2314,11 @@ def build_continuous_conclusions(row, wave_df, hdf):
         integrated_flags.append("reflexión de onda aumentada")
     if not np.isnan(ri) and ri >= 0.32:
         integrated_flags.append("mayor contribución retrógrada")
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    if not np.isnan(rvse_calc) and rvse_calc < 120:
+        integrated_flags.append("RVSE reducido por análisis de área presión-tiempo")
+    elif not np.isnan(rvse_calc) and rvse_calc >= 150:
+        integrated_flags.append("RVSE conservado")
     if not integrated_flags:
         integrated_flags.append("sin marcadores mayores simultáneos de sobrecarga pulsátil central en los parámetros disponibles")
 
@@ -2367,9 +2464,20 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
         phenotype = "Fenotipo central conservado o de bajo impacto pulsátil"
         clinical = "no se identifican marcadores simultáneos mayores de sobrecarga central, reflexión aumentada o complejidad armónica relevante en los datos disponibles."
 
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    if not np.isnan(rvse_calc):
+        if rvse_calc < 120:
+            reasons_pressure.append(f"RVSE calculado reducido ({rvse_calc:.1f}%)")
+            pressure_score += 1
+        elif rvse_calc >= 150:
+            reasons_pressure.append(f"RVSE calculado conservado ({rvse_calc:.1f}%)")
+        else:
+            reasons_pressure.append(f"RVSE calculado intermedio ({rvse_calc:.1f}%)")
+        total_score = pressure_score + wave_score + harmonic_score
+
     table = [
         ["Dominio", "Puntaje", "Elementos considerados"],
-        ["Presión central y métricas", str(pressure_score), "; ".join(reasons_pressure) if reasons_pressure else "sin datos suficientes"],
+        ["Presión central, métricas y RVSE", str(pressure_score), "; ".join(reasons_pressure) if reasons_pressure else "sin datos suficientes"],
         ["Separación de ondas Pf/Pb", str(wave_score), "; ".join(reasons_wave) if reasons_wave else "sin datos suficientes"],
         ["Armónicos", str(harmonic_score), "; ".join(reasons_harm) if reasons_harm else "sin datos suficientes"],
         ["Puntaje integrado", str(total_score), phenotype],
@@ -2379,7 +2487,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
         f"Fenotipo final: {phenotype}. La integración de presión central, separación de ondas y análisis armónico indica que {clinical} "
         f"Valores integrados: PAS central {pas_c:.0f} mmHg si disponible, PAD central {pad_c:.0f} mmHg si disponible, "
         f"PP central {pp_c:.0f} mmHg si disponible, IAu {iau:.1f}% si disponible, PPA {ppa:.2f} si disponible, "
-        f"RM {rm:.2f}, RI {ri:.2f}, Tref {tref:.0f} ms, Pf pico {pf:.1f} mmHg y Pb pico {pb:.1f} mmHg. "
+        f"RVSE calculado {rvse_calc:.1f}% si disponible, RM {rm:.2f}, RI {ri:.2f}, Tref {tref:.0f} ms, Pf pico {pf:.1f} mmHg y Pb pico {pb:.1f} mmHg. "
         "Este fenotipo es una clasificación operativa de apoyo y debe integrarse con edad, sexo, presión braquial, tratamiento, riesgo cardiovascular y lesión de órgano blanco."
     )
     text = text.replace("nan mmHg", "no disponible").replace("nan%", "no disponible").replace("nan", "no disponible")
@@ -2501,7 +2609,8 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["FC", _fmt(row.get("fc"),0), "", "lpm"],
             ["Au", "", _fmt(row.get("au")), "mmHg"],
             ["IAu", "", _fmt(row.get("iau")), "%"],
-            ["RVSE", "", _fmt(row.get("rvse")), "%"],
+            ["RVSE equipo", "", _fmt(row.get("rvse")), "%"],
+            ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
             ["PE", "", _fmt(row.get("pe")), "%"],
             ["APC", "", _fmt(row.get("apc")), "relación"]]
     patient_table = Table(datos, colWidths=[22*mm, 54*mm, 22*mm, 42*mm], style=_table_style("#EAF2F8", 6.9))
@@ -2549,7 +2658,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         [_graph_cell("Flujo aórtico estimado", plot_aortic_flow(sep_df), img_w, img_h),
          _graph_cell("Análisis armónico", plot_harmonics(hdf), img_w, img_h)],
         [_graph_cell("Semaforización clínica", plot_clinical_gauges(row, ppa), img_w, img_h),
-         [Paragraph("Fenotipo final de presión central", styles["H3PAC"]), Paragraph(final_phenotype, styles["BodyPAC"]), Paragraph(final_phenotype_text, styles["SmallPAC"])]],
+         _graph_cell("RVSE / SEVR por áreas presión-tiempo", plot_rvse_area(sep_df, sep_metrics), img_w, img_h)],
     ], colWidths=[94*mm, 94*mm], rowHeights=[59*mm, 59*mm, 59*mm], style=TableStyle([
         ("VALIGN", (0,0), (-1,-1), "TOP"),
         ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
@@ -2686,11 +2795,12 @@ elif wave_df is None:
 dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
 st.subheader("Vista clínica previa")
-summary_cols = st.columns(4)
+summary_cols = st.columns(5)
 summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
 summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
 summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
-summary_cols[3].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
+summary_cols[3].metric("RVSE equipo", f"{to_float(row.get('rvse')):.0f}%" if not np.isnan(to_float(row.get('rvse'))) else "No disponible")
+summary_cols[4].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
 
 st.markdown("### Análisis de presión central y métricas")
 st.write(dx)
@@ -2702,6 +2812,7 @@ if wave_df is not None:
     conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
     summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+    summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
     st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
     st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
@@ -2718,6 +2829,7 @@ if wave_df is not None:
     with g1:
         st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
         st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
+        st.image(plot_rvse_area(sep_df_preview, sep_metrics_preview), caption="RVSE / SEVR por áreas presión-tiempo", use_container_width=True)
     with g2:
         st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
         st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
