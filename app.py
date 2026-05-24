@@ -890,6 +890,186 @@ def _extract_patient_study_by_words(pdf_bytes):
         return out
 
 
+
+
+def _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=4.5):
+    """Devuelve filas visuales por coordenadas PyMuPDF para evitar mezclas de pdfplumber."""
+    if fitz is None or not pdf_bytes:
+        return [], None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if len(doc) == 0:
+            return [], None
+        pi = page_index if len(doc) > page_index else 0
+        page = doc[pi]
+        W, H = float(page.rect.width), float(page.rect.height)
+        words = page.get_text("words") or []
+        rows = []
+        for w in words:
+            if len(w) < 5:
+                continue
+            x0, y0, x1, y1, txt = float(w[0]), float(w[1]), float(w[2]), float(w[3]), str(w[4])
+            if not txt.strip():
+                continue
+            placed = False
+            yc = (y0 + y1) / 2.0
+            for row in rows:
+                if abs(row[0] - yc) <= y_tol:
+                    row[1].append((x0, y0, x1, y1, txt)); placed = True; break
+            if not placed:
+                rows.append([yc, [(x0, y0, x1, y1, txt)]])
+        out = []
+        for yc, ws in rows:
+            ws = sorted(ws, key=lambda z: z[0])
+            text = _collapse_spaces(" ".join(w[4] for w in ws))
+            out.append({"y": yc, "words": ws, "text": text, "page": pi, "W": W, "H": H})
+        out.sort(key=lambda r: (r["y"], min(w[0] for w in r["words"])))
+        return out, (W, H, pi)
+    except Exception:
+        return [], None
+
+
+def _numbers_from_row_words(rowwords, x_min=None, x_max=None):
+    vals = []
+    for x0, y0, x1, y1, txt in rowwords:
+        if x_min is not None and x0 < x_min:
+            continue
+        if x_max is not None and x0 > x_max:
+            continue
+        if re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?", str(txt).strip()):
+            vals.append((x0, to_float(txt)))
+    return vals
+
+
+def _extract_patient_top_right_by_coordinates(pdf_bytes):
+    """Lee Paciente/Estudio desde la cabecera visual, evitando 'Realizado con paciente en posición'."""
+    out = {}
+    rows, meta = _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=4.5)
+    if not rows or not meta:
+        return out
+    W, H, _ = meta
+    # priorizar cabecera superior derecha, pero permitir toda la parte superior.
+    for row in rows:
+        txt = row["text"]
+        if row["y"] > 0.33 * H:
+            continue
+        if re.search(r"(?i)\bRealizado\b|\bposici[oó]n\b", txt):
+            continue
+        # Estudio # 684
+        if "estudio" not in out:
+            m = re.search(r"\bEstudio\s*#?\s*([0-9A-Za-z][0-9A-Za-z_\-/]*)", txt, re.I)
+            if m:
+                val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", m.group(1), flags=re.I)[0].strip(" :#-")
+                if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                    out["estudio"] = val
+        # Paciente ABEL ALEJANDRO SANCHO: solo si la palabra Paciente inicia etiqueta y no frase interna.
+        for idx, ww in enumerate(row["words"]):
+            tx = ww[4].strip()
+            if re.fullmatch(r"Paciente:?", tx, flags=re.I):
+                # Rechazar si aparece precedido por 'con', 'del', etc.
+                if idx > 0 and re.search(r"(?i)^(con|del|el|la)$", row["words"][idx-1][4]):
+                    continue
+                right = []
+                for w2 in row["words"][idx+1:]:
+                    tx2 = w2[4].strip()
+                    if re.search(r"(?i)^(Estudio|N[uú]mero|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn|Medic|Realizado|Abdomen|Cuello|H\.?C\.?)", tx2):
+                        break
+                    right.append(tx2)
+                cand = _patient_name_strict(" ".join(right))
+                if cand:
+                    out["paciente"] = cand
+                    return out
+    return out
+
+
+def _extract_tables_by_coordinates(pdf_bytes):
+    """Extrae Radial/Central y parámetros centrales por coordenadas visuales.
+
+    Diseñado para el formato mostrado: segunda hoja, tabla Radial/Central y bloque
+    'Parámetros hemodinámicos centrales'. Evita que PAM y PP se intercambien y
+    recupera Au/IAu/RVSE/PE aunque el texto plano se parta por columnas.
+    """
+    out = {}
+    rows, meta = _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=5.5)
+    if not rows or not meta:
+        return out
+    W, H, _ = meta
+
+    # Buscar encabezados Radial / Central para ubicar columnas.
+    radial_x = central_x = header_y = None
+    for row in rows:
+        if re.search(r"\bRadial\b", row["text"], re.I) and re.search(r"\bCentral\b", row["text"], re.I):
+            for w in row["words"]:
+                if re.fullmatch(r"Radial", w[4], re.I): radial_x = (w[0]+w[2])/2
+                if re.fullmatch(r"Central", w[4], re.I): central_x = (w[0]+w[2])/2
+            header_y = row["y"]
+            break
+    if radial_x is not None and central_x is not None and header_y is not None:
+        label_map = {"PAS":("pas_radial","pas_central"), "PAD":("pad_radial","pad_central"), "PAM":("pam_radial","pam_central"), "PP":("pp_radial","pp_central")}
+        for row in rows:
+            if not (header_y < row["y"] < header_y + 0.28*H):
+                continue
+            words = row["words"]
+            first = words[0][4].strip() if words else ""
+            for lab, (kr, kc) in label_map.items():
+                if re.fullmatch(lab, first, re.I):
+                    nums = _numbers_from_row_words(words, x_min=words[0][2])
+                    if len(nums) >= 2:
+                        # Asignar por cercanía a los centros de las columnas Radial/Central.
+                        nr = min(nums, key=lambda z: abs(z[0]-radial_x))[1]
+                        nc = min(nums, key=lambda z: abs(z[0]-central_x))[1]
+                        out[kr] = nr; out[kc] = nc
+            if re.fullmatch(r"FC", first, re.I):
+                nums = _numbers_from_row_words(words, x_min=words[0][2])
+                if nums:
+                    out["fc"] = nums[0][1]
+
+    # Bloque de parámetros hemodinámicos centrales.
+    param_y = None
+    for row in rows:
+        if re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales", row["text"], re.I):
+            param_y = row["y"]; break
+    param_labels = {"PAS":"pas_central", "PP":"pp_central", "Au":"au", "IAu":"iau", "RVSE":"rvse", "PE":"pe", "APC":"apc"}
+    for row in rows:
+        if param_y is not None:
+            if not (param_y < row["y"] < param_y + 0.30*H):
+                continue
+        else:
+            if not (row["y"] > 0.55*H and min(w[0] for w in row["words"]) > 0.25*W):
+                continue
+        words = row["words"]
+        text = row["text"].replace("I Au", "IAu")
+        # Tomar etiqueta como primera palabra o cerca del inicio de la fila.
+        lab = None
+        for cand in ["IAu", "RVSE", "APC", "PAS", "PP", "Au", "PE"]:
+            if re.search(rf"(^|\s){cand}(\s|$)", text, re.I):
+                lab = cand; break
+        if not lab:
+            continue
+        # Buscar primer número situado después de la etiqueta y después de unidad; evita capturar tolerancias +/-.
+        label_x1 = None
+        for w in words:
+            if re.fullmatch(lab, w[4], re.I) or (lab == "IAu" and re.fullmatch(r"I?Au", w[4], re.I)):
+                label_x1 = w[2]; break
+        if label_x1 is None:
+            label_x1 = min(w[0] for w in words)
+        nums = _numbers_from_row_words(words, x_min=label_x1)
+        if nums:
+            # En filas con '+/-', el primer número tras etiqueta/unidad es el valor principal.
+            out[param_labels[lab]] = nums[0][1]
+
+    # APC del recuadro: 'APC:' '(1.08)' suele estar en el panel de curva superior izquierdo.
+    for row in rows:
+        if re.search(r"\bAPC\b", row["text"], re.I):
+            nums = _numbers_from_row_words(row["words"])
+            if nums:
+                # suele ser decimal 1.08; preferir valor entre 0.2 y 3.5
+                valid = [v for _, v in nums if 0.2 <= v <= 3.5]
+                if valid:
+                    out["apc"] = valid[0]
+                    break
+    return out
+
 def _extract_central_params_global(flat_text):
     """Extrae Au/IAu/RVSE/PE/APC y corrige PAS/PP centrales con patrones globales robustos."""
     out={}
@@ -915,34 +1095,63 @@ def _extract_central_params_global(flat_text):
 
 
 def _repair_swapped_pam_pp(data):
-    """Repara intercambios PAM/PP frecuentes por extracción visual de tabla Radial/Central."""
+    """Repara intercambios PAM/PP y recalcula PP si no coincide con PAS-PAD.
+
+    En este formato del PDF, es frecuente que la lectura de columnas cargue PAM como PP
+    y PP como PAM. La prioridad clínica es: PP = PAS - PAD; PAM aproximada = (PAS+2*PAD)/3.
+    """
     pas_r,pad_r,pam_r,pp_r = [to_float(data.get(k)) for k in ("pas_radial","pad_radial","pam_radial","pp_radial")]
     pas_c,pad_c,pam_c,pp_c = [to_float(data.get(k)) for k in ("pas_central","pad_central","pam_central","pp_central")]
-    # PAM esperada aproximada, PP esperada exacta = PAS-PAD.
-    def close(a,b,tol): return (not np.isnan(a)) and (not np.isnan(b)) and abs(a-b)<=tol
-    if not np.isnan(pas_r) and not np.isnan(pad_r):
-        pp_exp=pas_r-pad_r; pam_exp=(pas_r+2*pad_r)/3
-        if not np.isnan(pam_r) and not np.isnan(pp_r):
-            if close(pam_r, pp_exp, 8) and close(pp_r, pam_exp, 12):
-                data["pam_radial"], data["pp_radial"] = pp_r, pam_r
-        # si PP quedó excesiva y PAM ausente/baja, recalcular PP
-        if to_float(data.get("pp_radial")) > 80 or to_float(data.get("pp_radial")) < 10:
+
+    def close(a,b,tol):
+        return (not np.isnan(a)) and (not np.isnan(b)) and abs(a-b) <= tol
+
+    if not np.isnan(pas_r) and not np.isnan(pad_r) and pas_r > pad_r:
+        pp_exp = pas_r - pad_r
+        pam_exp = (pas_r + 2*pad_r) / 3.0
+        # Caso clásico: PAM=40 y PP=102 para PAS/PAD 127/87.
+        if close(pam_r, pp_exp, 8) and close(pp_r, pam_exp, 15):
+            data["pam_radial"], data["pp_radial"] = pp_r, pam_r
+            pam_r, pp_r = pp_r, pam_r
+        # Si PP no coincide con PAS-PAD, corregir PP; si PAM falta, completar aproximada.
+        if np.isnan(pp_r) or abs(pp_r - pp_exp) > 12 or pp_r < 10 or pp_r > 120:
             data["pp_radial"] = pp_exp
-    if not np.isnan(pas_c) and not np.isnan(pad_c):
-        pp_exp=pas_c-pad_c; pam_exp=(pas_c+2*pad_c)/3
-        if not np.isnan(pam_c) and not np.isnan(pp_c):
-            if close(pam_c, pp_exp, 8) and close(pp_c, pam_exp, 12):
-                data["pam_central"], data["pp_central"] = pp_c, pam_c
-        if np.isnan(to_float(data.get("pam_central"))) or to_float(data.get("pam_central")) < 40:
-            data["pam_central"] = pam_exp
-        if to_float(data.get("pp_central")) > 80 or to_float(data.get("pp_central")) < 10:
+        if np.isnan(pam_r) or pam_r < 40 or pam_r > 200:
+            data["pam_radial"] = pam_exp
+
+    if not np.isnan(pas_c) and not np.isnan(pad_c) and pas_c > pad_c:
+        pp_exp = pas_c - pad_c
+        pam_exp = (pas_c + 2*pad_c) / 3.0
+        # Caso clásico: PAM=31 y PP=102/80 para PAS/PAD 119/88.
+        if close(pam_c, pp_exp, 8) and close(pp_c, pam_exp, 15):
+            data["pam_central"], data["pp_central"] = pp_c, pam_c
+            pam_c, pp_c = pp_c, pam_c
+        if np.isnan(pp_c) or abs(pp_c - pp_exp) > 12 or pp_c < 10 or pp_c > 120:
             data["pp_central"] = pp_exp
+        if np.isnan(pam_c) or pam_c < 40 or pam_c > 200:
+            data["pam_central"] = pam_exp
     return data
 
 def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
     """Parser principal: texto plano + corrección visual por coordenadas del PDF."""
     data = parse_model_pac(fallback_text or "")
     try:
+        # 0) Extracción estricta por coordenadas de cabecera y tablas reales del PDF.
+        head0 = _extract_patient_top_right_by_coordinates(pdf_bytes)
+        for k, v in head0.items():
+            if k == "paciente":
+                cand = _patient_name_strict(v)
+                if cand:
+                    data[k] = cand
+            elif v not in [None, ""]:
+                data[k] = v
+
+        coord_vars = _extract_tables_by_coordinates(pdf_bytes)
+        for k, v in coord_vars.items():
+            fv = to_float(v)
+            if not np.isnan(fv):
+                data[k] = fv
+
         # 1) Corregir paciente/estudio con palabras visuales; evita 'en posición' y 'H.C. #'.
         head = _extract_patient_study_by_words(pdf_bytes)
         for k, v in head.items():
@@ -975,7 +1184,15 @@ def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
             if not np.isnan(to_float(v)):
                 data[k] = v
 
-        # 4) Reparar PAM/PP intercambiadas y valores contaminados antes de validar.
+        # 4) Reaplicar coordenadas al final: tienen prioridad sobre texto plano mezclado.
+        for k, v in coord_vars.items():
+            fv = to_float(v)
+            if not np.isnan(fv):
+                data[k] = fv
+        if head0.get("paciente") and _patient_name_strict(head0.get("paciente")):
+            data["paciente"] = _patient_name_strict(head0.get("paciente"))
+
+        # 5) Reparar PAM/PP intercambiadas y valores contaminados antes de validar.
         data = _repair_swapped_pam_pp(data)
         data = _validate_and_repair_pac_data(data)
         data = _repair_swapped_pam_pp(data)
@@ -1278,7 +1495,8 @@ def _parse_header_fields_from_lines(lines):
 
 def _validate_and_repair_pac_data(data):
     """Repara valores mal cargados por columnas pegadas del PDF y limpia etiquetas contaminantes."""
-    data["paciente"] = _patient_name_strict(data.get("paciente", "")) or _clean_patient_name(data.get("paciente", ""))
+    cand_patient = _patient_name_strict(data.get("paciente", ""))
+    data["paciente"] = cand_patient if cand_patient else ""
     if _is_bad_patient_value(data.get("paciente", "")) or re.search(r"(?i)\b(en\s+posici[oó]n|posici[oó]n|realizado)\b", str(data.get("paciente", ""))):
         data["paciente"] = ""
     # Evitar que el número de estudio quede como sexo u otra etiqueta.
@@ -2375,162 +2593,4 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     story.append(_section("6. Referencias bibliográficas"))
     refs = [
         "Agabiti-Rosei E, et al. Central blood pressure measurements and antihypertensive therapy. Hypertension. 2007.",
-        "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos derivados de la onda del pulso. 2014.",
-        "SAHA. Manual de Mecánica Vascular. Grupo de Trabajo de Mecánica Vascular. 2024.",
-        "Westerhof BE, et al. Quantification of wave reflection in the human aorta from pressure alone. Hypertension. 2006.",
-        "Herbert A, et al. Establishing reference values for central blood pressure and amplification. Eur Heart J. 2014.",
-        "Huang QF, et al. Outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024.",
-    ]
-    ref_table = [[Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"])] for i, ref_txt in enumerate(refs, 1)]
-    story.append(Table(ref_table, colWidths=[188*mm], style=TableStyle([
-        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FAFAFA")),
-        ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
-        ("LEFTPADDING", (0,0), (-1,-1), 4),
-        ("RIGHTPADDING", (0,0), (-1,-1), 4),
-        ("TOPPADDING", (0,0), (-1,-1), 1.6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 1.6),
-    ])))
-
-    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
-    buf.seek(0)
-    return buf.getvalue()
-
-st.title(APP_TITLE)
-st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
-
-with st.sidebar:
-    st.header("1) Importar estudio")
-    pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-    wave_file = st.file_uploader("Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
-    st.info("Modo datos reales: si no se carga CSV/TXT, la app digitaliza automáticamente la curva desde la imagen del PDF. No se aceptan curvas sintéticas ni genéricas.")
-
-base = {}
-screenshot = None
-pdf_bytes = None
-curve_debug_png = None
-curve_source = ""
-curve_meta = {}
-if pdf_file:
-    pdf_bytes = pdf_file.read()
-    text = extract_pdf_text(pdf_bytes)
-    base = parse_model_pac_from_pdf(pdf_bytes, text)
-    screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
-else:
-    base = parse_model_pac("")
-
-st.subheader("Datos extraídos / edición manual")
-cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
-row = {}
-for i, f in enumerate(fields):
-    with cols[i%4]:
-        val = base.get(f, "")
-        if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
-            row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
-        else:
-            row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
-
-wave_df = None
-curve_error = None
-if wave_file:
-    try:
-        wave_df = read_curve_file_robust(wave_file, row)
-        curve_source = "CSV/TXT real cargado por el usuario"
-        curve_meta = {"metodo": curve_source, "puntos": int(len(wave_df))}
-        st.success("Curva real importada y validada correctamente desde CSV/TXT. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
-    except Exception as e:
-        curve_error = str(e)
-        st.error("El archivo CSV/TXT importado no contiene una curva real válida. Se intentará digitalizar la curva desde el PDF, si está cargado.")
-        st.caption(f"Detalle técnico CSV/TXT: {curve_error}")
-
-if wave_df is None and pdf_bytes:
-    try:
-        with st.spinner("Digitalizando curva real desde la segunda hoja, sector superior izquierdo: panel de curva del PDF..."):
-            wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
-        curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / sector {curve_meta.get('sector', 'izquierdo-superior')} / trazo {curve_meta.get('color_detectado')}"
-        st.success("Curva real digitalizada desde la segunda hoja, sector superior izquierdo: panel de curva del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
-        st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
-        if curve_debug_png:
-            st.image(curve_debug_png, caption="Control visual: segunda hoja, sector superior izquierdo: panel de curva usado para digitalizar la curva", use_container_width=True)
-    except Exception as e:
-        curve_error = str(e)
-        st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
-        st.caption(f"Detalle técnico digitalización PDF: {curve_error}")
-elif wave_df is None:
-    st.error("Para generar informe, separación de ondas y armónicos se debe cargar un PDF con curva visible o un CSV/TXT real del paciente. La app queda en modo estricto: no usa curva sintética ni genérica.")
-
-dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
-
-st.subheader("Vista clínica previa")
-summary_cols = st.columns(4)
-summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
-summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
-summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
-summary_cols[3].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
-
-st.markdown("### Análisis de presión central y métricas")
-st.write(dx)
-st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
-
-if wave_df is not None:
-    hdf = harmonic_analysis(wave_df)
-    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
-    conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
-
-    summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
-    st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
-    st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
-
-    st.markdown("### Conclusiones clínicas continuas")
-    for title, body in conclusion_blocks_preview:
-        st.markdown(f"**{title}**")
-        st.write(body)
-
-    st.markdown("---")
-    st.markdown("### Gráficos")
-    st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
-
-    g1, g2 = st.columns(2)
-    with g1:
-        st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
-        st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
-    with g2:
-        st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
-        st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
-
-    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
-
-    final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
-    st.markdown("---")
-    st.markdown("### Fenotipo final de presión central")
-    st.success(final_phenotype_preview)
-    st.write(final_phenotype_text_preview)
-    st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
-else:
-    st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
-
-st.subheader("Historial y exportación")
-if st.button("Guardar en historial"):
-    hist = save_history(row)
-    st.success(f"Registro guardado. Total: {len(hist)} estudios.")
-
-if HISTORIAL_FILE.exists():
-    hist = pd.read_excel(HISTORIAL_FILE)
-    st.dataframe(hist, use_container_width=True)
-    st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-if wave_df is None:
-    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
-else:
-    pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-    pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
-    if not pdf_download_bytes:
-        st.error("No se pudo generar el PDF médico integrado.")
-    else:
-        st.download_button(
-            "Generar y descargar PDF médico integrado",
-            data=pdf_download_bytes,
-            file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
-            mime="application/pdf"
-        )
+        "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos 
