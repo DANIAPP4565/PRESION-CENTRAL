@@ -82,7 +82,9 @@ BIBLIOGRAFIA = [
     "Westerhof BE, Guelen I, Westerhof N, Karemaker JM, Avolio A. Quantification of wave reflection in the human aorta from pressure alone. Hypertension. 2006;48:595-601.",
     "Norton GR, An DW, Aparicio LS, et al. Mortality and cardiovascular end points in relation to the aortic pulse wave components. Hypertension. 2024;81:1065-1075.",
     "Huang QF, An DW, Aparicio LS, et al. An outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024.",
+    "SAHA. Manual de Mecánica Vascular. Grupo de Trabajo de Mecánica Vascular de la Sociedad Argentina de Hipertensión Arterial. 2024. Tabla de presión aórtica central por edad, sexo y calibración.",
     "Azizzadeh M, Karimi A, Breyer-Kohansal R, et al. Reference equations for pulse wave velocity, augmentation index, amplitude of forward and backward wave in a European general adult population. Scientific Reports. 2024;14:23151."
+
 ]
 
 CENTRAL_SBP_TABLE = {
@@ -94,6 +96,241 @@ CENTRAL_SBP_TABLE = {
     "Etapa 3": {"F": 183, "M": 173},
     "ISH": {"F": 147, "M": 140},
 }
+
+
+# Referencias del Manual de Mecánica Vascular SAHA 2024, Tabla 2:
+# Presión arterial sistólica aórtica central por sexo, grupo etario y esquema de calibración.
+# Valores = percentil 50 (mediana) y DE. Se usa P95 = mediana + 1.645*DE para definir
+# hipertensión central ajustada por edad/sexo; P90 = mediana + 1.282*DE para categoría limítrofe/alta.
+SAHA_AOSBP_REF = {
+    "M": {
+        "<20":  {"C_PAOC": (110.29, 16.41), "SD_PAOC": (102.41, 10.22)},
+        "20-29":{"C_PAOC": (122.13, 14.22), "SD_PAOC": (112.48,  8.87)},
+        "30-39":{"C_PAOC": (120.86, 12.56), "SD_PAOC": (111.97,  9.44)},
+        "40-49":{"C_PAOC": (119.13, 11.95), "SD_PAOC": (113.83,  9.04)},
+        "50-59":{"C_PAOC": (117.42,  9.82), "SD_PAOC": (112.65,  9.30)},
+        "60-69":{"C_PAOC": (117.91, 10.23), "SD_PAOC": (114.73, 11.93)},
+        ">=70": {"C_PAOC": (121.25,  4.86), "SD_PAOC": (108.25, 20.17)},
+    },
+    "F": {
+        "<20":  {"C_PAOC": (101.39, 13.61), "SD_PAOC": ( 99.14,  9.05)},
+        "20-29":{"C_PAOC": (104.69, 10.06), "SD_PAOC": (104.26, 10.80)},
+        "30-39":{"C_PAOC": (103.50, 10.21), "SD_PAOC": (105.63, 10.57)},
+        "40-49":{"C_PAOC": (107.23,  8.47), "SD_PAOC": (111.38,  8.57)},
+        "50-59":{"C_PAOC": (113.11, 10.80), "SD_PAOC": (114.33,  9.04)},
+        "60-69":{"C_PAOC": (112.88, 11.01), "SD_PAOC": (113.81, 11.78)},
+        ">=70": {"C_PAOC": (112.75, 11.17), "SD_PAOC": (111.92,  5.82)},
+    },
+}
+
+
+
+# Referencias para IAu/AIx: NO usar tabla Mobil-O-Graph.
+# Por indicación clínica de la app, la clasificación del índice de aumentación central
+# se realiza con datos reales del paciente y referencia LEAD 2024/SphygmoCor.
+# La publicación LEAD 2024 informa AIx por edad y sexo como media y rango media±2DE.
+# Aquí se estima DE=(límite superior-límite inferior)/4 y se derivan percentiles
+# normales aproximados para P10/P25/P50/P75/P90. No se usa ninguna tabla Mobil-O-Graph.
+LEAD2024_AIX_MEAN_SD = {
+    "M": {
+        "18-30": (0.6, (23.4 - (-22.3))/4.0),
+        "30-40": (8.7, (31.3 - (-14.0))/4.0),
+        "40-50": (17.4, (40.2 - (-5.4))/4.0),
+        "50-60": (22.9, (42.5 - 3.2)/4.0),
+        "60-70": (28.3, (48.8 - 7.8)/4.0),
+        ">=70": (30.1, (48.3 - 12.0)/4.0),
+    },
+    "F": {
+        "18-30": (8.2, (31.6 - (-15.3))/4.0),
+        "30-40": (18.2, (40.3 - (-3.9))/4.0),
+        "40-50": (27.7, (47.8 - 7.6)/4.0),
+        "50-60": (33.9, (55.2 - 12.6)/4.0),
+        "60-70": (35.2, (53.2 - 17.2)/4.0),
+        ">=70": (36.1, (55.5 - 16.7)/4.0),
+    },
+}
+
+def saha_aix_age_group(age):
+    """Grupo etario compatible con LEAD 2024 para AIx/IAu, sin Mobil-O-Graph."""
+    a = to_float(age)
+    if np.isnan(a) or a < 18:
+        return None
+    if a < 30: return "18-30"
+    if a < 40: return "30-40"
+    if a < 50: return "40-50"
+    if a < 60: return "50-60"
+    if a < 70: return "60-70"
+    return ">=70"
+
+def _percentiles_from_mean_sd(mean, sd):
+    return (
+        mean - 1.282 * sd,
+        mean - 0.674 * sd,
+        mean,
+        mean + 0.674 * sd,
+        mean + 1.282 * sd,
+    )
+
+def _percentile_from_percentile_table(value, pcts=(10,25,50,75,90), vals=None):
+    """Interpolación simple de percentil desde una tabla P10-P90."""
+    try:
+        y = float(value)
+        xs = np.asarray(pcts, dtype=float)
+        vs = np.asarray(vals, dtype=float)
+        if len(vs) != len(xs) or np.any(~np.isfinite(vs)):
+            return np.nan
+        if y <= vs[0]:
+            slope = (xs[1]-xs[0]) / max(vs[1]-vs[0], 1e-6)
+            return float(np.clip(xs[0] + (y-vs[0])*slope, 0, 10))
+        if y >= vs[-1]:
+            slope = (xs[-1]-xs[-2]) / max(vs[-1]-vs[-2], 1e-6)
+            return float(np.clip(xs[-1] + (y-vs[-1])*slope, 90, 99))
+        return float(np.interp(y, vs, xs))
+    except Exception:
+        return np.nan
+
+def get_saha_aix75_reference(row):
+    """Clasifica IAu/AIx central sin usar tabla Mobil-O-Graph.
+
+    Mantiene el nombre de función por compatibilidad interna, pero la referencia usada
+    es LEAD 2024/SphygmoCor por edad y sexo. La variable se calcula sobre el dato real
+    del paciente y/o sobre la onda central real digitalizada del estudio original.
+    """
+    sex = safe_text(row.get("sexo", "M")).upper()[:1]
+    if sex not in ("M", "F"):
+        sex = "M"
+    age_group = saha_aix_age_group(row.get("edad"))
+    iau = to_float(row.get("iau"))
+    if not age_group or sex not in LEAD2024_AIX_MEAN_SD or age_group not in LEAD2024_AIX_MEAN_SD[sex]:
+        return {"ok": False, "motivo": "edad o sexo no disponibles para aplicar referencia LEAD 2024 de IAu/AIx"}
+    if np.isnan(iau):
+        return {"ok": False, "motivo": "IAu/AIx central no disponible"}
+    mean, sd = LEAD2024_AIX_MEAN_SD[sex][age_group]
+    p10, p25, p50, p75, p90 = _percentiles_from_mean_sd(mean, sd)
+    pct = _percentile_from_percentile_table(iau, vals=(p10, p25, p50, p75, p90))
+    z = (iau - mean) / sd if sd and not np.isnan(sd) else np.nan
+    if iau >= p90:
+        categoria = "IAu/AIx central aumentado para edad y sexo"
+        severidad = "elevado"
+        alterada = True
+    elif iau >= p75:
+        categoria = "IAu/AIx central alto-limítrofe para edad y sexo"
+        severidad = "limítrofe alto"
+        alterada = False
+    elif iau >= p50:
+        categoria = "IAu/AIx central sobre la mediana esperada"
+        severidad = "sobre mediana"
+        alterada = False
+    else:
+        categoria = "IAu/AIx central esperado para edad y sexo"
+        severidad = "normal"
+        alterada = False
+    return {
+        "ok": True, "sexo": sex, "edad_grupo": age_group, "iau": iau,
+        "p10": p10, "p25": p25, "p50": p50, "p75": p75, "p90": p90,
+        "percentil": pct, "z_aprox": z, "categoria": categoria,
+        "severidad": severidad, "alterada": alterada,
+        "metodo": "LEAD 2024 / SphygmoCor AIx por edad y sexo; sin tabla Mobil-O-Graph",
+    }
+
+def format_saha_aix75(row, compact=False):
+    ref = get_saha_aix75_reference(row)
+    if not ref.get("ok"):
+        return "Clasificación IAu/AIx no disponible: " + ref.get("motivo", "datos insuficientes")
+    txt = (
+        f"Clasificación IAu/AIx por edad/sexo sin tabla Mobil-O-Graph: {ref['categoria']}. "
+        f"IAu {ref['iau']:.1f}%; referencia LEAD 2024 {ref['sexo']}, {ref['edad_grupo']} años: "
+        f"P50 {ref['p50']:.1f}%, P75 {ref['p75']:.1f}% y P90 {ref['p90']:.1f}%. "
+        f"Percentil estimado {ref['percentil']:.0f}; z aproximado {ref['z_aprox']:.2f}."
+    )
+    if not compact:
+        txt += " Se define IAu/AIx central aumentado para edad/sexo cuando alcanza o supera el P90 de la referencia LEAD 2024/SphygmoCor."
+    return txt
+
+SAHA_CALIBRATION_LABELS = {
+    "SD_PAOC": "SD_PAOC: calibración sistólico-diastólica a PAS/PAD braquial",
+    "C_PAOC": "C_PAOC: calibración a PAD braquial y PAM calculada",
+}
+
+def _norm_cdf(z):
+    try:
+        return 0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0)))
+    except Exception:
+        return np.nan
+
+def saha_age_group(age):
+    a = to_float(age)
+    if np.isnan(a):
+        return None
+    if a < 20: return "<20"
+    if a < 30: return "20-29"
+    if a < 40: return "30-39"
+    if a < 50: return "40-49"
+    if a < 60: return "50-59"
+    if a < 70: return "60-69"
+    return ">=70"
+
+def get_saha_central_sbp_reference(row):
+    """Referencia SAHA 2024 para PAS aórtica central según edad, sexo y calibración.
+
+    Devuelve mediana, DE, P90, P95, z-score y percentil estimado.
+    """
+    sex = safe_text(row.get("sexo", "M")).upper()[:1]
+    if sex not in ("M", "F"):
+        sex = "M"
+    age_group = saha_age_group(row.get("edad"))
+    method = safe_text(row.get("metodo_calibracion_pac", "SD_PAOC")).upper()
+    if method not in ("C_PAOC", "SD_PAOC"):
+        method = "SD_PAOC"
+    if not age_group or sex not in SAHA_AOSBP_REF or age_group not in SAHA_AOSBP_REF[sex]:
+        return {"ok": False, "motivo": "edad o sexo no disponibles para aplicar tabla SAHA"}
+    median, sd = SAHA_AOSBP_REF[sex][age_group][method]
+    pas_c = to_float(row.get("pas_central"))
+    if np.isnan(pas_c):
+        return {"ok": False, "motivo": "PAS central no disponible"}
+    z = (pas_c - median) / sd if sd > 0 else np.nan
+    pct = _norm_cdf(z) * 100 if not np.isnan(z) else np.nan
+    p90 = median + 1.282 * sd
+    p95 = median + 1.645 * sd
+    p97 = median + 1.960 * sd
+    if pas_c >= p95:
+        categoria = "Hipertensión central ajustada por edad y sexo"
+        severidad = "elevada"
+        alterada = True
+    elif pas_c >= p90:
+        categoria = "PAS central alta/limítrofe para edad y sexo"
+        severidad = "limítrofe alta"
+        alterada = False
+    elif pas_c >= median:
+        categoria = "PAS central sobre la mediana esperada para edad y sexo"
+        severidad = "sobre mediana"
+        alterada = False
+    else:
+        categoria = "PAS central esperada para edad y sexo"
+        severidad = "normal"
+        alterada = False
+    return {
+        "ok": True, "sexo": sex, "edad_grupo": age_group, "metodo": method,
+        "metodo_label": SAHA_CALIBRATION_LABELS[method], "pas_central": pas_c,
+        "mediana": median, "de": sd, "p90": p90, "p95": p95, "p97": p97,
+        "z": z, "percentil": pct, "categoria": categoria, "severidad": severidad,
+        "alterada": alterada,
+    }
+
+def format_saha_central_htn(row, compact=False):
+    ref = get_saha_central_sbp_reference(row)
+    if not ref.get("ok"):
+        return "Clasificación SAHA por edad/sexo no disponible: " + ref.get("motivo", "datos insuficientes")
+    txt = (
+        f"Clasificación SAHA por edad/sexo: {ref['categoria']}. "
+        f"PAS central {ref['pas_central']:.0f} mmHg; referencia {ref['sexo']}, {ref['edad_grupo']} años, "
+        f"{ref['metodo']}: mediana {ref['mediana']:.1f} mmHg, DE {ref['de']:.1f}, "
+        f"P90 {ref['p90']:.1f} mmHg y P95 {ref['p95']:.1f} mmHg. "
+        f"Z-score {ref['z']:.2f}; percentil estimado {ref['percentil']:.0f}."
+    )
+    if not compact:
+        txt += " Se define hipertensión central ajustada cuando la PAS central alcanza o supera el P95 de la tabla SAHA seleccionada."
+    return txt
 
 def safe_text(x):
     if x is None:
@@ -138,285 +375,6 @@ def format_optional(v, dec=1):
         return f"{f:.{dec}f}"
     except Exception:
         return "no disponible"
-
-
-def safe_number_input_value(val, default=0.0):
-    """Convierte valores extraídos del PDF a float seguro para st.number_input.
-
-    Evita ValueError cuando el parser trae texto contaminado, por ejemplo:
-    '684 H.C. #', 'M', '', '--- cm.' o cadenas con unidades.
-    Para campos numéricos toma el primer número reconocible y, si no existe, devuelve default.
-    """
-    try:
-        if val is None:
-            return float(default)
-        # pd.isna puede devolver arrays para algunos objetos; por eso se protege.
-        try:
-            if pd.isna(val):
-                return float(default)
-        except Exception:
-            pass
-        if isinstance(val, (int, float, np.integer, np.floating)):
-            f = float(val)
-            return f if np.isfinite(f) else float(default)
-        text = str(val).replace("\x00", "").replace(",", ".").strip()
-        if not text:
-            return float(default)
-        m = re.search(r"[-+]?\d+(?:\.\d+)?", text)
-        if not m:
-            return float(default)
-        f = float(m.group(0))
-        return f if np.isfinite(f) else float(default)
-    except Exception:
-        return float(default)
-
-
-# =========================================================
-# Base de conocimiento LEAD 2024 / Scientific Reports
-# Ecuaciones de referencia LMS para cfPWV, AIx, Pf y Pb
-# Azizzadeh et al. Sci Rep 2024;14:23151.
-# =========================================================
-LEAD_LMS_PULSATIL = {
-    "cf_pwv": {
-        "female": {
-            "M": lambda age: math.exp(1.705 + 0.0073 * age),
-            "S": lambda age: math.exp(-2.140 + 0.0074 * age),
-            "L": -0.7200,
-            "offset": 0.0,
-            "unidad": "m/s",
-            "nombre": "cfPWV",
-            "descripcion": "Velocidad de onda de pulso carotídeo-femoral",
-        },
-        "male": {
-            "M": lambda age: math.exp(1.769 + 0.0070 * age),
-            "S": lambda age: math.exp(-2.046 + 0.0058 * age),
-            "L": -0.6307,
-            "offset": 0.0,
-            "unidad": "m/s",
-            "nombre": "cfPWV",
-            "descripcion": "Velocidad de onda de pulso carotídeo-femoral",
-        },
-    },
-    "aix": {
-        "female": {
-            "M": lambda age: math.exp(3.976 + 0.2266 * math.log(age)),
-            "S": lambda age: math.exp(-1.273 - 0.3239 * math.log(age)),
-            "L": 1.6943,
-            "offset": 100.0,
-            "unidad": "%",
-            "nombre": "AIx / IAu",
-            "descripcion": "Índice de aumentación central",
-        },
-        "male": {
-            "M": lambda age: math.exp(3.815 + 0.2485 * math.log(age)),
-            "S": lambda age: math.exp(-1.025 - 0.3617 * math.log(age)),
-            "L": 1.0469,
-            "offset": 100.0,
-            "unidad": "%",
-            "nombre": "AIx / IAu",
-            "descripcion": "Índice de aumentación central",
-        },
-    },
-    "pf": {
-        "female": {
-            "M": lambda age: math.exp(2.980 + 0.00548 * age),
-            "S": lambda age: math.exp(-1.576 + 0.0035 * age),
-            "L": 0.3488,
-            "offset": 0.0,
-            "unidad": "mmHg",
-            "nombre": "Pf",
-            "descripcion": "Amplitud de onda anterógrada",
-        },
-        "male": {
-            "M": lambda age: math.exp(3.133 + 0.0030 * age),
-            "S": lambda age: math.exp(-1.382 - 0.0003 * age),
-            "L": 0.1310,
-            "offset": 0.0,
-            "unidad": "mmHg",
-            "nombre": "Pf",
-            "descripcion": "Amplitud de onda anterógrada",
-        },
-    },
-    "pb": {
-        "female": {
-            "M": lambda age: math.exp(1.998 + 0.0157 * age),
-            "S": lambda age: math.exp(-1.371 + 0.0016 * age),
-            "L": 0.3678,
-            "offset": 0.0,
-            "unidad": "mmHg",
-            "nombre": "Pb",
-            "descripcion": "Amplitud de onda retrógrada",
-        },
-        "male": {
-            "M": lambda age: math.exp(2.078 + 0.01258 * age),
-            "S": lambda age: math.exp(-1.200 - 0.0011 * age),
-            "L": 0.1720,
-            "offset": 0.0,
-            "unidad": "mmHg",
-            "nombre": "Pb",
-            "descripcion": "Amplitud de onda retrógrada",
-        },
-    },
-}
-
-
-def normalizar_sexo_lms(valor):
-    """Normaliza sexo a male/female para las ecuaciones LMS."""
-    t = safe_text(valor).strip().lower()
-    if not t:
-        return None
-    if t in ["f", "fem", "femenino", "mujer", "female", "woman"]:
-        return "female"
-    if t in ["m", "masc", "masculino", "varon", "varón", "male", "man"]:
-        return "male"
-    if re.search(r"\bfem|mujer|female|woman\b", t):
-        return "female"
-    if re.search(r"\bmasc|var[oó]n|male|man\b", t):
-        return "male"
-    return None
-
-
-def percentil_desde_z(z):
-    """Convierte z-score a percentil normal estándar."""
-    try:
-        return 100.0 * (0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0))))
-    except Exception:
-        return np.nan
-
-
-def interpretar_z_lms(z):
-    """Interpretación clínica operativa de z-score/percentil para mecánica pulsátil."""
-    try:
-        z = float(z)
-        if np.isnan(z):
-            return "no interpretable"
-        if z < -1.0:
-            return "por debajo de lo esperado para edad/sexo"
-        if z <= 1.0:
-            return "dentro de rango esperado para edad/sexo"
-        if z <= 2.0:
-            return "aumentado para edad/sexo"
-        return "marcadamente aumentado para edad/sexo"
-    except Exception:
-        return "no interpretable"
-
-
-def calcular_z_lms_pulsatil(metrica, valor, edad, sexo):
-    """Calcula z-score y percentil LMS para cfPWV, AIx/IAu, Pf y Pb.
-
-    Fórmula LEAD/LMS:
-    z = (((Y/M)^L)-1)/(L*S), si L != 0
-    z = ln(Y/M)/S, si L == 0
-
-    Para AIx/IAu se usa Y = AIx + 100, porque la publicación desplaza
-    AIx +100 unidades para evitar valores negativos antes de aplicar LMS.
-    """
-    key = str(metrica).lower().replace("cfpwv", "cf_pwv").replace("cf-pwv", "cf_pwv").replace("aix", "aix")
-    if key not in LEAD_LMS_PULSATIL:
-        return None
-
-    age = to_float(edad)
-    sex = normalizar_sexo_lms(sexo)
-    y_raw = to_float(valor)
-    if np.isnan(age) or age < 18 or age > 82 or sex is None or np.isnan(y_raw):
-        return None
-
-    ref = LEAD_LMS_PULSATIL[key][sex]
-    y = y_raw + float(ref.get("offset", 0.0))
-    if y <= 0:
-        return None
-
-    M = float(ref["M"](age))
-    S = float(ref["S"](age))
-    L = float(ref["L"])
-    if M <= 0 or S <= 0:
-        return None
-    if abs(L) < 1e-9:
-        z = math.log(y / M) / S
-    else:
-        z = ((y / M) ** L - 1.0) / (L * S)
-    pct = percentil_desde_z(z)
-
-    # Edad vascular equivalente: edad en la que la mediana esperada se aproxima al valor observado.
-    eq_age = np.nan
-    try:
-        ages = np.linspace(18, 82, 641)
-        med = np.array([float(ref["M"](a)) for a in ages], dtype=float)
-        idx = int(np.nanargmin(np.abs(med - y)))
-        eq_age = float(ages[idx])
-    except Exception:
-        pass
-
-    return {
-        "metrica": key,
-        "nombre": ref.get("nombre", key),
-        "descripcion": ref.get("descripcion", ""),
-        "valor": float(y_raw),
-        "valor_lms": float(y),
-        "unidad": ref.get("unidad", ""),
-        "sexo_lms": sex,
-        "edad": float(age),
-        "L": L,
-        "M": M,
-        "S": S,
-        "z": float(z),
-        "percentil": float(pct),
-        "edad_equivalente": eq_age,
-        "interpretacion": interpretar_z_lms(z),
-    }
-
-
-def calcular_panel_lms_pulsatil(row, sep_metrics=None):
-    """Calcula panel LEAD 2024 para variables disponibles en la app PAC."""
-    sep_metrics = sep_metrics or {}
-    edad = row.get("edad")
-    sexo = row.get("sexo")
-
-    valores = {
-        "cf_pwv": row.get("cf_pwv", np.nan),   # opcional/manual si el estudio lo trae
-        "aix": row.get("iau", np.nan),         # IAu de la app = AIx central
-        "pf": sep_metrics.get("pf_pico", np.nan),
-        "pb": sep_metrics.get("pb_pico", np.nan),
-    }
-    resultados = []
-    for metrica, valor in valores.items():
-        res = calcular_z_lms_pulsatil(metrica, valor, edad, sexo)
-        if res is not None:
-            resultados.append(res)
-    return resultados
-
-
-def tabla_lms_pulsatil(resultados):
-    """Tabla lista para ReportLab/Streamlit con z-score, percentil y edad vascular equivalente."""
-    rows = [["Métrica", "Valor", "Mediana esperada", "z", "Percentil", "Edad vascular eq.", "Interpretación"]]
-    for r in resultados or []:
-        rows.append([
-            r["nombre"],
-            f'{r["valor"]:.1f} {r["unidad"]}',
-            f'{r["M"] - r.get("offset", 0.0):.1f} {r["unidad"]}' if r["metrica"] == "aix" else f'{r["M"]:.1f} {r["unidad"]}',
-            f'{r["z"]:.2f}',
-            f'P{r["percentil"]:.0f}',
-            "" if np.isnan(r.get("edad_equivalente", np.nan)) else f'{r["edad_equivalente"]:.0f} años',
-            r["interpretacion"],
-        ])
-    return rows
-
-
-def resumen_lms_pulsatil(resultados):
-    """Resumen textual para integrar en conclusiones y fenotipo vascular."""
-    if not resultados:
-        return "No se pudo calcular normalización LMS LEAD 2024 porque faltan edad, sexo o métricas válidas."
-    alteradas = [r for r in resultados if r.get("z", 0) > 1.0]
-    normales = [r for r in resultados if -1.0 <= r.get("z", 0) <= 1.0]
-    partes = []
-    for r in resultados:
-        partes.append(f'{r["nombre"]}: {r["valor"]:.1f} {r["unidad"]}, z {r["z"]:.2f}, P{r["percentil"]:.0f} ({r["interpretacion"]})')
-    if alteradas:
-        pref = "Métricas pulsátiles elevadas para edad/sexo: " + ", ".join([r["nombre"] for r in alteradas]) + ". "
-    else:
-        pref = "No se identifican métricas pulsátiles por encima de z > +1 en las variables disponibles. "
-    return pref + "Detalle LMS LEAD 2024: " + "; ".join(partes) + "."
-
 
 
 
@@ -1892,21 +1850,44 @@ def central_diagnosis(row):
     pSBP = to_float(row.get("pas_radial")); pDBP = to_float(row.get("pad_radial"));
     sex = (row.get("sexo") or "M").upper()[:1]
     cat = brachial_bp_category(pSBP, pDBP)
-    ref = CENTRAL_SBP_TABLE.get(cat, {}).get(sex, np.nan)
+
+    # Referencia principal: Manual SAHA 2024 por edad, sexo y método de calibración.
+    saha_ref = get_saha_central_sbp_reference(row)
+    ref = saha_ref.get("p95", np.nan) if saha_ref.get("ok") else CENTRAL_SBP_TABLE.get(cat, {}).get(sex, np.nan)
+
     amp_sbp = pSBP - cSBP if not np.isnan(pSBP) and not np.isnan(cSBP) else np.nan
     ppa = (to_float(row.get("pp_radial")) / cPP) if cPP and not np.isnan(cPP) and cPP != 0 else np.nan
+
     if np.isnan(cSBP):
         dx = "No clasificable por falta de PAS central."
+    elif saha_ref.get("ok"):
+        dx = (
+            f"{saha_ref['categoria']} según Manual SAHA 2024 "
+            f"({saha_ref['sexo']}, {saha_ref['edad_grupo']} años, {saha_ref['metodo']}; "
+            f"PAS central {cSBP:.0f} mmHg, P95 {saha_ref['p95']:.1f} mmHg, "
+            f"z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f})."
+        )
     elif cSBP >= 130:
-        dx = "Hipertensión central probable / PAS aórtica central elevada."
+        dx = "Hipertensión central probable / PAS aórtica central elevada por umbral fijo operativo."
     elif not np.isnan(ref) and cSBP > ref:
-        dx = f"PAS central por encima del percentil 50 de referencia para la categoría braquial {cat}."
+        dx = f"PAS central por encima de referencia operativa para la categoría braquial {cat}."
     else:
-        dx = "Sin hipertensión central por el umbral operativo de la app."
+        dx = "Sin hipertensión central por los datos disponibles."
+
     risk = []
+    if saha_ref.get("ok") and saha_ref.get("alterada"):
+        risk.append("hipertensión central ajustada por edad y sexo según SAHA")
+    elif saha_ref.get("ok") and cSBP >= saha_ref.get("p90", np.inf):
+        risk.append("PAS central limítrofe/alta para edad y sexo según SAHA")
     if not np.isnan(ppa) and ppa < 1.30: risk.append("amplificación de presión de pulso reducida (<1,30)")
     if not np.isnan(cPP) and cPP >= 50: risk.append("presión de pulso central aumentada")
-    if not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25: risk.append("índice de aumentación elevado")
+    saha_aix = get_saha_aix75_reference(row)
+    if saha_aix.get("ok") and saha_aix.get("alterada"):
+        risk.append("IAu/AIx central aumentado para edad y sexo según LEAD 2024/SphygmoCor")
+    elif saha_aix.get("ok") and to_float(row.get("iau")) >= saha_aix.get("p75", np.inf):
+        risk.append("IAu/AIx central alto-limítrofe para edad y sexo según LEAD 2024/SphygmoCor")
+    elif not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25:
+        risk.append("índice de aumentación elevado por umbral fijo de respaldo")
     return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
 
 
@@ -2451,21 +2432,37 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
             return "no disponible"
 
     pressure_flags = []
-    if not np.isnan(pas_c):
-        if pas_c >= 130:
-            pressure_flags.append("PAS central elevada por umbral operativo de 130 mmHg")
+    saha_ref = get_saha_central_sbp_reference(row)
+    if saha_ref.get("ok"):
+        if saha_ref.get("alterada"):
+            pressure_flags.append(f"hipertensión central ajustada por edad/sexo: PAS central ≥ P95 SAHA ({saha_ref['p95']:.1f} mmHg)")
+        elif pas_c >= saha_ref.get("p90", np.inf):
+            pressure_flags.append(f"PAS central alta/limítrofe para edad/sexo: ≥P90 SAHA ({saha_ref['p90']:.1f} mmHg) y <P95")
         else:
-            pressure_flags.append("PAS central por debajo del umbral operativo de 130 mmHg")
+            pressure_flags.append(f"PAS central sin hipertensión por edad/sexo: <P95 SAHA ({saha_ref['p95']:.1f} mmHg)")
+    elif not np.isnan(pas_c):
+        if pas_c >= 130:
+            pressure_flags.append("PAS central elevada por umbral operativo fijo de 130 mmHg")
+        else:
+            pressure_flags.append("PAS central por debajo del umbral operativo fijo de 130 mmHg")
     if not np.isnan(pp_c):
         if pp_c >= 50:
             pressure_flags.append("presión de pulso central aumentada")
         else:
             pressure_flags.append("presión de pulso central no aumentada")
-    if not np.isnan(iau):
+    saha_aix = get_saha_aix75_reference(row)
+    if saha_aix.get("ok"):
+        if saha_aix.get("alterada"):
+            pressure_flags.append(f"IAu/AIx aumentado para edad/sexo: IAu ≥P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
+        elif iau >= saha_aix.get("p75", np.inf):
+            pressure_flags.append(f"IAu/AIx alto-limítrofe para edad/sexo: ≥P75 LEAD 2024 ({saha_aix['p75']:.1f}%) y <P90")
+        else:
+            pressure_flags.append(f"IAu/AIx esperado para edad/sexo: <P75 LEAD 2024 ({saha_aix['p75']:.1f}%)")
+    elif not np.isnan(iau):
         if iau >= 25:
-            pressure_flags.append("IAu elevado, compatible con mayor aumentación sistólica")
+            pressure_flags.append("IAu elevado por umbral fijo de respaldo")
         elif iau >= 10:
-            pressure_flags.append("IAu intermedio")
+            pressure_flags.append("IAu intermedio por umbral fijo de respaldo")
         else:
             pressure_flags.append("IAu bajo")
     if not np.isnan(ppa):
@@ -2479,7 +2476,8 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
         f"PAM central {fmt(pam_c,0)} mmHg y PP central {fmt(pp_c,0)} mmHg. La categoría tensional periférica/braquial es {cat}. "
         f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(ppa,2)}. "
         f"Au: {fmt(au,1)} mmHg, IAu: {fmt(iau,1)}%, FC: {fmt(fc,0)} lpm. "
-        f"Conclusión operativa: {dx}. Perfil hemodinámico agregado: {risk}. "
+        f"Conclusión operativa: {dx}. {format_saha_central_htn(row, compact=True)} {format_saha_aix75(row, compact=True)} "
+        f"Perfil hemodinámico agregado: {risk}. "
         f"Síntesis: {'; '.join(pressure_flags) if pressure_flags else 'sin marcadores suficientes para estratificación central completa'}."
     )
 
@@ -2584,12 +2582,22 @@ def build_continuous_conclusions(row, wave_df, hdf):
     rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan)
     pp_c = to_float(row.get("pp_central")); iau = to_float(row.get("iau")); pas_c = to_float(row.get("pas_central"))
     integrated_flags = []
-    if not np.isnan(pas_c) and pas_c >= 130:
-        integrated_flags.append("presión central elevada")
+    saha_ref = get_saha_central_sbp_reference(row)
+    if saha_ref.get("ok") and saha_ref.get("alterada"):
+        integrated_flags.append("hipertensión central ajustada por edad/sexo según SAHA")
+    elif saha_ref.get("ok") and pas_c >= saha_ref.get("p90", np.inf):
+        integrated_flags.append("PAS central alta/limítrofe para edad/sexo según SAHA")
+    elif not np.isnan(pas_c) and pas_c >= 130:
+        integrated_flags.append("presión central elevada por umbral fijo de respaldo")
     if not np.isnan(pp_c) and pp_c >= 50:
         integrated_flags.append("carga pulsátil central aumentada")
-    if not np.isnan(iau) and iau >= 25:
-        integrated_flags.append("aumentación sistólica elevada")
+    saha_aix = get_saha_aix75_reference(row)
+    if saha_aix.get("ok") and saha_aix.get("alterada"):
+        integrated_flags.append("IAu/AIx central aumentado para edad/sexo según SAHA")
+    elif saha_aix.get("ok") and iau >= saha_aix.get("p75", np.inf):
+        integrated_flags.append("IAu/AIx central alto-limítrofe para edad/sexo según SAHA")
+    elif not np.isnan(iau) and iau >= 25:
+        integrated_flags.append("aumentación sistólica elevada por umbral fijo de respaldo")
     if not np.isnan(rm) and rm >= 0.45:
         integrated_flags.append("reflexión de onda aumentada")
     if not np.isnan(ri) and ri >= 0.32:
@@ -2677,11 +2685,31 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     harmonic_metrics = []
 
     pressure_score = 0
-    if not np.isnan(pas_c):
+    saha_ref = get_saha_central_sbp_reference(row)
+    if saha_ref.get("ok"):
+        if saha_ref.get("alterada"):
+            pressure_score += add_metric(
+                pressure_metrics, True, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
+                f"HTA central si ≥P95 ({saha_ref['p95']:.1f} mmHg); {saha_ref['sexo']} {saha_ref['edad_grupo']} años, {saha_ref['metodo']}",
+                f"hipertensión central ajustada por edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 3
+            )
+        elif pas_c >= saha_ref.get("p90", np.inf):
+            pressure_score += add_metric(
+                pressure_metrics, True, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
+                f"alta/limítrofe si ≥P90 ({saha_ref['p90']:.1f}) y <P95 ({saha_ref['p95']:.1f})",
+                f"PAS central alta para edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 1
+            )
+        else:
+            add_metric(
+                pressure_metrics, False, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
+                f"sin HTA central si <P95 ({saha_ref['p95']:.1f} mmHg)",
+                f"mediana {saha_ref['mediana']:.1f} mmHg; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 0
+            )
+    elif not np.isnan(pas_c):
         if pas_c >= 130:
-            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "alterada si ≥130 mmHg", "presión central sistólica elevada", 2)
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "alterada si ≥130 mmHg por umbral fijo de respaldo", "presión central sistólica elevada", 2)
         elif pas_c >= 120:
-            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "limítrofe 120-129 mmHg", "presión central sistólica limítrofe", 1)
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "limítrofe 120-129 mmHg por umbral fijo de respaldo", "presión central sistólica limítrofe", 1)
         else:
             add_metric(pressure_metrics, False, "PAS central", fmt(pas_c, 0, " mmHg"), "normal si <120-130 mmHg según contexto", "no elevada", 0)
     if not np.isnan(pp_c):
@@ -2691,11 +2719,31 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
             pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "alterada si ≥50 mmHg", "carga pulsátil central aumentada", 1)
         else:
             add_metric(pressure_metrics, False, "PP central", fmt(pp_c, 0, " mmHg"), "no aumentada si <50 mmHg", "sin aumento mayor de carga pulsátil", 0)
-    if not np.isnan(iau):
+    saha_aix = get_saha_aix75_reference(row)
+    if saha_aix.get("ok"):
+        if saha_aix.get("alterada"):
+            pressure_score += add_metric(
+                pressure_metrics, True, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
+                f"aumentado si ≥P90 ({saha_aix['p90']:.1f}%); {saha_aix['sexo']} {saha_aix['edad_grupo']} años",
+                f"aumentación central elevada para edad/sexo; percentil {saha_aix['percentil']:.0f}, z aprox {saha_aix['z_aprox']:.2f}", 2
+            )
+        elif iau >= saha_aix.get("p75", np.inf):
+            pressure_score += add_metric(
+                pressure_metrics, True, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
+                f"alto-limítrofe si ≥P75 ({saha_aix['p75']:.1f}%) y <P90 ({saha_aix['p90']:.1f}%)",
+                f"aumentación central alta para edad/sexo; percentil {saha_aix['percentil']:.0f}", 1
+            )
+        else:
+            add_metric(
+                pressure_metrics, False, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
+                f"esperado si <P75 ({saha_aix['p75']:.1f}%)",
+                f"P50 {saha_aix['p50']:.1f}%, P90 {saha_aix['p90']:.1f}%, percentil {saha_aix['percentil']:.0f}", 0
+            )
+    elif not np.isnan(iau):
         if iau >= 35:
-            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alto si ≥35%", "aumentación sistólica marcada", 2)
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alto si ≥35% por umbral fijo de respaldo", "aumentación sistólica marcada", 2)
         elif iau >= 25:
-            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alterado si ≥25%", "aumentación sistólica elevada", 1)
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alterado si ≥25% por umbral fijo de respaldo", "aumentación sistólica elevada", 1)
         else:
             add_metric(pressure_metrics, False, "IAu", fmt(iau, 1, "%"), "no aumentado si <25%", "sin aumentación sistólica relevante", 0)
     if not np.isnan(au):
@@ -2804,25 +2852,18 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     if not altered_text:
         altered_text = "no se identifican métricas alteradas mayores con los puntos de corte operativos disponibles"
 
-    lms_results = calcular_panel_lms_pulsatil(row, sep_metrics)
-    lms_altered = [r for r in lms_results if r.get("z", 0) > 1.0]
-    lms_score = len(lms_altered)
-    lms_detail = resumen_lms_pulsatil(lms_results)
-
     table = [
         ["Dominio", "Puntaje", "Métricas alteradas / consideradas"],
         ["Presión central, aumentación y RVSE", str(pressure_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in pressure_metrics]) if pressure_metrics else "sin datos suficientes"],
         ["Separación de ondas Pf/Pb", str(wave_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in wave_metrics]) if wave_metrics else "sin datos suficientes"],
         ["Armónicos", str(harmonic_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in harmonic_metrics]) if harmonic_metrics else "sin datos suficientes"],
-        ["Referencia edad/sexo LEAD 2024", str(lms_score), lms_detail],
-        ["Puntaje integrado", str(total_score + lms_score), phenotype],
+        ["Puntaje integrado", str(total_score), phenotype],
     ]
 
     text = (
         f"Fenotipo final de presión central: {phenotype}. "
         f"Métricas que definen el fenotipo: {altered_text}. "
         f"La combinación de estas variables configura un patrón de {mechanism}. "
-        f"Normalización por edad y sexo según LEAD 2024: {lms_detail} "
         f"Resumen cuantitativo: PAS central {fmt(pas_c,0,' mmHg')}, PAD central {fmt(pad_c,0,' mmHg')}, "
         f"PP central {fmt(pp_c,0,' mmHg')}, Au {fmt(au,1,' mmHg')}, IAu {fmt(iau,1,'%')}, "
         f"PPA {fmt(ppa,2)}, amplificación PAS {fmt(amp_sbp,1,' mmHg')}, RVSE/SEVR {fmt(rvse_calc,1,'%')}, "
@@ -2838,9 +2879,6 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
     conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
     final_phenotype, final_phenotype_text, final_phenotype_table = classify_central_pressure_phenotype(row, sep_metrics, hdf)
-    lms_results = calcular_panel_lms_pulsatil(row, sep_metrics)
-    lms_rows = tabla_lms_pulsatil(lms_results)
-    lms_summary = resumen_lms_pulsatil(lms_results)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -2944,19 +2982,28 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ["Peso", _fmt(row.get("peso",""),1), "Altura", _fmt(row.get("altura",""),1)],
         ["IMC", _fmt(row.get("imc",""),1), "Medicación", safe_text(row.get("medicacion",""))],
     ]
+    saha_pdf_ref = get_saha_central_sbp_reference(row)
+    saha_p95 = _fmt(saha_pdf_ref.get("p95"), 1) if saha_pdf_ref.get("ok") else ""
+    saha_zpct = (f"z {saha_pdf_ref.get('z', np.nan):.2f} / P{saha_pdf_ref.get('percentil', np.nan):.0f}" if saha_pdf_ref.get("ok") else "")
+    saha_aix_pdf_ref = get_saha_aix75_reference(row)
+    saha_aix_p90 = _fmt(saha_aix_pdf_ref.get("p90"), 1) if saha_aix_pdf_ref.get("ok") else ""
+    saha_aix_pct = (f"P{saha_aix_pdf_ref.get('percentil', np.nan):.0f} / P75 {saha_aix_pdf_ref.get('p75', np.nan):.1f}" if saha_aix_pdf_ref.get("ok") else "")
     vals = [["Variable", "Radial/Braquial", "Central", "Unidad"],
             ["PAS", _fmt(row.get("pas_radial")), _fmt(row.get("pas_central")), "mmHg"],
             ["PAD", _fmt(row.get("pad_radial")), _fmt(row.get("pad_central")), "mmHg"],
             ["PAM", _fmt(row.get("pam_radial")), _fmt(row.get("pam_central")), "mmHg"],
             ["PP", _fmt(row.get("pp_radial")), _fmt(row.get("pp_central")), "mmHg"],
             ["FC", _fmt(row.get("fc"),0), "", "lpm"],
-            ["cfPWV", "", _fmt(row.get("cf_pwv")), "m/s"],
             ["Au", "", _fmt(row.get("au")), "mmHg"],
             ["IAu", "", _fmt(row.get("iau")), "%"],
             ["RVSE equipo", "", _fmt(row.get("rvse")), "%"],
             ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
             ["PE", "", _fmt(row.get("pe")), "%"],
-            ["APC", "", _fmt(row.get("apc")), "relación"]]
+            ["APC", "", _fmt(row.get("apc")), "relación"],
+            ["SAHA P95 edad/sexo", "", saha_p95, "mmHg"],
+            ["SAHA z / percentil", "", saha_zpct, ""],
+            ["LEAD IAu P90 edad/sexo", "", saha_aix_p90, "%"],
+            ["LEAD IAu percentil", "", saha_aix_pct, ""]]
     # Tablas apiladas en ancho completo para evitar superposición de columnas.
     # La versión anterior colocaba patient_table y values_table lado a lado:
     # 140 mm + 83 mm dentro de un contenedor de 188 mm, produciendo solapamiento.
@@ -2996,10 +3043,6 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ("TOPPADDING", (0,0), (-1,-1), 2.4),
         ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
     ])))
-
-    story.append(Spacer(1, 1.3*mm))
-    story.append(Paragraph("Normalización edad/sexo LEAD 2024 por método LMS", styles["MiniTitlePAC"]))
-    story.append(Paragraph(lms_summary, styles["ConclusionPAC"]))
 
     # Sin salto forzado: ReportLab decide el pase de página y evita blancos grandes.
     story.append(Spacer(1, 2.5*mm))
@@ -3047,11 +3090,6 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ("TOPPADDING", (0,0), (-1,-1), 2),
         ("BOTTOMPADDING", (0,0), (-1,-1), 2),
     ])))
-
-    story.append(Spacer(1, 1.8*mm))
-    story.append(Paragraph("Estandarización de mecánica pulsátil LEAD 2024 (LMS)", styles["H3PAC"]))
-    lms_wrapped = [[Paragraph(safe_text(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in lms_rows]
-    story.append(Table(lms_wrapped, colWidths=[24*mm, 25*mm, 31*mm, 14*mm, 18*mm, 25*mm, 51*mm], style=_table_style("#EAF2F8", 6.1)))
     story.append(Spacer(1, 1.5*mm))
     story.append(Paragraph(
         "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. Pf y Pb se muestran sobre la línea diastólica basal para comparar directamente su contribución con la presión aórtica central completa. El fenotipo final integra presión/carga pulsátil central, magnitud y temporalidad de onda retrógrada, y complejidad armónica.",
@@ -3079,10 +3117,6 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
          "pressure and amplification. Eur Heart J. 2014."),
         ("Huang QF, et al. Outcome-driven threshold for pulse pressure "
          "amplification. Hypertension Research. 2024."),
-        ("Azizzadeh M, Karimi A, Breyer-Kohansal R, et al. Reference equations "
-         "for pulse wave velocity, augmentation index, amplitude of forward "
-         "and backward wave in a European general adult population. "
-         "Scientific Reports. 2024;14:23151."),
     ]
     ref_table = [[Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"])] for i, ref_txt in enumerate(refs, 1)]
     story.append(Table(ref_table, colWidths=[188*mm], style=TableStyle([
@@ -3133,7 +3167,7 @@ def save_history(row):
 
 
 st.title(APP_TITLE)
-st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
+st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF integrado, historial Excel y análisis armónico.")
 
 with st.sidebar:
     st.header("1) Importar estudio")
@@ -3157,7 +3191,7 @@ else:
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","cf_pwv","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
+fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
 row = {}
 for i, f in enumerate(fields):
     with cols[i%4]:
@@ -3165,7 +3199,19 @@ for i, f in enumerate(fields):
         if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
             row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
         else:
-            row[f] = st.number_input(f, value=safe_number_input_value(val, 0.0), step=1.0, format="%.2f")
+            vnum = to_float(val)
+            row[f] = st.number_input(f, value=0.0 if np.isnan(vnum) else float(vnum), step=1.0, format="%.2f")
+
+st.markdown("#### Criterio SAHA para hipertensión central")
+row["metodo_calibracion_pac"] = st.selectbox(
+    "Método de calibración para aplicar tabla SAHA de PAS aórtica central",
+    options=["SD_PAOC", "C_PAOC"],
+    index=0,
+    format_func=lambda x: SAHA_CALIBRATION_LABELS.get(x, x),
+    help="No se usa tabla Mobil-O-Graph. Para PAS aórtica central se habilitan solo C_PAOC y SD_PAOC del Manual SAHA; para equipos calibrados con PAS/PAD braquial, use SD_PAOC como criterio operativo."
+)
+st.info(format_saha_central_htn(row))
+st.info(format_saha_aix75(row))
 
 wave_df = None
 curve_error = None
@@ -3225,14 +3271,6 @@ if wave_df is not None:
         st.markdown(f"**{title}**")
         st.write(body)
 
-    lms_results_preview = calcular_panel_lms_pulsatil(row, sep_metrics_preview)
-    st.markdown("### Referencia edad/sexo LEAD 2024 - método LMS")
-    st.write(resumen_lms_pulsatil(lms_results_preview))
-    if lms_results_preview:
-        st.dataframe(pd.DataFrame(tabla_lms_pulsatil(lms_results_preview)[1:], columns=tabla_lms_pulsatil(lms_results_preview)[0]), use_container_width=True)
-    else:
-        st.info("Para calcular z-score/percentil LMS se requieren edad, sexo y métricas válidas: cfPWV opcional, IAu/AIx, Pf y Pb.")
-
     st.markdown("---")
     st.markdown("### Gráficos")
     st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
@@ -3256,11 +3294,6 @@ if wave_df is not None:
     st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
 else:
     st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
-    lms_results_preview = calcular_panel_lms_pulsatil(row, {})
-    if lms_results_preview:
-        st.markdown("### Referencia edad/sexo LEAD 2024 - método LMS")
-        st.write(resumen_lms_pulsatil(lms_results_preview))
-        st.dataframe(pd.DataFrame(tabla_lms_pulsatil(lms_results_preview)[1:], columns=tabla_lms_pulsatil(lms_results_preview)[0]), use_container_width=True)
     st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
 
 st.subheader("Historial y exportación")
