@@ -140,6 +140,37 @@ def format_optional(v, dec=1):
         return "no disponible"
 
 
+def safe_number_input_value(val, default=0.0):
+    """Convierte valores extraídos del PDF a float seguro para st.number_input.
+
+    Evita ValueError cuando el parser trae texto contaminado, por ejemplo:
+    '684 H.C. #', 'M', '', '--- cm.' o cadenas con unidades.
+    Para campos numéricos toma el primer número reconocible y, si no existe, devuelve default.
+    """
+    try:
+        if val is None:
+            return float(default)
+        # pd.isna puede devolver arrays para algunos objetos; por eso se protege.
+        try:
+            if pd.isna(val):
+                return float(default)
+        except Exception:
+            pass
+        if isinstance(val, (int, float, np.integer, np.floating)):
+            f = float(val)
+            return f if np.isfinite(f) else float(default)
+        text = str(val).replace("\x00", "").replace(",", ".").strip()
+        if not text:
+            return float(default)
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+        if not m:
+            return float(default)
+        f = float(m.group(0))
+        return f if np.isfinite(f) else float(default)
+    except Exception:
+        return float(default)
+
+
 # =========================================================
 # Base de conocimiento LEAD 2024 / Scientific Reports
 # Ecuaciones de referencia LMS para cfPWV, AIx, Pf y Pb
@@ -3134,7 +3165,7 @@ for i, f in enumerate(fields):
         if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
             row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
         else:
-            row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
+            row[f] = st.number_input(f, value=safe_number_input_value(val, 0.0), step=1.0, format="%.2f")
 
 wave_df = None
 curve_error = None
