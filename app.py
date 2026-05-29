@@ -1,8996 +1,2972 @@
-import io
-import re
+# app_pac.py
+# App Streamlit para informe de Presión Aórtica Central (PAC)
+# Importa PDF tipo MODELO PAC, extrae variables, genera historial Excel y PDF médico integrado.
+
+import io, re, math, tempfile
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
 
-# =========================================================
-# APP CGI - INFORME HEMODINÁMICO INTEGRADO
-# Corrección: importación real de PDF Z-Logic/CGI
-# Autor: Ricardo Daniel Olano
-# =========================================================
+try:
+    import pdfplumber
+except Exception:
+    pdfplumber = None
 
-st.set_page_config(
-    page_title="APP CGI - Informe Hemodinámico Integrado",
-    page_icon="❤️",
-    layout="wide",
+try:
+    from PIL import Image as PILImage, ImageDraw
+except Exception:
+    PILImage = None
+    ImageDraw = None
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image,
+    PageBreak, KeepTogether
 )
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
-AUTOR_APP = "Ricardo Daniel Olano - Especialista en Cardiología e Hipertensión Arterial"
-TITULO_MODULO_NO_EMBARAZADA = "MODULO DE EVALUACION HEMODINAMICA NO INVASIVA POR CARDIOGRAFIA DE IMPEDANCIA"
-
-
-# =========================================================
-# ESTILO
-# =========================================================
-
-def aplicar_estilos() -> None:
-    """Diseño profesional - paleta médica, contraste WCAG AA, responsive.
-
-    El bloque va dentro de un único <style> sin tags <link> (algunas versiones
-    de Streamlit filtran <link> y eso rompe el parser, dejando el CSS visible
-    como texto en pantalla). Las fuentes se cargan con @import.
-    """
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-        :root {
-            --brand-900:#062A47;
-            --brand-800:#0B3D6E;
-            --brand-700:#0E4F8A;
-            --brand-600:#1264B0;
-            --brand-500:#2C84D8;
-            --brand-50:#EAF3FB;
-            --accent-600:#0F8F7A;
-            --accent-500:#14B8A6;
-            --ok-700:#065F46;
-            --ok-50:#ECFDF5;
-            --warn-700:#92400E;
-            --warn-50:#FFF7ED;
-            --bad-700:#991B1B;
-            --bad-50:#FEF2F2;
-            --ink-900:#0F172A;
-            --ink-800:#1E293B;
-            --ink-700:#334155;
-            --ink-500:#64748B;
-            --ink-400:#94A3B8;
-            --line:#E2E8F0;
-            --surface:#FFFFFF;
-            --bg:#F4F7FB;
-            --shadow-sm:0 1px 2px rgba(15,23,42,.06);
-            --shadow-md:0 4px 14px rgba(15,23,42,.08);
-            --shadow-lg:0 14px 40px rgba(15,23,42,.10);
-        }
-        html, body, .stApp, .main {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
-            color: var(--ink-900);
-        }
-        .stApp {
-            background: linear-gradient(180deg, #EFF5FB 0%, #F4F7FB 100%) !important;
-        }
-        .block-container {
-            padding-top: 1.2rem !important;
-            padding-bottom: 3rem !important;
-            max-width: 1280px;
-        }
-        h1, h2, h3, h4 {
-            color: var(--brand-800) !important;
-            letter-spacing: -0.01em;
-            font-weight: 700 !important;
-        }
-        p, li, div, span, label { color: var(--ink-800); }
-        a { color: var(--brand-700); text-decoration: none; }
-        a:hover { text-decoration: underline; }
-
-        .card {
-            background: var(--surface);
-            border: 1px solid var(--line);
-            border-radius: 18px;
-            padding: 22px 24px;
-            margin-bottom: 18px;
-            box-shadow: var(--shadow-md);
-        }
-        .card h1, .card h2 { margin-top: 0; }
-        .metric-card {
-            background: var(--surface);
-            border: 1px solid var(--line);
-            border-radius: 16px;
-            padding: 16px 18px;
-            min-height: 110px;
-            box-shadow: var(--shadow-sm);
-        }
-        .metric-card:hover { box-shadow: var(--shadow-md); }
-
-        .ok   { color: var(--ok-700);   font-weight: 700; }
-        .bad  { color: var(--bad-700);  font-weight: 700; }
-        .warn { color: var(--warn-700); font-weight: 700; }
-        .muted { color: var(--ink-500); }
-        .pill {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 999px;
-            font-size: .78rem;
-            font-weight: 600;
-        }
-        .pill-ok   { background: var(--ok-50);   color: var(--ok-700);   border: 1px solid #A7F3D0; }
-        .pill-warn { background: var(--warn-50); color: var(--warn-700); border: 1px solid #FED7AA; }
-        .pill-bad  { background: var(--bad-50);  color: var(--bad-700);  border: 1px solid #FECACA; }
-        .pill-info { background: var(--brand-50);color: var(--brand-700);border: 1px solid #BFDBFE; }
-
-        .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
-            background: var(--brand-700) !important;
-            color: #FFFFFF !important;
-            border-radius: 12px !important;
-            font-weight: 700 !important;
-            border: 1px solid var(--brand-900) !important;
-            padding: .55rem 1.1rem !important;
-            box-shadow: var(--shadow-sm);
-        }
-        .stButton>button:hover, .stDownloadButton>button:hover, .stFormSubmitButton>button:hover {
-            background: var(--brand-800) !important;
-            box-shadow: var(--shadow-md);
-        }
-        .stButton>button:focus-visible, .stDownloadButton>button:focus-visible, .stFormSubmitButton>button:focus-visible {
-            outline: 3px solid var(--brand-500) !important;
-            outline-offset: 2px;
-        }
-        .stButton>button *, .stDownloadButton>button *, .stFormSubmitButton>button * { color: #FFFFFF !important; }
-
-        .stTextInput input, .stTextArea textarea, .stNumberInput input {
-            background: #FFFFFF !important;
-            color: var(--ink-900) !important;
-            border: 1.5px solid var(--line) !important;
-            border-radius: 10px !important;
-            padding: .55rem .8rem !important;
-        }
-        .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
-            border-color: var(--brand-600) !important;
-            box-shadow: 0 0 0 3px rgba(44,132,216,.18) !important;
-            outline: none !important;
-        }
-        .stTextInput label, .stTextArea label, .stSelectbox label, .stNumberInput label, .stCheckbox label {
-            color: var(--ink-800) !important;
-            font-weight: 600 !important;
-        }
-        div[data-baseweb="select"] > div {
-            background: #FFFFFF !important;
-            border: 1.5px solid var(--line) !important;
-            border-radius: 10px !important;
-        }
-
-        section[data-testid="stSidebar"] {
-            background: #EEF3F8 !important;
-            border-right: 1px solid var(--line);
-        }
-        section[data-testid="stSidebar"] * { color: var(--ink-900) !important; }
-        section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 { color: var(--brand-800) !important; }
-        section[data-testid="stSidebar"] .stButton>button { width: 100%; }
-
-        div[data-testid="stFileUploader"] section {
-            background: #FFFFFF !important;
-            border: 1.5px dashed var(--brand-500) !important;
-            border-radius: 14px !important;
-        }
-        div[data-testid="stFileUploader"] * { color: var(--ink-900) !important; }
-        div[data-testid="stFileUploader"] section:hover {
-            border-color: var(--brand-700) !important;
-            background: #F8FBFE !important;
-        }
-
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 4px;
-            background: #FFFFFF;
-            padding: 6px;
-            border-radius: 14px;
-            border: 1px solid var(--line);
-            box-shadow: var(--shadow-sm);
-        }
-        .stTabs [data-baseweb="tab"] {
-            border-radius: 10px !important;
-            padding: 8px 14px !important;
-            color: var(--ink-700) !important;
-            font-weight: 600 !important;
-        }
-        .stTabs [aria-selected="true"] {
-            background: var(--brand-700) !important;
-            color: #FFFFFF !important;
-        }
-        .stTabs [aria-selected="true"] * { color: #FFFFFF !important; }
-
-        div[data-testid="stAlert"] {
-            border-radius: 12px !important;
-            border: 1px solid var(--line) !important;
-        }
-        .stDataFrame, .stTable {
-            border-radius: 12px;
-            overflow: hidden;
-            border: 1px solid var(--line);
-        }
-        .streamlit-expanderHeader, [data-testid="stExpander"] summary {
-            background: #FFFFFF !important;
-            border-radius: 12px !important;
-            border: 1px solid var(--line) !important;
-            font-weight: 600 !important;
-            color: var(--ink-900) !important;
-        }
-
-        .login-shell {
-            display: flex;
-            justify-content: center;
-            padding: 1.5rem 1rem 1rem;
-        }
-        .login-card {
-            width: 100%;
-            max-width: 460px;
-            background: var(--surface);
-            border: 1px solid var(--line);
-            border-radius: 22px;
-            padding: 28px 28px 22px;
-            box-shadow: var(--shadow-lg);
-        }
-        .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
-        .login-logo {
-            width: 48px; height: 48px;
-            border-radius: 14px;
-            background: var(--brand-700);
-            color: #FFFFFF;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 1.1rem; font-weight: 800;
-            box-shadow: var(--shadow-md);
-        }
-        .login-title { font-size: 1.2rem; font-weight: 800; color: var(--brand-800); margin: 0; }
-        .login-sub { font-size: .85rem; color: var(--ink-500); margin: 2px 0 0; }
-        .login-hint { font-size: .82rem; color: var(--ink-500); margin-top: 10px; }
-        .login-divider { height: 1px; background: var(--line); margin: 14px 0; }
-
-        @media (max-width: 720px) {
-            .block-container { padding-left: .8rem !important; padding-right: .8rem !important; }
-            .card { padding: 16px; border-radius: 14px; }
-            .metric-card { min-height: 92px; padding: 14px; }
-            .login-card { padding: 22px 18px; border-radius: 18px; }
-            .stTabs [data-baseweb="tab"] { padding: 6px 10px !important; font-size: .9rem; }
-            h1 { font-size: 1.4rem !important; }
-            h2 { font-size: 1.15rem !important; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            * { transition: none !important; animation: none !important; }
-        }
-        
-        /* Contraste obligatorio: texto blanco sobre barras/fondos azules */
-        section[data-testid="stSidebar"] [style*="background: rgb(6, 42, 71)"],
-        section[data-testid="stSidebar"] [style*="background-color: rgb(6, 42, 71)"],
-        section[data-testid="stSidebar"] [style*="background: #062A47"],
-        section[data-testid="stSidebar"] [style*="background-color: #062A47"],
-        section[data-testid="stSidebar"] [style*="background: #0B3D6E"],
-        section[data-testid="stSidebar"] [style*="background-color: #0B3D6E"],
-        section[data-testid="stSidebar"] [style*="background: #0E4F8A"],
-        section[data-testid="stSidebar"] [style*="background-color: #0E4F8A"],
-        section[data-testid="stSidebar"] .sidebar-blue,
-        section[data-testid="stSidebar"] .barra-vertical-azul,
-        .sidebar-blue,
-        .barra-vertical-azul {
-            color: #FFFFFF !important;
-        }
-        section[data-testid="stSidebar"] [style*="background: rgb(6, 42, 71)"] *,
-        section[data-testid="stSidebar"] [style*="background-color: rgb(6, 42, 71)"] *,
-        section[data-testid="stSidebar"] [style*="background: #062A47"] *,
-        section[data-testid="stSidebar"] [style*="background-color: #062A47"] *,
-        section[data-testid="stSidebar"] [style*="background: #0B3D6E"] *,
-        section[data-testid="stSidebar"] [style*="background-color: #0B3D6E"] *,
-        section[data-testid="stSidebar"] [style*="background: #0E4F8A"] *,
-        section[data-testid="stSidebar"] [style*="background-color: #0E4F8A"] *,
-        section[data-testid="stSidebar"] .sidebar-blue *,
-        section[data-testid="stSidebar"] .barra-vertical-azul *,
-        .sidebar-blue *,
-        .barra-vertical-azul * {
-            color: #FFFFFF !important;
-            fill: #FFFFFF !important;
-        }
-        section[data-testid="stSidebar"] .sidebar-blue a,
-        section[data-testid="stSidebar"] .barra-vertical-azul a,
-        .sidebar-blue a,
-        .barra-vertical-azul a {
-            color: #FFFFFF !important;
-            text-decoration: underline;
-        }
-
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-aplicar_estilos()
-
-
-
-
-
-# =========================================================
-# REFERENCIAS BIBLIOGRÁFICAS DE SOPORTE
-# =========================================================
-
-REFERENCIAS_BIBLIOGRAFICAS = [
-    "Sociedad Argentina de Hipertensión Arterial (SAHA), Grupo de Trabajo de Mecánica Vascular. Manual de Mecánica Vascular: Manifiesto de actualización del Grupo de Trabajo de Mecánica Vascular de la Sociedad Argentina de Hipertensión Arterial (SAHA). 2024.",
-    "Mancia G, Kreutz R, Brunström M, et al. 2023 ESH Guidelines for the management of arterial hypertension. J Hypertens. 2023;41:1874-2071.",
-    "Whelton PK, Carey RM, Aronow WS, et al. 2017 ACC/AHA Guideline for High Blood Pressure in Adults. Hypertension. 2018;71:e13-e115.",
-    "Townsend RR, Wilkinson IB, Schiffrin EL, et al. Recommendations for improving and standardizing vascular research on arterial stiffness. Hypertension. 2015;66:698-722.",
-    "Laurent S, Cockcroft J, Van Bortel L, et al. Expert consensus document on arterial stiffness. Eur Heart J. 2006;27:2588-2605.",
-    "Nichols WW, O’Rourke MF. McDonald’s Blood Flow in Arteries. 6th ed. Hodder Arnold; 2011.",
-]
-
-SOPORTE_BIBLIOGRAFICO_APP = """
-La interpretación clínica del módulo de mecánica vascular y cardiografía de impedancia se apoya, entre otras fuentes,
-en el Manual de Mecánica Vascular 2024 de la Sociedad Argentina de Hipertensión Arterial (SAHA). Este documento
-desarrolla la evaluación integral de la disfunción vascular en hipertensión arterial, la velocidad de onda de pulso,
-los parámetros hemodinámicos centrales, la presión aórtica central, los patrones hemodinámicos en hipertensión
-arterial y la utilidad clínica de la cardiografía por impedancia.
-"""
-
-# =========================================================
-# UTILIDADES
-# =========================================================
-
-
-
-def safe_pdf_texto_simple(txt: str) -> str:
-    return str(txt).replace("—", "-").replace("–", "-").replace("“", "\"").replace("”", "\"").replace("‘", "'").replace("’", "'")
-
-
-def limpiar_numero(x: Any) -> Optional[float]:
-    if x is None:
-        return None
-    if isinstance(x, (int, float)):
+def ensure_download_bytes(obj):
+    """Convierte salida de PDF a bytes válidos para st.download_button."""
+    if obj is None:
+        return b""
+    if isinstance(obj, bytes):
+        return obj
+    if isinstance(obj, bytearray):
+        return bytes(obj)
+    if hasattr(obj, "getvalue"):
+        val = obj.getvalue()
+        if isinstance(val, str):
+            return val.encode("latin-1", errors="ignore")
+        return bytes(val)
+    if isinstance(obj, str):
+        # Si es una ruta a archivo, leer bytes. Si es contenido, codificar.
         try:
-            if pd.isna(x):
-                return None
+            p = Path(obj)
+            if p.exists() and p.is_file():
+                return p.read_bytes()
         except Exception:
             pass
-        return float(x)
+        return obj.encode("latin-1", errors="ignore")
+    try:
+        return bytes(obj)
+    except Exception:
+        return str(obj).encode("latin-1", errors="ignore")
 
-    s = str(x).strip()
-    if not s or s.lower() in ["nan", "none", "null", "no disponible"]:
-        return None
 
-    s = s.replace(" ", "")
+st.set_page_config(page_title="PAC IA - Presión Aórtica Central", layout="wide")
 
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    else:
-        s = s.replace(",", ".")
+APP_TITLE = "PAC IA - Informe médico integrado de Presión Aórtica Central"
+HISTORIAL_FILE = Path("historial_pac.xlsx")
 
+BIBLIOGRAFIA = [
+    "Agabiti-Rosei E, Mancia G, O'Rourke MF, et al. Central blood pressure measurements and antihypertensive therapy: a consensus document. Hypertension. 2007;50:154-160.",
+    "Zócalo Y, Bia D. Presión aórtica central y parámetros clínicos derivados de la onda del pulso: evaluación no invasiva en la práctica clínica. Rev Urug Cardiol. 2014;29:215-230.",
+    "Herbert A, Cruickshank JK, Laurent S, Boutouyrie P, et al. Establishing reference values for central blood pressure and its amplification. Eur Heart J. 2014;35:3122-3133.",
+    "Westerhof BE, Guelen I, Westerhof N, Karemaker JM, Avolio A. Quantification of wave reflection in the human aorta from pressure alone. Hypertension. 2006;48:595-601.",
+    "Norton GR, An DW, Aparicio LS, et al. Mortality and cardiovascular end points in relation to the aortic pulse wave components. Hypertension. 2024;81:1065-1075.",
+    "Huang QF, An DW, Aparicio LS, et al. An outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024."
+]
+
+CENTRAL_SBP_TABLE = {
+    "Óptimo": {"F": 108, "M": 97},
+    "Normal": {"F": 123, "M": 116},
+    "Normal alta": {"F": 133, "M": 126},
+    "Etapa 1": {"F": 143, "M": 137},
+    "Etapa 2": {"F": 161, "M": 154},
+    "Etapa 3": {"F": 183, "M": 173},
+    "ISH": {"F": 147, "M": 140},
+}
+
+def safe_text(x):
+    if x is None:
+        return ""
+    return str(x).replace("\x00", "").strip()
+
+def to_float(x):
+    if x is None or str(x).strip() == "":
+        return np.nan
+    s = str(x).replace(",", ".")
+    s = re.sub(r"[^0-9.\-+]", "", s)
     try:
         return float(s)
     except Exception:
+        return np.nan
+
+
+def safe_trapezoid(y, x):
+    """Integración compatible con NumPy 2.x/Streamlit Cloud.
+
+    np.trapz fue retirado en algunas versiones recientes de NumPy; por eso
+    usamos np.trapezoid si existe y dejamos fallback manual para evitar caídas
+    del informe en producción.
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    ok = np.isfinite(y) & np.isfinite(x)
+    y, x = y[ok], x[ok]
+    if len(y) < 2:
+        return 0.0
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    return float(np.sum((y[1:] + y[:-1]) * 0.5 * np.diff(x)))
+
+
+def format_optional(v, dec=1):
+    """Formatea valores numéricos evitando mostrar nan en informes clínicos."""
+    try:
+        f = float(v)
+        if np.isnan(f):
+            return "no disponible"
+        return f"{f:.{dec}f}"
+    except Exception:
+        return "no disponible"
+
+
+
+
+def is_physiologic_waveform(df, row=None):
+    """Valida que la curva tenga morfología fisiológica y no sea una tabla de métricas mal leída."""
+    try:
+        if df is None or len(df) < 20:
+            return False, "menos de 20 puntos útiles"
+        t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+        p = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
+        ok = np.isfinite(t) & np.isfinite(p)
+        t, p = t[ok], p[ok]
+        if len(p) < 20:
+            return False, "menos de 20 pares tiempo-presión"
+        if np.nanmax(t) - np.nanmin(t) < 250:
+            return False, "duración menor a 250 ms"
+        pmin, pmax = float(np.nanmin(p)), float(np.nanmax(p))
+        pp = pmax - pmin
+        if not (35 <= pmin <= 140 and 70 <= pmax <= 240 and 10 <= pp <= 120):
+            return False, f"rango no fisiológico: mínimo {pmin:.1f}, máximo {pmax:.1f}"
+        # Evitar curvas con saltos erráticos como las de la captura.
+        dif = np.abs(np.diff(p))
+        if len(dif) > 0 and np.nanpercentile(dif, 95) > max(18, 0.45 * pp):
+            return False, "saltos bruscos no compatibles con onda de presión central"
+        # Debe tener un ascenso sistólico claro.
+        peak_i = int(np.nanargmax(p))
+        if peak_i < 2 or peak_i > int(len(p) * 0.75):
+            return False, "pico sistólico mal ubicado"
+        if (pmax - p[0]) < 0.35 * pp:
+            return False, "no hay ascenso sistólico claro"
+        return True, "curva fisiológica"
+    except Exception as e:
+        return False, str(e)
+
+
+def calibrate_waveform_to_metrics(wave_df, row):
+    """Escala la curva para que coincida exactamente con PAD/PAS central del estudio."""
+    df = wave_df.copy()
+    df.columns = ["tiempo_ms", "presion_central_mmHg"]
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    df = df.sort_values("tiempo_ms").drop_duplicates("tiempo_ms").reset_index(drop=True)
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    if np.isnan(pas) or pas <= 0:
+        pas = float(df["presion_central_mmHg"].max())
+    if np.isnan(pad) or pad <= 0:
+        pad = float(df["presion_central_mmHg"].min())
+    if pas <= pad:
+        pas = pad + max(25.0, to_float(row.get("pp_central")) if not np.isnan(to_float(row.get("pp_central"))) else 35.0)
+
+    y = pd.to_numeric(df["presion_central_mmHg"], errors="coerce").to_numpy(dtype=float)
+    y = pd.Series(y).interpolate(limit_direction="both").to_numpy(dtype=float)
+
+    # Suavizado conservador para preservar morfología y quitar dientes del TXT/CSV.
+    if len(y) >= 9:
+        win = max(5, min(31, (len(y)//20)*2 + 1))
+        y = pd.Series(y).rolling(win, center=True, min_periods=1).median().to_numpy()
+        y = pd.Series(y).rolling(win, center=True, min_periods=1).mean().to_numpy()
+
+    ymin, ymax = float(np.nanmin(y)), float(np.nanmax(y))
+    if ymax - ymin < 1:
+        raise ValueError("Curva real inválida: amplitud de presión insuficiente para calibración. No se generará curva sintética.")
+
+    ycal = pad + (y - ymin) * (pas - pad) / (ymax - ymin)
+
+    t = pd.to_numeric(df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    t = pd.Series(t).interpolate(limit_direction="both").to_numpy(dtype=float)
+    if np.nanmax(t) - np.nanmin(t) <= 0:
+        t = np.linspace(0, 1000, len(ycal))
+    else:
+        t = (t - np.nanmin(t)) / (np.nanmax(t) - np.nanmin(t)) * 1000.0
+
+    return pd.DataFrame({"tiempo_ms": t, "presion_central_mmHg": ycal})
+
+
+def read_curve_file_robust(uploaded_file, row=None):
+    """Lee CSV/TXT de curva y rechaza tablas de métricas mal interpretadas como curva.
+
+    Acepta columnas nombradas como tiempo/time/ms y presión/pressure/PAC/mmHg.
+    También acepta TXT/CSV sin encabezado si contiene una serie real de al menos 20-50 puntos.
+    Modo estricto: si no hay curva real válida, se detiene el análisis de ondas/armónicos y no se usa curva sintética.
+    """
+    raw = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("latin-1", errors="replace")
+
+    text = text.replace("\x00", "").replace("\ufeff", "").strip()
+    if not text:
+        raise ValueError("El archivo de curva está vacío.")
+
+    candidates = []
+
+    # CSV/TXT estructurado con separadores habituales.
+    for sep in (None, ";", ",", "\t", r"\s+"):
+        try:
+            df = pd.read_csv(io.StringIO(text), sep=sep, engine="python", decimal=",", on_bad_lines="skip")
+            if df is not None and df.shape[0] >= 20:
+                try:
+                    candidates.append(normalize_wave_dataframe(df))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Sin encabezado: solo si hay muchos pares y tiempo monótono.
+    numeric_rows = []
+    for line in text.splitlines():
+        nums = re.findall(r"[-+]?\d+(?:[\.,]\d+)?", line)
+        vals = [to_float(n) for n in nums]
+        vals = [v for v in vals if not np.isnan(v)]
+        if vals:
+            numeric_rows.append(vals)
+
+    pair_rows = [r[:2] for r in numeric_rows if len(r) >= 2]
+    if len(pair_rows) >= 20:
+        try:
+            candidates.append(normalize_wave_dataframe(pd.DataFrame(pair_rows, columns=["tiempo_ms", "presion_mmHg"])))
+        except Exception:
+            pass
+
+    # Una columna / vector de presión: solo si hay suficientes puntos fisiológicos.
+    flat = []
+    for r in numeric_rows:
+        if len(r) == 1:
+            flat.append(r[0])
+    if len(flat) >= 50:
+        pressure_like = [v for v in flat if 35 <= v <= 240]
+        if len(pressure_like) >= 50:
+            candidates.append(pd.DataFrame({"tiempo_ms": np.linspace(0, 1000, len(pressure_like)), "presion_central_mmHg": pressure_like}))
+
+    errors = []
+    for cand in candidates:
+        cand = calibrate_waveform_to_metrics(cand, row or {})
+        ok, msg = is_physiologic_waveform(cand, row)
+        if ok:
+            return cand
+        errors.append(msg)
+
+    raise ValueError("El archivo no contiene una curva de presión central fisiológica reconocible. " + ("; ".join(errors[:3]) if errors else ""))
+
+
+def normalize_wave_dataframe(df):
+    """Normaliza cualquier tabla de curva a tiempo_ms/presion_central_mmHg."""
+    df = df.copy()
+
+    if df.shape[1] == 1:
+        col = df.columns[0]
+        joined = "\n".join(df[col].astype(str).tolist())
+        for sep in (";", ",", "\t", r"\s+"):
+            try:
+                tmp = pd.read_csv(io.StringIO(joined), sep=sep, engine="python", header=None, on_bad_lines="skip")
+                if tmp.shape[1] >= 2 and tmp.shape[0] >= 20:
+                    df = tmp
+                    break
+            except Exception:
+                pass
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    num = pd.DataFrame()
+    for c in df.columns:
+        num[c] = df[c].map(to_float)
+
+    valid_numeric_cols = [c for c in num.columns if num[c].notna().sum() >= 20]
+    if len(valid_numeric_cols) < 2:
+        # una sola columna con presión
+        valid_one = [c for c in num.columns if num[c].notna().sum() >= 50]
+        if len(valid_one) == 1:
+            pressure = num[valid_one[0]].dropna().astype(float)
+            pressure = pressure[(pressure >= 35) & (pressure <= 240)]
+            if len(pressure) >= 50:
+                return pd.DataFrame({"tiempo_ms": np.linspace(0, 1000, len(pressure)), "presion_central_mmHg": pressure.values})
+        raise ValueError("No se detectaron columnas de curva con suficientes puntos.")
+
+    time_keys = ["tiempo", "time", "ms", "mseg", "miliseg", "seg", "sec", "x"]
+    press_keys = ["pres", "pressure", "pao", "pac", "central", "mmhg", "aort", "ao", "y"]
+
+    time_candidates = [c for c in valid_numeric_cols if any(k in str(c).lower() for k in time_keys)]
+    pressure_candidates = [c for c in valid_numeric_cols if any(k in str(c).lower() for k in press_keys)]
+
+    if time_candidates:
+        tcol = time_candidates[0]
+    else:
+        # Escoger columna más monótona y con rango compatible con tiempo.
+        scores = {}
+        for c in valid_numeric_cols:
+            s = num[c].dropna().astype(float).to_numpy()
+            diffs = np.diff(s)
+            mono = np.mean(diffs >= 0)
+            rng = np.nanmax(s) - np.nanmin(s)
+            scores[c] = mono + (0.5 if rng >= 250 else 0)
+        tcol = max(scores, key=scores.get)
+
+    pcol = None
+    for c in pressure_candidates:
+        if c != tcol:
+            pcol = c
+            break
+
+    if pcol is None:
+        # Escoger columna con rango de presión fisiológico.
+        ranked = []
+        for c in valid_numeric_cols:
+            if c == tcol:
+                continue
+            s = num[c].dropna().astype(float)
+            med = float(np.nanmedian(s)); rng = float(np.nanmax(s)-np.nanmin(s))
+            score = 0
+            if 50 <= med <= 160: score += 2
+            if 10 <= rng <= 120: score += 2
+            ranked.append((score, c))
+        if not ranked:
+            raise ValueError("No se detectó columna de presión.")
+        pcol = sorted(ranked, reverse=True)[0][1]
+
+    out = pd.DataFrame({"tiempo_ms": num[tcol], "presion_central_mmHg": num[pcol]}).dropna()
+    out = out.sort_values("tiempo_ms").drop_duplicates("tiempo_ms").reset_index(drop=True)
+
+    if len(out) < 20:
+        raise ValueError("Curva con menos de 20 puntos válidos.")
+
+    if out["tiempo_ms"].max() <= 5:
+        out["tiempo_ms"] *= 1000.0
+
+    tmin, tmax = out["tiempo_ms"].min(), out["tiempo_ms"].max()
+    if tmax - tmin <= 0:
+        out["tiempo_ms"] = np.linspace(0, 1000, len(out))
+    elif tmax > 5000 or tmax < 250:
+        out["tiempo_ms"] = (out["tiempo_ms"] - tmin) / (tmax - tmin) * 1000.0
+
+    return out
+
+def extract_pdf_text(pdf_bytes):
+    text = ""
+    if pdfplumber is not None:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text += "\n" + (page.extract_text() or "")
+    elif fitz is not None:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text = "\n".join([p.get_text() for p in doc])
+    return text
+
+def render_pdf_page_png(pdf_bytes, page_index=1, zoom=2.0):
+    if fitz is None:
+        return None
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if len(doc) == 0:
+        return None
+    page_index = min(max(page_index, 0), len(doc)-1)
+    pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    return pix.tobytes("png")
+
+
+def _pixmap_to_rgb_array(page, zoom=3.0):
+    """Renderiza una página PDF a matriz RGB para digitalización de curvas."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if arr.shape[2] >= 3:
+        arr = arr[:, :, :3]
+    return arr
+
+
+def _curve_masks_from_rgb(arr):
+    """Máscaras candidatas para detectar la curva real dibujada en el PDF.
+
+    Se prioriza curva roja/magenta, típica en reportes PAC. Como respaldo se buscan
+    curvas azules/verdes y, solo si no hay color, una máscara oscura más restrictiva.
+    """
+    rgb = arr.astype(np.int16)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    # Curvas coloreadas: evita texto gris/negro y fondos claros.
+    red = (r > 115) & (r > g + 35) & (r > b + 35)
+    magenta = (r > 105) & (b > 80) & (r > g + 25) & (b > g + 15)
+    blue = (b > 115) & (b > r + 35) & (b > g + 20)
+    green = (g > 105) & (g > r + 25) & (g > b + 25)
+    # Respaldo para curva negra: exige vecindad dentro de un gráfico y evita bordes externos.
+    dark = (r < 70) & (g < 70) & (b < 70)
+    return [
+        ("roja", red | magenta),
+        ("azul", blue),
+        ("verde", green),
+        ("oscura_restrictiva", dark),
+    ]
+
+
+def _clean_mask(mask):
+    """Limpieza morfológica opcional sin exigir OpenCV en el entorno."""
+    mask = mask.astype(np.uint8)
+    if cv2 is None:
+        return mask.astype(bool)
+    kernel = np.ones((2, 2), np.uint8)
+    m = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return m.astype(bool)
+
+
+def _best_curve_component(mask, page_shape, color_name):
+    """Selecciona el componente más compatible con una curva de presión.
+
+    Puntúa componentes anchos, no demasiado altos, con aspecto horizontal y lejos de
+    márgenes extremos. Esto evita seleccionar títulos, logos o textos coloreados.
+    """
+    h, w = page_shape[:2]
+    mask = _clean_mask(mask)
+    if mask.sum() < 80:
         return None
 
+    if cv2 is None:
+        ys, xs = np.where(mask)
+        if len(xs) < 80:
+            return None
+        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()), mask)
 
-def fmt(x: Any, dec: int = 2, sufijo: str = "") -> str:
-    v = limpiar_numero(x)
-    if v is None:
-        return "No disponible"
-    return f"{v:.{dec}f}{sufijo}".replace(".", ",")
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    best = None
+    best_score = -1
+    for lab in range(1, n):
+        x, y, bw, bh, area = stats[lab]
+        if area < 60 or bw < 80 or bh < 8:
+            continue
+        if bw > 0.95 * w or bh > 0.65 * h:
+            continue
+        aspect = bw / max(bh, 1)
+        if aspect < 1.6:
+            continue
+        # Para máscara oscura, ser más exigente porque hay mucho texto/ejes.
+        if color_name.startswith("oscura") and (bw < 0.20 * w or area < 120 or aspect < 2.5):
+            continue
+        margin_penalty = 0
+        if y < 0.04*h or y+bh > 0.96*h or x < 0.02*w or x+bw > 0.98*w:
+            margin_penalty = 0.55
+        density = area / max(bw * bh, 1)
+        score = (bw * 1.3 + area * 0.35 + aspect * 18) * (1 - margin_penalty) * (0.65 + min(density, 0.45))
+        if score > best_score:
+            comp = labels == lab
+            best = (int(x), int(y), int(x+bw), int(y+bh), comp)
+            best_score = score
+    return best
 
 
-def numeros_en_texto(texto: Any) -> List[float]:
-    if texto is None:
+def _digitize_curve_from_mask(mask, bbox, row, n_points=512):
+    """Convierte píxeles de curva en puntos tiempo-presión.
+
+    La presión se calibra linealmente contra PAS/PAD central reales del estudio. El
+    tiempo se escala al ciclo visible 0-1000 ms, preservando la morfología del trazo.
+    """
+    x0, y0, x1, y1 = bbox
+    sub = mask[y0:y1+1, x0:x1+1]
+    ys, xs = np.where(sub)
+    if len(xs) < 60:
+        raise ValueError("No se detectaron suficientes píxeles de curva para digitalizar.")
+    # Tomar una presión por columna: mediana de píxeles de trazo en esa columna.
+    data = []
+    for x in np.unique(xs):
+        yy = ys[xs == x]
+        if len(yy) == 0:
+            continue
+        data.append((float(x), float(np.median(yy))))
+    if len(data) < 30:
+        raise ValueError("La curva digitalizada tiene muy pocas columnas útiles.")
+    data = np.asarray(data, dtype=float)
+    xpix, ypix = data[:, 0], data[:, 1]
+
+    # Filtro de saltos: conserva el contorno principal del trazo.
+    y_s = pd.Series(ypix).rolling(5, center=True, min_periods=1).median().to_numpy()
+    bad = np.abs(y_s - np.nanmedian(y_s)) > 4 * max(np.nanstd(y_s), 1.0)
+    if np.mean(~bad) > 0.70:
+        xpix, y_s = xpix[~bad], y_s[~bad]
+
+    t = (xpix - np.nanmin(xpix)) / max(np.nanmax(xpix) - np.nanmin(xpix), 1e-6) * 1000.0
+    # En imagen, menor y = mayor presión. Escala preliminar 0-1 y luego calibra.
+    y_norm = (np.nanmax(y_s) - y_s) / max(np.nanmax(y_s) - np.nanmin(y_s), 1e-6)
+    tmp = pd.DataFrame({"tiempo_ms": t, "presion_central_mmHg": y_norm})
+    tmp = tmp.sort_values("tiempo_ms").drop_duplicates("tiempo_ms")
+    t_grid = np.linspace(0, 1000, n_points)
+    y_grid = np.interp(t_grid, tmp["tiempo_ms"], tmp["presion_central_mmHg"])
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    pp = to_float(row.get("pp_central"))
+    if np.isnan(pas) or np.isnan(pad) or pas <= pad:
+        if not np.isnan(pp) and pp > 10 and not np.isnan(pad):
+            pas = pad + pp
+        else:
+            raise ValueError("Para calibrar la curva digitalizada se requieren PAS/PAD central válidas.")
+    p_grid = pad + (y_grid - np.nanmin(y_grid)) * (pas - pad) / max(np.nanmax(y_grid) - np.nanmin(y_grid), 1e-6)
+    out = pd.DataFrame({"tiempo_ms": t_grid, "presion_central_mmHg": p_grid})
+    ok, msg = is_physiologic_waveform(out, row)
+    if not ok:
+        raise ValueError("Curva digitalizada no supera validación fisiológica: " + msg)
+    return out
+
+
+def _annotate_digitized_region_png(arr, bbox, label):
+    """Genera PNG diagnóstico con el rectángulo usado para digitalizar."""
+    if PILImage is None or ImageDraw is None:
+        return None
+    img = PILImage.fromarray(arr.astype(np.uint8), mode="RGB")
+    draw = ImageDraw.Draw(img)
+    x0, y0, x1, y1 = bbox
+    draw.rectangle([x0, y0, x1, y1], outline=(220, 30, 30), width=5)
+    draw.text((x0, max(0, y0-24)), f"Curva digitalizada: {label}", fill=(220, 30, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _restrict_mask_to_pdf_curve_roi(mask, arr_shape, page_index):
+    """Limita la búsqueda al panel real de curva del equipo PAC.
+
+    Corrección por captura aportada:
+    - La curva está en la SEGUNDA HOJA.
+    - El panel se ubica ARRIBA A LA IZQUIERDA.
+    - Debe incluir el gráfico completo "Pulso aórtico y radial promediado" y excluir
+      la tabla central/derecha de métricas para no capturar números, barras o textos.
+
+    Coordenadas relativas estimadas sobre la página renderizada:
+    x: 0% a 50% de ancho
+    y: 7% a 69% de alto
+    """
+    h, w = arr_shape[:2]
+    roi = np.zeros_like(mask, dtype=bool)
+
+    if page_index == 1:
+        # Segunda hoja, panel superior izquierdo: gráfico de pulso aórtico/radial.
+        # En la imagen ejemplo ocupa aproximadamente desde el margen izquierdo hasta
+        # antes de la tabla de datos, y desde debajo del encabezado hasta la base del gráfico.
+        x0 = int(0.000 * w)
+        x1 = int(0.500 * w)
+        y0 = int(0.070 * h)
+        y1 = int(0.690 * h)
+    else:
+        # Respaldo conservador: mismo sector, apenas más amplio si cambia escala.
+        x0 = int(0.000 * w)
+        x1 = int(0.520 * w)
+        y0 = int(0.060 * h)
+        y1 = int(0.710 * h)
+
+    roi[y0:y1, x0:x1] = True
+    return mask & roi, (x0, y0, x1, y1)
+
+def digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0, preferred_page_index=1):
+    """Extrae/digitaliza la curva real desde la imagen del PDF cuando no hay CSV/TXT.
+
+    Regla principal para MODELO PAC/Exxer:
+    - Buscar primero en la segunda hoja del PDF.
+    - Limitar la detección al sector superior izquierdo: panel de curva de esa hoja.
+    - Calibrar exclusivamente con PAS/PAD central reales del paciente.
+
+    Devuelve: wave_df, debug_png, metadata.
+    No genera curvas sintéticas: si no detecta una curva válida, falla con mensaje explícito.
+    """
+    if fitz is None:
+        raise ValueError("PyMuPDF/fitz no está disponible; no se puede renderizar el PDF para digitalizar la curva.")
+    if not pdf_bytes:
+        raise ValueError("No hay PDF cargado para digitalizar la curva.")
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if len(doc) == 0:
+        raise ValueError("El PDF no contiene páginas.")
+
+    attempts = []
+
+    # Prioridad absoluta: segunda hoja, sector superior izquierdo: panel de curva. Luego, si falla, páginas siguientes
+    # también con ROI del panel superior izquierdo. No vuelve a la hoja 1 salvo como último respaldo.
+    page_order = []
+    if len(doc) > preferred_page_index:
+        page_order.append(preferred_page_index)
+    page_order += [i for i in range(min(len(doc), max_pages)) if i not in page_order and i != 0]
+    if 0 not in page_order and len(doc) > 0:
+        page_order.append(0)
+
+    for pi in page_order:
+        page = doc[pi]
+        arr = _pixmap_to_rgb_array(page, zoom=zoom)
+        for color_name, raw_mask in _curve_masks_from_rgb(arr):
+            raw_mask, roi_bbox = _restrict_mask_to_pdf_curve_roi(raw_mask, arr.shape, pi)
+            comp = _best_curve_component(raw_mask, arr.shape, color_name)
+            if comp is None:
+                attempts.append(f"página {pi+1} sector superior izquierdo: panel de curva {color_name}: sin componente compatible")
+                continue
+            x0, y0, x1, y1, comp_mask = comp
+            # Expandir un poco para conservar extremos del trazo, no para calibrar contra ejes.
+            pad_x = int(max(3, 0.020 * (x1-x0)))
+            pad_y = int(max(3, 0.12 * (y1-y0)))
+            x0e = max(0, x0 - pad_x); x1e = min(arr.shape[1]-1, x1 + pad_x)
+            y0e = max(0, y0 - pad_y); y1e = min(arr.shape[0]-1, y1 + pad_y)
+            try:
+                wave = _digitize_curve_from_mask(comp_mask, (x0, y0, x1, y1), row)
+                debug = _annotate_digitized_region_png(
+                    arr,
+                    (x0e, y0e, x1e, y1e),
+                    f"pág. {pi+1} / sector superior izquierdo: panel de curva / {color_name}"
+                )
+                meta = {
+                    "pagina": pi + 1,
+                    "sector": "izquierdo-superior de la hoja",
+                    "pagina_preferida": 2,
+                    "color_detectado": color_name,
+                    "bbox_px": (x0, y0, x1, y1),
+                    "roi_px": roi_bbox,
+                    "puntos": int(len(wave)),
+                    "metodo": "digitalización automática desde segunda hoja, sector superior izquierdo: panel de curva, calibrada con PAS/PAD central",
+                }
+                return wave, debug, meta
+            except Exception as e:
+                attempts.append(f"página {pi+1} sector superior izquierdo: panel de curva {color_name}: {e}")
+    raise ValueError("No se pudo digitalizar una curva central válida desde la segunda hoja, sector superior izquierdo: panel de curva del PDF. " + " | ".join(attempts[:10]))
+
+
+def find_after(label, text, default=""):
+    pat = re.compile(label + r"\s*[:#]?\s*([^\n]+)", re.I)
+    m = pat.search(text)
+    return safe_text(m.group(1)) if m else default
+
+
+# -----------------------------
+# Parser robusto de datos PAC
+# -----------------------------
+def _collapse_spaces(s):
+    return re.sub(r"\s+", " ", safe_text(s)).strip()
+
+
+
+def _line_text_after_label(line_text, label_regex):
+    """Devuelve texto a la derecha de una etiqueta dentro de una línea visual."""
+    m = re.search(label_regex, line_text, flags=re.I)
+    if not m:
+        return ""
+    return _collapse_spaces(line_text[m.end():]).strip(" :#-")
+
+
+def _layout_lines_from_pdf(pdf_bytes, preferred_page_index=1):
+    """Extrae líneas visuales con coordenadas usando PyMuPDF.
+
+    Esto corrige el problema típico de pdfplumber en estos informes: mezcla columnas y
+    hace que Paciente tome valores de otra etiqueta como 'Número de estudio'.
+    """
+    if fitz is None or not pdf_bytes:
         return []
-    s = str(texto)
-    encontrados = re.findall("[-+]?[0-9]+(?:[.,][0-9]+)?", s)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_indices = []
+    if len(doc) > preferred_page_index:
+        page_indices.append(preferred_page_index)
+    page_indices += [i for i in range(len(doc)) if i not in page_indices]
+    all_lines = []
+    for pi in page_indices:
+        page = doc[pi]
+        words = page.get_text("words") or []
+        # words: x0, y0, x1, y1, text, block, line, word_no
+        grouped = {}
+        for w in words:
+            if len(w) < 8:
+                continue
+            x0, y0, x1, y1, txt, block, line, word_no = w[:8]
+            key = (pi, int(block), int(line))
+            grouped.setdefault(key, []).append((float(x0), float(y0), float(x1), float(y1), str(txt)))
+        for key, ws in grouped.items():
+            ws = sorted(ws, key=lambda z: z[0])
+            text = _collapse_spaces(" ".join(w[4] for w in ws))
+            if not text:
+                continue
+            x0 = min(w[0] for w in ws); y0 = min(w[1] for w in ws)
+            x1 = max(w[2] for w in ws); y1 = max(w[3] for w in ws)
+            all_lines.append({"page": key[0], "x0": x0, "y0": y0, "x1": x1, "y1": y1, "text": text, "words": ws})
+    all_lines.sort(key=lambda d: (d["page"], d["y0"], d["x0"]))
+    return all_lines
+
+
+def _numeric_values_in_text(txt):
+    return [to_float(x) for x in re.findall(r"[-+]?\d+(?:[\.,]\d+)?", txt)]
+
+
+def _extract_layout_fields_from_pdf(pdf_bytes):
+    """Extractor visual de cabecera y métricas desde el PDF original.
+
+    Prioriza la segunda página porque allí está el panel del estudio mostrado por el usuario.
+    Extrae paciente, estudio, demografía, tabla Radial/Central y aumentaciones desde líneas
+    visuales, no desde texto plano concatenado.
+    """
+    out = {}
+    lines = _layout_lines_from_pdf(pdf_bytes, preferred_page_index=1)
+    if not lines:
+        return out
+
+    # 1) Paciente y estudio por línea visual.
+    patient_candidates = []
+    for ln in lines:
+        txt = ln["text"]
+        if re.search(r"\bPaciente\b", txt, flags=re.I):
+            cand = _line_text_after_label(txt, r"\bPaciente\b")
+            cand = re.split(r"\b(?:Estudio\s*#?|N[úu]mero\s+de\s+estudio|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand, flags=re.I)[0]
+            cand = _clean_patient_name(cand)
+            if cand and not _is_bad_patient_value(cand):
+                # preferir nombres con al menos dos tokens alfabéticos y ubicación derecha/superior del informe
+                alpha_tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", cand)
+                score = len(alpha_tokens) + (2 if ln["page"] == 1 else 0) + (1 if ln["y0"] < 180 else 0)
+                patient_candidates.append((score, cand))
+    if patient_candidates:
+        out["paciente"] = sorted(patient_candidates, reverse=True)[0][1]
+
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bEstudio\s*#?\b\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", txt, re.I)
+        if m:
+            val = _collapse_spaces(m.group(1)).strip(" :#-")
+            val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", val, flags=re.I)[0].strip(" :#-")
+            if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                out["estudio"] = val
+                break
+
+    # 2) Demografía/antropometría por línea visual.
+    def put_num_from_line(label, key):
+        for ln in lines:
+            txt = ln["text"]
+            if re.search(rf"\b{label}\b", txt, flags=re.I):
+                valtxt = _line_text_after_label(txt, rf"\b{label}\b")
+                vals = _numeric_values_in_text(valtxt)
+                if vals:
+                    out[key] = vals[0]
+                    return
+    for label, key in [("Edad", "edad"), ("Peso", "peso"), ("Altura", "altura"), ("IMC", "imc"), ("SC", "sc")]:
+        put_num_from_line(label, key)
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", txt, re.I)
+        if m:
+            out["sexo"] = m.group(1).upper(); break
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", txt, re.I)
+        if m:
+            out["fecha"] = m.group(1); break
+    for ln in lines:
+        txt = ln["text"]
+        m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", txt, re.I)
+        if m:
+            out["hora"] = m.group(1); break
+
+    # 3) Tabla Radial/Central: buscar filas PAS/PAD/PAM/PP con dos primeros números.
+    rc_keys = {"PAS": ("pas_radial", "pas_central"), "PAD": ("pad_radial", "pad_central"),
+               "PAM": ("pam_radial", "pam_central"), "PP": ("pp_radial", "pp_central")}
+    for ln in lines:
+        txt = ln["text"]
+        for lab, (kr, kc) in rc_keys.items():
+            if re.match(rf"^\s*{lab}\b", txt, flags=re.I):
+                vals = _numeric_values_in_text(txt)
+                # En la tabla Radial/Central, la fila contiene dos valores: radial y central.
+                if len(vals) >= 2:
+                    # Evitar capturar la sección de parámetros centrales; allí la línea tiene unidad mmHg y +/-.
+                    if not re.search(r"\+/-|mmHg|%", txt, flags=re.I) or lab in ["PAS", "PP"] and len(vals) >= 2:
+                        # Si está en parámetros centrales, x suele estar más abajo y cerca del título. Se prioriza solo si no hay valor todavía.
+                        if kr not in out or kc not in out:
+                            out[kr] = vals[0]; out[kc] = vals[1]
+    # FC: línea de la tabla principal.
+    for ln in lines:
+        txt = ln["text"]
+        if re.match(r"^\s*FC\b", txt, flags=re.I):
+            vals = _numeric_values_in_text(txt)
+            if vals:
+                out["fc"] = vals[0]
+                break
+
+    # 4) Parámetros hemodinámicos centrales / aumentaciones. Buscar filas específicas.
+    central_map = {
+        "PAS": "pas_central", "PP": "pp_central", "Au": "au", "IAu": "iau",
+        "RVSE": "rvse", "PE": "pe", "APC": "apc"
+    }
+    for ln in lines:
+        txt = ln["text"]
+        for lab, key in central_map.items():
+            if re.match(rf"^\s*{lab}\b", txt, flags=re.I):
+                # Las filas centrales suelen traer unidad y/o +/-: 'Au mmHg +8 +/-1'
+                if lab in ["Au", "IAu", "RVSE", "PE", "APC"] or re.search(r"mmHg|%|\+/-", txt, flags=re.I):
+                    vals = _numeric_values_in_text(txt)
+                    if vals:
+                        # Para PAS/PP central, no pisar si la tabla radial/central ya extrajo lo correcto salvo que sea sección central con unidad.
+                        out[key] = vals[0]
+    return out
+
+
+
+
+def _patient_name_strict(candidate):
+    """Acepta solo nombres reales; rechaza frases administrativas como 'en posición'."""
+    c = _clean_patient_name(candidate)
+    if not c:
+        return ""
+    bad = r"\b(en\s+posici[oó]n|posici[oó]n|realizado|paciente|estudio|fecha|hora|diagn[oó]stico|medicaci[oó]n|n[úu]mero)\b"
+    if re.search(bad, c, re.I):
+        return ""
+    toks = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}", c)
+    if len(toks) < 2:
+        return ""
+    # Preferir nombres en mayúsculas del PDF. Si todo está minúscula, suele ser frase de sección.
+    upper_tokens = sum(1 for t in toks if t.upper() == t)
+    if upper_tokens < 2 and not any(t.istitle() for t in toks):
+        return ""
+    return " ".join(toks[:5]).upper()
+
+
+def _extract_patient_study_by_words(pdf_bytes):
+    """Extractor por palabras y coordenadas: toma texto a la derecha de Paciente/Estudio en la misma línea visual."""
+    out = {}
+    if fitz is None or not pdf_bytes:
+        return out
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page_order = list(range(len(doc)))
+        # priorizar segunda página, luego primera
+        if len(page_order) > 1:
+            page_order = [1, 0] + [i for i in page_order if i not in (0,1)]
+        for pi in page_order:
+            words = page_order and (doc[pi].get_text("words") or [])
+            # agrupar por y aproximada para sort visual incluso si block/line se parte mal
+            rows = []
+            for w in words:
+                if len(w) < 5: continue
+                x0,y0,x1,y1,txt = float(w[0]),float(w[1]),float(w[2]),float(w[3]),str(w[4])
+                placed=False
+                for row in rows:
+                    if abs(row[0]-y0) <= 4.0:
+                        row[1].append((x0,y0,x1,y1,txt)); placed=True; break
+                if not placed:
+                    rows.append([y0, [(x0,y0,x1,y1,txt)]])
+            for _, rowwords in rows:
+                rowwords=sorted(rowwords, key=lambda z:z[0])
+                texts=[w[4] for w in rowwords]
+                line=_collapse_spaces(" ".join(texts))
+                # Estudio #: primer número posterior a Estudio
+                if "estudio" in line.lower() and "estudio" not in out:
+                    m=re.search(r"\bEstudio\s*#?\s*([0-9A-Za-z][0-9A-Za-z_\-/]*)", line, re.I)
+                    if m:
+                        val=re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", m.group(1), flags=re.I)[0].strip(" :#-")
+                        if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                            out["estudio"] = val
+                # Paciente: tomar tokens a la derecha de la palabra Paciente hasta próxima etiqueta
+                for idx, w in enumerate(rowwords):
+                    if re.fullmatch(r"Paciente:?", w[4], re.I):
+                        right=[]
+                        for ww in rowwords[idx+1:]:
+                            tx=ww[4]
+                            if re.search(r"(?i)^(Estudio|N[uú]mero|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn|Medic|Realizado|Abdomen|Cuello|H\.?C\.?)", tx):
+                                break
+                            right.append(tx)
+                        cand=_patient_name_strict(" ".join(right))
+                        if cand:
+                            out["paciente"] = cand
+                            return out if out.get("estudio") else out
+        return out
+    except Exception:
+        return out
+
+
+
+
+def _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=4.5):
+    """Devuelve filas visuales por coordenadas PyMuPDF para evitar mezclas de pdfplumber."""
+    if fitz is None or not pdf_bytes:
+        return [], None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if len(doc) == 0:
+            return [], None
+        pi = page_index if len(doc) > page_index else 0
+        page = doc[pi]
+        W, H = float(page.rect.width), float(page.rect.height)
+        words = page.get_text("words") or []
+        rows = []
+        for w in words:
+            if len(w) < 5:
+                continue
+            x0, y0, x1, y1, txt = float(w[0]), float(w[1]), float(w[2]), float(w[3]), str(w[4])
+            if not txt.strip():
+                continue
+            placed = False
+            yc = (y0 + y1) / 2.0
+            for row in rows:
+                if abs(row[0] - yc) <= y_tol:
+                    row[1].append((x0, y0, x1, y1, txt)); placed = True; break
+            if not placed:
+                rows.append([yc, [(x0, y0, x1, y1, txt)]])
+        out = []
+        for yc, ws in rows:
+            ws = sorted(ws, key=lambda z: z[0])
+            text = _collapse_spaces(" ".join(w[4] for w in ws))
+            out.append({"y": yc, "words": ws, "text": text, "page": pi, "W": W, "H": H})
+        out.sort(key=lambda r: (r["y"], min(w[0] for w in r["words"])))
+        return out, (W, H, pi)
+    except Exception:
+        return [], None
+
+
+def _numbers_from_row_words(rowwords, x_min=None, x_max=None):
     vals = []
-    for n in encontrados:
-        v = limpiar_numero(n)
-        if v is not None:
-            vals.append(v)
+    for x0, y0, x1, y1, txt in rowwords:
+        if x_min is not None and x0 < x_min:
+            continue
+        if x_max is not None and x0 > x_max:
+            continue
+        if re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?", str(txt).strip()):
+            vals.append((x0, to_float(txt)))
     return vals
 
 
-def rango_plausible(clave: str, valor: Any) -> bool:
-    """Evita que el parser tome números de otra variable cercana."""
-    v = limpiar_numero(valor)
-    if v is None:
-        return False
-    rangos = {
-        "pas": (60, 260),
-        "pad": (30, 160),
-        "fc": (35, 180),
-        "ic": (0.8, 8.0),
-        "vm": (0.5, 25.0),
-        "irv": (700, 6000),
-        "ca": (0.2, 8.0),
-        "cft": (5, 80),
-        "cftnr": (1, 200),
-                "iv": (0, 200),
-        "iac": (0, 50),
-        "cts": (0.05, 100),
-        "ea": (0.1, 10),
-        "ees": (0.1, 20),
-        "ava": (0.1, 5),
-        "ds": (10, 250),
-        "ids": (5, 150),
-        "z0": (5, 80),
-    }
-    if clave not in rangos:
-        return True
-    bajo, alto = rangos[clave]
-    return bajo <= v <= alto
+def _extract_patient_top_right_by_coordinates(pdf_bytes):
+    """Lee Paciente/Estudio desde la cabecera visual, evitando 'Realizado con paciente en posición'."""
+    out = {}
+    rows, meta = _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=4.5)
+    if not rows or not meta:
+        return out
+    W, H, _ = meta
+    # priorizar cabecera superior derecha, pero permitir toda la parte superior.
+    for row in rows:
+        txt = row["text"]
+        if row["y"] > 0.33 * H:
+            continue
+        if re.search(r"(?i)\bRealizado\b|\bposici[oó]n\b", txt):
+            continue
+        # Estudio # 684
+        if "estudio" not in out:
+            m = re.search(r"\bEstudio\s*#?\s*([0-9A-Za-z][0-9A-Za-z_\-/]*)", txt, re.I)
+            if m:
+                val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", m.group(1), flags=re.I)[0].strip(" :#-")
+                if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                    out["estudio"] = val
+        # Paciente ABEL ALEJANDRO SANCHO: solo si la palabra Paciente inicia etiqueta y no frase interna.
+        for idx, ww in enumerate(row["words"]):
+            tx = ww[4].strip()
+            if re.fullmatch(r"Paciente:?", tx, flags=re.I):
+                # Rechazar si aparece precedido por 'con', 'del', etc.
+                if idx > 0 and re.search(r"(?i)^(con|del|el|la)$", row["words"][idx-1][4]):
+                    continue
+                right = []
+                for w2 in row["words"][idx+1:]:
+                    tx2 = w2[4].strip()
+                    if re.search(r"(?i)^(Estudio|N[uú]mero|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn|Medic|Realizado|Abdomen|Cuello|H\.?C\.?)", tx2):
+                        break
+                    right.append(tx2)
+                cand = _patient_name_strict(" ".join(right))
+                if cand:
+                    out["paciente"] = cand
+                    return out
+    return out
 
 
-def normalizar_txt(s: Any) -> str:
-    s = str(s).lower().strip()
-    reemplazos = {
-        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
-        "ä": "a", "ë": "e", "ï": "i", "ö": "o", "ü": "u",
-        "ñ": "n",
-    }
-    for a, b in reemplazos.items():
-        s = s.replace(a, b)
-    s = re.sub(r"\s+", " ", s)
-    return s
+def _extract_tables_by_coordinates(pdf_bytes):
+    """Extrae Radial/Central y parámetros centrales por coordenadas visuales.
 
-
-def es_linea_itc_no_ic(texto: Any) -> bool:
-    """Detecta ITC/índice de trabajo cardíaco para impedir que se lea como IC.
-
-    ITC = índice de trabajo cardíaco. No equivale a IC = índice cardíaco.
-    Esta función se usa como bloqueo antes de mapear columnas o extraer números.
+    Diseñado para el formato mostrado: segunda hoja, tabla Radial/Central y bloque
+    'Parámetros hemodinámicos centrales'. Evita que PAM y PP se intercambien y
+    recupera Au/IAu/RVSE/PE aunque el texto plano se parta por columnas.
     """
-    t = normalizar_txt(texto)
-    t = re.sub(r"[^a-z0-9/]+", " ", t).strip()
-    patrones_itc = [
-        r"\bitc\b",
-        r"indice\s+(?:de\s+)?trabajo\s+cardiaco",
-        r"trabajo\s+cardiaco",
-        r"cardiac\s+work\s+index",
-        r"\blcwi\b",
-        r"\blvwi\b",
-        r"left\s+cardiac\s+work\s+index",
+    out = {}
+    rows, meta = _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=5.5)
+    if not rows or not meta:
+        return out
+    W, H, _ = meta
+
+    # Buscar encabezados Radial / Central para ubicar columnas.
+    radial_x = central_x = header_y = None
+    for row in rows:
+        if re.search(r"\bRadial\b", row["text"], re.I) and re.search(r"\bCentral\b", row["text"], re.I):
+            for w in row["words"]:
+                if re.fullmatch(r"Radial", w[4], re.I): radial_x = (w[0]+w[2])/2
+                if re.fullmatch(r"Central", w[4], re.I): central_x = (w[0]+w[2])/2
+            header_y = row["y"]
+            break
+    if radial_x is not None and central_x is not None and header_y is not None:
+        label_map = {"PAS":("pas_radial","pas_central"), "PAD":("pad_radial","pad_central"), "PAM":("pam_radial","pam_central"), "PP":("pp_radial","pp_central")}
+        for row in rows:
+            if not (header_y < row["y"] < header_y + 0.28*H):
+                continue
+            words = row["words"]
+            first = words[0][4].strip() if words else ""
+            for lab, (kr, kc) in label_map.items():
+                if re.fullmatch(lab, first, re.I):
+                    nums = _numbers_from_row_words(words, x_min=words[0][2])
+                    if len(nums) >= 2:
+                        # Asignar por cercanía a los centros de las columnas Radial/Central.
+                        nr = min(nums, key=lambda z: abs(z[0]-radial_x))[1]
+                        nc = min(nums, key=lambda z: abs(z[0]-central_x))[1]
+                        out[kr] = nr; out[kc] = nc
+            if re.fullmatch(r"FC", first, re.I):
+                nums = _numbers_from_row_words(words, x_min=words[0][2])
+                if nums:
+                    out["fc"] = nums[0][1]
+
+    # Bloque de parámetros hemodinámicos centrales.
+    param_y = None
+    for row in rows:
+        if re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales", row["text"], re.I):
+            param_y = row["y"]; break
+    param_labels = {"PAS":"pas_central", "PP":"pp_central", "Au":"au", "IAu":"iau", "RVSE":"rvse", "PE":"pe", "APC":"apc"}
+    for row in rows:
+        if param_y is not None:
+            if not (param_y < row["y"] < param_y + 0.30*H):
+                continue
+        else:
+            if not (row["y"] > 0.55*H and min(w[0] for w in row["words"]) > 0.25*W):
+                continue
+        words = row["words"]
+        text = row["text"].replace("I Au", "IAu")
+        # Tomar etiqueta como primera palabra o cerca del inicio de la fila.
+        lab = None
+        for cand in ["IAu", "RVSE", "APC", "PAS", "PP", "Au", "PE"]:
+            if re.search(rf"(^|\s){cand}(\s|$)", text, re.I):
+                lab = cand; break
+        if not lab:
+            continue
+        # Buscar primer número situado después de la etiqueta y después de unidad; evita capturar tolerancias +/-.
+        label_x1 = None
+        for w in words:
+            if re.fullmatch(lab, w[4], re.I) or (lab == "IAu" and re.fullmatch(r"I?Au", w[4], re.I)):
+                label_x1 = w[2]; break
+        if label_x1 is None:
+            label_x1 = min(w[0] for w in words)
+        nums = _numbers_from_row_words(words, x_min=label_x1)
+        if nums:
+            # En filas con '+/-', el primer número tras etiqueta/unidad es el valor principal.
+            out[param_labels[lab]] = nums[0][1]
+
+    # APC del recuadro: 'APC:' '(1.08)' suele estar en el panel de curva superior izquierdo.
+    for row in rows:
+        if re.search(r"\bAPC\b", row["text"], re.I):
+            nums = _numbers_from_row_words(row["words"])
+            if nums:
+                # suele ser decimal 1.08; preferir valor entre 0.2 y 3.5
+                valid = [v for _, v in nums if 0.2 <= v <= 3.5]
+                if valid:
+                    out["apc"] = valid[0]
+                    break
+    return out
+
+def _extract_central_params_global(flat_text):
+    """Extrae Au/IAu/RVSE/PE/APC y corrige PAS/PP centrales con patrones globales robustos."""
+    out={}
+    txt=_collapse_spaces(flat_text).replace("I Au", "IAu").replace("R V S E", "RVSE").replace("P E", "PE")
+    # APC aparece en el recuadro superior: APC: (1.08)
+    m=re.search(r"\bAPC\b\s*:?\s*\(?\s*([-+]?\d+(?:[\.,]\d+)?)", txt, re.I)
+    if m: out["apc"] = to_float(m.group(1))
+    # Parámetros centrales: usar aparición con unidad y +/- para evitar tabla radial/central
+    patterns={
+        "pas_central": r"\bPAS\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "pp_central": r"\bPP\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "au": r"(?<!I)\bAu\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "iau": r"\bIAu\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "rvse": r"\bRVSE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+        "pe": r"\bPE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
+    }
+    for k,pat in patterns.items():
+        ms=list(re.finditer(pat, txt, re.I))
+        if ms:
+            # tomar la última suele corresponder a la tabla de parámetros, no a leyenda
+            out[k]=to_float(ms[-1].group(1))
+    return out
+
+
+def _repair_swapped_pam_pp(data):
+    """Repara intercambios PAM/PP y recalcula PP si no coincide con PAS-PAD.
+
+    En este formato del PDF, es frecuente que la lectura de columnas cargue PAM como PP
+    y PP como PAM. La prioridad clínica es: PP = PAS - PAD; PAM aproximada = (PAS+2*PAD)/3.
+    """
+    pas_r,pad_r,pam_r,pp_r = [to_float(data.get(k)) for k in ("pas_radial","pad_radial","pam_radial","pp_radial")]
+    pas_c,pad_c,pam_c,pp_c = [to_float(data.get(k)) for k in ("pas_central","pad_central","pam_central","pp_central")]
+
+    def close(a,b,tol):
+        return (not np.isnan(a)) and (not np.isnan(b)) and abs(a-b) <= tol
+
+    if not np.isnan(pas_r) and not np.isnan(pad_r) and pas_r > pad_r:
+        pp_exp = pas_r - pad_r
+        pam_exp = (pas_r + 2*pad_r) / 3.0
+        # Caso clásico: PAM=40 y PP=102 para PAS/PAD 127/87.
+        if close(pam_r, pp_exp, 8) and close(pp_r, pam_exp, 15):
+            data["pam_radial"], data["pp_radial"] = pp_r, pam_r
+            pam_r, pp_r = pp_r, pam_r
+        # Si PP no coincide con PAS-PAD, corregir PP; si PAM falta, completar aproximada.
+        if np.isnan(pp_r) or abs(pp_r - pp_exp) > 12 or pp_r < 10 or pp_r > 120:
+            data["pp_radial"] = pp_exp
+        if np.isnan(pam_r) or pam_r < 40 or pam_r > 200:
+            data["pam_radial"] = pam_exp
+
+    if not np.isnan(pas_c) and not np.isnan(pad_c) and pas_c > pad_c:
+        pp_exp = pas_c - pad_c
+        pam_exp = (pas_c + 2*pad_c) / 3.0
+        # Caso clásico: PAM=31 y PP=102/80 para PAS/PAD 119/88.
+        if close(pam_c, pp_exp, 8) and close(pp_c, pam_exp, 15):
+            data["pam_central"], data["pp_central"] = pp_c, pam_c
+            pam_c, pp_c = pp_c, pam_c
+        if np.isnan(pp_c) or abs(pp_c - pp_exp) > 12 or pp_c < 10 or pp_c > 120:
+            data["pp_central"] = pp_exp
+        if np.isnan(pam_c) or pam_c < 40 or pam_c > 200:
+            data["pam_central"] = pam_exp
+    return data
+
+def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
+    """Parser principal: texto plano + corrección visual por coordenadas del PDF."""
+    data = parse_model_pac(fallback_text or "")
+    try:
+        # 0) Extracción estricta por coordenadas de cabecera y tablas reales del PDF.
+        head0 = _extract_patient_top_right_by_coordinates(pdf_bytes)
+        for k, v in head0.items():
+            if k == "paciente":
+                cand = _patient_name_strict(v)
+                if cand:
+                    data[k] = cand
+            elif v not in [None, ""]:
+                data[k] = v
+
+        coord_vars = _extract_tables_by_coordinates(pdf_bytes)
+        for k, v in coord_vars.items():
+            fv = to_float(v)
+            if not np.isnan(fv):
+                data[k] = fv
+
+        # 1) Corregir paciente/estudio con palabras visuales; evita 'en posición' y 'H.C. #'.
+        head = _extract_patient_study_by_words(pdf_bytes)
+        for k, v in head.items():
+            if k == "paciente":
+                if _patient_name_strict(v):
+                    data[k] = _patient_name_strict(v)
+            elif v not in [None, ""]:
+                data[k] = v
+
+        # 2) Corrección visual amplia de variables numéricas.
+        layout = _extract_layout_fields_from_pdf(pdf_bytes)
+        for k, v in layout.items():
+            if k == "paciente":
+                cand = _patient_name_strict(v)
+                if cand:
+                    data[k] = cand
+            elif k in ["estudio", "fecha", "hora", "sexo"]:
+                if v not in [None, ""]:
+                    if k == "estudio":
+                        v = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", str(v), flags=re.I)[0].strip(" :#-")
+                    data[k] = v
+            else:
+                fv = to_float(v)
+                if not np.isnan(fv):
+                    data[k] = fv
+
+        # 3) Aumentaciones y parámetros centrales desde texto global, más robusto que líneas partidas.
+        flat = _collapse_spaces(fallback_text or "")
+        for k, v in _extract_central_params_global(flat).items():
+            if not np.isnan(to_float(v)):
+                data[k] = v
+
+        # 4) Reaplicar coordenadas al final: tienen prioridad sobre texto plano mezclado.
+        for k, v in coord_vars.items():
+            fv = to_float(v)
+            if not np.isnan(fv):
+                data[k] = fv
+        if head0.get("paciente") and _patient_name_strict(head0.get("paciente")):
+            data["paciente"] = _patient_name_strict(head0.get("paciente"))
+
+        # 5) Reparar PAM/PP intercambiadas y valores contaminados antes de validar.
+        data = _repair_swapped_pam_pp(data)
+        data = _validate_and_repair_pac_data(data)
+        data = _repair_swapped_pam_pp(data)
+        data = _validate_and_repair_pac_data(data)
+    except Exception:
+        data = _validate_and_repair_pac_data(data)
+    return data
+
+
+def _strip_trailing_labels(value):
+    """Corta valores que quedaron contaminados por la etiqueta siguiente."""
+    v = _collapse_spaces(value)
+    stop = r"\b(Estudio\s*#?|Número\s+de\s+estudio|Paciente|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagnóstico|Diagnostico|Medicación|Medicacion|Abdomen|Cuello|Realizado|Radial|Central|PAS|PAD|PAM|PP|FC|Parámetros)\b"
+    m = re.search(stop, v, flags=re.I)
+    if m:
+        if m.start() == 0:
+            return ""
+        v = v[:m.start()].strip()
+    return v.strip(" :;,-")
+
+
+def _value_after_label(flat_text, label_patterns, stop_patterns=None, max_chars=80):
+    """Extrae texto posterior a una etiqueta, incluso cuando PDFPlumber une columnas en la misma línea."""
+    if isinstance(label_patterns, str):
+        label_patterns = [label_patterns]
+    if stop_patterns is None:
+        stop_patterns = [
+            r"Estudio\s*#?", r"Número\s+de\s+estudio", r"Paciente", r"Fecha", r"Hora", r"Edad", r"Sexo",
+            r"Peso", r"Altura", r"IMC", r"SC", r"Diagnóstico", r"Diagnostico", r"Medicación", r"Medicacion",
+            r"Abdomen", r"Cuello", r"Realizado", r"Radial", r"Central", r"PAS", r"PAD", r"PAM", r"PP", r"FC"
+        ]
+    stop_re = "|".join(f"(?:{p})" for p in stop_patterns)
+    for lab in label_patterns:
+        pat = re.compile(rf"(?:^|\b){lab}\s*(?:[:#])?\s*(.*?)(?=\s+(?:{stop_re})\b|$)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            val = _strip_trailing_labels(m.group(1)[:max_chars])
+            if val and val not in ["---", "--", "-"]:
+                return val
+    return ""
+
+
+def _number_after_label(flat_text, label_patterns, default=np.nan):
+    val = _value_after_label(flat_text, label_patterns, max_chars=50)
+    m = re.search(r"[-+]?\d+(?:[\.,]\d+)?", val)
+    if m:
+        return to_float(m.group(0))
+    if isinstance(label_patterns, str):
+        label_patterns = [label_patterns]
+    for lab in label_patterns:
+        # Respaldo: primer número razonable inmediatamente luego de la etiqueta.
+        pat = re.compile(rf"(?:^|\b){lab}\s*(?:[:#])?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            return to_float(m.group(1))
+    return default
+
+
+def _normalize_sex(value):
+    v = _collapse_spaces(value).upper()
+    if re.search(r"\b(F|FEMENINO|MUJER)\b", v):
+        return "F"
+    if re.search(r"\b(M|MASCULINO|VARON|VARÓN|HOMBRE)\b", v):
+        return "M"
+    return ""
+
+
+def _clean_patient_name(value):
+    """Limpia y valida nombre de paciente evitando que entren etiquetas del PDF."""
+    v = _strip_trailing_labels(value)
+    v = re.sub(r"\s{2,}", " ", v).strip(" :;,-")
+    blacklist = r"\b(n[úu]mero\s+de\s+estudio|numero\s+de\s+estudio|estudio\s*#?|fecha|hora|edad|sexo|peso|altura|imc|sc|diagn[oó]stico|medicaci[oó]n|radial|central|pas|pad|pam|pp|fc|par[aá]metros|realizado|posici[oó]n|paciente\s+en\s+posici[oó]n|en\s+posici[oó]n)\b"
+    if re.search(blacklist, v or "", flags=re.I):
+        return ""
+    if re.fullmatch(r"(?i)(m|f)", v or ""):
+        return ""
+    if len(v) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", v):
+        return ""
+    # Evitar valores muy largos provenientes de una fila entera del PDF.
+    if len(v.split()) > 8:
+        return ""
+    return v
+
+
+def _extract_header_by_regex(flat_text):
+    """Rescate fuerte de cabecera cuando pdfplumber mezcla columnas.
+
+    Busca patrones reales del PDF tipo Exxer:
+    Estudio # 684 / Paciente ABEL ALEJANDRO SANCHO / Edad 54 / Sexo M.
+    """
+    out = {}
+    flat = _collapse_spaces(flat_text)
+
+    m = re.search(r"\bEstudio\s*#?\s*[:#]?\s*([0-9A-Za-z][0-9A-Za-z_\-/]{0,20})", flat, re.I)
+    if m:
+        val = _collapse_spaces(m.group(1)).strip(" :#-;")
+        if val and not re.fullmatch(r"(?i)(m|f|paciente|fecha|hora|edad|sexo)", val):
+            out["estudio"] = val
+
+    # Captura el nombre hasta la próxima etiqueta demográfica/administrativa.
+    # Se recorren TODAS las ocurrencias de "Paciente" porque algunos PDFs traen primero
+    # un encabezado contaminado como "Paciente Número de estudio:".
+    patient_patterns = [
+        r"\bPaciente\b\s*[:#]?\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ ,.'\-]{2,80}?)(?=\s+\b(?:Edad|Sexo|Peso|Altura|IMC|SC|Abdomen|Cuello|Diagn[oó]stico|Medicaci[oó]n|Realizado|Fecha|Hora|Estudio)\b|$)",
+        r"\bPaciente\b\s*[:#]?\s*([^\n\r]{3,90}?)(?=\s+\b(?:Edad|Sexo|Peso|Altura|IMC|SC|Abdomen|Cuello|Diagn[oó]stico|Medicaci[oó]n|Realizado|Fecha|Hora|Estudio)\b|$)",
     ]
-    return any(re.search(p, t, flags=re.IGNORECASE) for p in patrones_itc)
+    for pat in patient_patterns:
+        for m in re.finditer(pat, flat, re.I):
+            cand_raw = m.group(1)
+            cand_raw = re.split(r"\b(?:N[úu]mero\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand_raw, flags=re.I)[0]
+            cand = _clean_patient_name(cand_raw)
+            if cand and not _is_bad_patient_value(cand):
+                out["paciente"] = cand
+                break
+        if out.get("paciente"):
+            break
+
+    # Demografía y antropometría por patrones tolerantes.
+    for key, label in [("edad", "Edad"), ("peso", "Peso"), ("altura", "Altura"), ("imc", "IMC"), ("sc", "SC")]:
+        m = re.search(rf"\b{label}\b\s*[:#]?\s*([-+]?\d+(?:[\.,]\d+)?)", flat, re.I)
+        if m:
+            out[key] = to_float(m.group(1))
+    m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", flat, re.I)
+    if m:
+        out["sexo"] = m.group(1).upper()
+
+    m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", flat, re.I)
+    if m:
+        out["fecha"] = m.group(1)
+    m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", flat, re.I)
+    if m:
+        out["hora"] = m.group(1)
+    return out
+
+def _parse_radial_central_table(flat_text, data):
+    """Extrae tabla Radial/Central por filas PAS/PAD/PAM/PP/FC. Evita intercambiar PAM con PP."""
+    # Patrón más seguro: cada fila con su etiqueta y dos valores.
+    def pair(label):
+        pat = re.compile(rf"\b{label}\b\s*(?:mmHg|lpm|%)?\s*([-+]?\d+(?:[\.,]\d+)?)\s*(?:\+/-\s*\d+(?:[\.,]\d+)?\s*)?([-+]?\d+(?:[\.,]\d+)?)", re.I)
+        m = pat.search(flat_text)
+        if m:
+            return to_float(m.group(1)), to_float(m.group(2))
+        return np.nan, np.nan
+
+    # Recorte preferencial entre Radial/Central y parámetros centrales.
+    mblock = re.search(r"Radial\s+Central(.*?)(?:Parámetros\s+hemodinámicos\s+centrales|PAS\s+mmHg|Conclusiones|$)", flat_text, re.I)
+    block = mblock.group(1) if mblock else flat_text
+
+    pas_r, pas_c = pair("PAS") if not mblock else pair_from_block(block, "PAS")
+    pad_r, pad_c = pair("PAD") if not mblock else pair_from_block(block, "PAD")
+    pam_r, pam_c = pair("PAM") if not mblock else pair_from_block(block, "PAM")
+    pp_r, pp_c = pair("PP") if not mblock else pair_from_block(block, "PP")
+
+    for k, v in {
+        "pas_radial": pas_r, "pas_central": pas_c,
+        "pad_radial": pad_r, "pad_central": pad_c,
+        "pam_radial": pam_r, "pam_central": pam_c,
+        "pp_radial": pp_r, "pp_central": pp_c,
+    }.items():
+        if not np.isnan(v):
+            data[k] = v
+
+    # FC suele ser una sola fila, no radial/central.
+    mfc = re.search(r"\bFC\b\s*([-+]?\d+(?:[\.,]\d+)?)", block, re.I)
+    if mfc:
+        data["fc"] = to_float(mfc.group(1))
 
 
-def contiene_sinonimo_seguro(nombre_col: str, sinonimo: str) -> bool:
-    """Coincidencia segura de sinónimos.
+def pair_from_block(block, label):
+    pat = re.compile(rf"\b{label}\b\s*([-+]?\d+(?:[\.,]\d+)?)\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+    m = pat.search(block)
+    if m:
+        return to_float(m.group(1)), to_float(m.group(2))
+    return np.nan, np.nan
 
-    Evita que abreviaturas cortas como IC, CA, EA, IV se detecten dentro de palabras
-    más largas. Ejemplo: 'cardíaco' contiene 'ic' si se hace búsqueda simple.
+
+def _parse_central_parameters(flat_text, data):
+    """Extrae parámetros centrales con tolerancia a tablas partidas del PDF.
+
+    Incluye PAS, PP, Au, IAu, RVSE, PE y APC si está disponible.
+    La prioridad es la sección 'Parámetros hemodinámicos centrales'.
     """
-    n = re.sub(r"[^a-z0-9/]+", " ", normalizar_txt(nombre_col)).strip()
-    ss = re.sub(r"[^a-z0-9/]+", " ", normalizar_txt(sinonimo)).strip()
-    if not ss:
-        return False
-    if len(ss) <= 3 or "/" in ss:
-        return bool(re.search(rf"(?<![a-z0-9]){re.escape(ss)}(?![a-z0-9])", n))
-    return n == ss or bool(re.search(rf"(?<![a-z0-9]){re.escape(ss)}(?![a-z0-9])", n)) or ss in n
+    msec = re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales(.*?)(?:Conclusiones|Conclusi[oó]n|PAS\s+Presi[oó]n|Pulso|$)", flat_text, re.I)
+    sec = msec.group(1) if msec else flat_text
+    sec = _collapse_spaces(sec)
+
+    def val(label, aliases=()):
+        labels = [label] + list(aliases)
+        for lab in labels:
+            # Label seguido opcionalmente de unidad y valor con signo. Evita que Au capture IAu usando lookbehind negativo.
+            if lab.lower() == "au":
+                pat = re.compile(r"(?<!I)\bAu\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+            else:
+                pat = re.compile(rf"\b{lab}\b\s*(?:mmHg|%|lpm|m/s)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
+            mm = pat.search(sec)
+            if mm:
+                return to_float(mm.group(1))
+        return np.nan
+
+    mapping = {
+        "pas_central": val("PAS"),
+        "pp_central": val("PP"),
+        "au": val("Au", aliases=[r"Aumentaci[oó]n\s+A[oó]rtica\s+Central"]),
+        "iau": val("IAu", aliases=[r"Indice\s+de\s+Aumentaci[oó]n\s+Central", r"Índice\s+de\s+Aumentaci[oó]n\s+Central"]),
+        "rvse": val("RVSE", aliases=[r"Relaci[oó]n\s+de\s+Viabilidad\s+Sub\s*Endoc[aá]rdica"]),
+        "pe": val("PE", aliases=[r"Periodo\s+Eyectivo", r"Per[ií]odo\s+Eyectivo"]),
+        "apc": val("APC", aliases=[r"Amplificaci[oó]n\s+Perif[eé]rico\s*Central"]),
+    }
+
+    # Respaldo por patrón posicional de la tabla central en la captura:
+    # PAS mmHg 119 +/-1  PP mmHg 31 +/-2  Au mmHg +8 +/-1  IAu % +25 +/-3  RVSE % 180 +/-3  PE % 32.8
+    positional = re.findall(r"\b(PAS|PP|Au|IAu|RVSE|PE|APC)\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", sec, flags=re.I)
+    for lab, num in positional:
+        key = {"pas":"pas_central", "pp":"pp_central", "au":"au", "iau":"iau", "rvse":"rvse", "pe":"pe", "apc":"apc"}.get(lab.lower())
+        if key and np.isnan(to_float(mapping.get(key, np.nan))):
+            mapping[key] = to_float(num)
+
+    for k, v in mapping.items():
+        if not np.isnan(v):
+            data[k] = v
 
 
-# =========================================================
-# MAPEO CLÍNICO DE VARIABLES CGI / Z-LOGIC
-# =========================================================
-
-VARIABLES_CGI: Dict[str, List[str]] = {
-    "paciente": ["paciente", "nombre", "apellido", "patient", "apellido y nombre", "nombre y apellido"],
-    "dni": ["dni", "documento", "doc", "identificacion", "id"],
-    "obra_social": ["obra social", "obra_social", "cobertura", "prepaga", "mutual", "seguro medico", "seguro médico", "financiador"],
-    "edad": ["edad", "age", "anos", "años", "año", "years", "yrs"],
-    "fecha_nacimiento": ["fecha de nacimiento", "fecha nacimiento", "f nacimiento", "f. nacimiento", "fec nacimiento", "fecha nac", "fec nac", "nacimiento", "born", "birth date", "date of birth", "dob"],
-    "fecha_estudio": ["fecha estudio", "fecha del estudio", "fecha de estudio", "study date", "fecha informe", "fecha del informe", "fecha examen", "fecha del examen", "fecha medicion", "fecha medición", "date"],
-    # Se mantiene "fecha" como respaldo genérico; nunca debe pisar fecha de nacimiento.
-    "fecha": ["fecha"],
-
-    "pas_pad": ["presion arterial s/d", "presion arterial", "arterial s/d"],
-    "fc": ["frecuencia cardiaca", "frecuencia cardiaca media", "heart rate", " fc"],
-
-    "ic": ["indice cardiaco", "cardiac index", " ic ", "ic l/min"],
-    "irv": ["indice resistencia vascular", "resistencia vascular sistemica", "resistencia vascular", "irv", "rvs", "svr"],
-    "ca": ["complacencia arterial", "compliance arterial", "ca ml", " ca "],
-    "cftnr": ["cftnr", "cft nr", "cft n.r", "cft n r", "cft normalizado", "cft index", "cft indice", "cft índice", "tfc index", "tfc indice", "tfc índice", "tfi", "contenido de fluidos toracicos normalizado", "contenido de fluidos torácicos normalizado", "contenido fluidos toracicos normalizado", "contenido fluidos torácicos normalizado", "thoracic fluid content index", "thoracic fluid index"],
-    "cft": ["contenido de fluidos toracicos", "contenido de fluidos torácicos", "thoracic fluid", "cft", "tfc"],
-
-    "iv": ["indice de velocidad", "velocity index", " iv "],
-    "iac": ["indice de aceleracion", "índice de aceleración", "indice aceleracion", "índice aceleración", "aceleracion de contractilidad", "aceleración de contractilidad", "iac", "aci", "acceleration index", "acceleration contractility index", "acceleration", "aceleracion", "aceleración"],
-    "ih": ["indice de heather", "índice de heather", "heather", "ih", "hi"],
-    "cts": ["cts", "coeficiente tiempos sistolicos", "coeficiente de tiempos sistolicos", "coeficiente de tiempos sistólicos", "relacion tiempos sistolicos", "relación tiempos sistólicos", "relacion de tiempos sistolicos", "relación de tiempos sistólicos", "relacion sistolica", "relación sistólica", "pep/lvet", "pep / lvet", "pep / lvet ratio", "pep/tevi", "pep / tevi", "cts", "str", "systolic time ratio", "systolic ratio", "tiempos sistolicos"],
-
-    "ea": ["elastancia arterial", " ea "],
-    "ees": ["elastancia de fin de sistole", "elastancia ventricular", "ees"],
-    "ava": ["acoplamiento ventriculo arterial", "acoplamiento ventriculo-arterial", "ea/ees", "ava"],
-
-    "ds": ["descarga sistolica", "stroke volume"],
-    "ids": ["indice de descarga sistolica", "stroke index"],
-    "z0": ["z0", "impedancia basal"],
-}
-
-
-def es_etiqueta(linea: str) -> bool:
-    n = normalizar_txt(linea)
-    for sinonimos in VARIABLES_CGI.values():
-        for s in sinonimos:
-            if normalizar_txt(s) in n:
-                return True
+def _is_bad_patient_value(v):
+    """Detecta valores que son etiquetas administrativas y no nombres de paciente."""
+    s = _collapse_spaces(v)
+    if not s:
+        return True
+    if re.search(r"(?i)\b(Número\s+de\s+estudio|Numero\s+de\s+estudio|Estudio\s*#?|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n|Radial|Central|Realizado|posici[oó]n|en\s+posici[oó]n)\b", s):
+        return True
+    if len(s) < 3 or re.fullmatch(r"[\d\s:;#\-/.]+", s):
+        return True
     return False
 
 
-def clave_por_linea(linea: str) -> Optional[str]:
-    n = f" {normalizar_txt(linea)} "
-    coincidencias = []
-    for clave, sinonimos in VARIABLES_CGI.items():
-        for s in sinonimos:
-            ss = f" {normalizar_txt(s)} "
-            if ss in n or normalizar_txt(s) in n:
-                coincidencias.append((clave, len(ss)))
-    if not coincidencias:
-        return None
-    coincidencias.sort(key=lambda x: x[1], reverse=True)
-    return coincidencias[0][0]
+def _parse_header_fields_from_lines(lines):
+    """Extrae cabecera paciente/estudio/demografía por líneas, más confiable que texto plano.
 
-
-# =========================================================
-# LECTURA DE PDF
-# =========================================================
-
-def extraer_lineas_pdf(uploaded_file) -> List[Dict[str, Any]]:
-    nombre_archivo = getattr(uploaded_file, "name", "")
-    pdf_bytes = uploaded_file.read()
-    registros: List[Dict[str, Any]] = []
-
-    # 1) pdfplumber: suele leer mejor PDFs técnicos
-    try:
-        import pdfplumber
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for p, page in enumerate(pdf.pages, start=1):
-                texto = page.extract_text() or ""
-                for linea in texto.splitlines():
-                    linea = linea.strip()
-                    if linea:
-                        registros.append({"pagina_pdf": p, "texto_extraido": linea, "archivo_origen": nombre_archivo})
-    except Exception:
-        pass
-
-    # 2) pypdf: respaldo
-    if not registros:
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            for p, page in enumerate(reader.pages, start=1):
-                texto = page.extract_text() or ""
-                for linea in texto.splitlines():
-                    linea = linea.strip()
-                    if linea:
-                        registros.append({"pagina_pdf": p, "texto_extraido": linea, "archivo_origen": nombre_archivo})
-        except Exception:
-            pass
-
-    return registros
-
-
-
-def limpiar_valor_cts(valor: Any) -> Optional[float]:
-    """Z-Logic puede informar CTS como 0,34 o como 34 %. Se normaliza a relación."""
-    v = limpiar_numero(valor)
-    if v is None:
-        return None
-    if v > 2:
-        return v / 100.0
-    return v
-
-
-def extraer_texto_despues_etiqueta(linea: str, clave: str) -> Optional[str]:
-    """Extrae texto demográfico situado después de ':' '-' o del rótulo."""
-    original = str(linea).strip()
-    if ":" in original:
-        parte = original.split(":", 1)[1].strip()
-        return parte or None
-    # Remueve sinónimos conocidos cuando no hay dos puntos.
-    t = original
-    for s in VARIABLES_CGI.get(clave, []):
-        t = re.sub(re.escape(s), "", t, flags=re.IGNORECASE).strip(" -–—:\t")
-    return t.strip() or None
-
-
-def extraer_fecha_texto(texto: str) -> Optional[str]:
-    s = str(texto)
-    m = re.search(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b", s)
-    if m:
-        return m.group(1)
-    return None
-
-
-def parsear_fecha(valor: Any) -> Optional[datetime]:
-    """Convierte fechas DD/MM/AAAA, D/M/AA o AAAA-MM-DD a datetime. No confunde nacimiento con estudio."""
-    if not es_valor_util(valor):
-        return None
-    s = str(valor).strip()
-    for fmt_fecha in ["%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%Y/%m/%d", "%Y-%m-%d"]:
-        try:
-            return datetime.strptime(s, fmt_fecha)
-        except Exception:
-            pass
-    return None
-
-
-def formatear_fecha_ddmmyyyy(valor: Any) -> Optional[str]:
-    f = parsear_fecha(valor)
-    if f is None:
-        return str(valor).strip() if es_valor_util(valor) else None
-    return f.strftime("%d/%m/%Y")
-
-
-def calcular_edad_desde_fechas(fecha_nacimiento: Any, fecha_estudio: Any) -> Optional[int]:
-    fn = parsear_fecha(fecha_nacimiento)
-    fe = parsear_fecha(fecha_estudio)
-    if fn is None or fe is None or fe < fn:
-        return None
-    edad = fe.year - fn.year - ((fe.month, fe.day) < (fn.month, fn.day))
-    return edad if 0 <= edad <= 120 else None
-
-
-def sanitizar_dni(valor: Any) -> str:
-    """Si el DNI/documento no está o no es un número plausible, devuelve SD."""
-    if not es_valor_util(valor):
-        return "SD"
-    s = re.sub(r"\D", "", str(valor))
-    if 6 <= len(s) <= 11:
-        return s
-    return "SD"
-
-
-def paciente_valido(valor: Any) -> bool:
-    """Valida que el campo Paciente no haya tomado por error HC, DNI, fecha u otros rótulos."""
-    if not es_valor_util(valor):
-        return False
-    s = str(valor).strip()
-    n = normalizar_txt(s)
-    if re.search(r"\b(hc|h\.?c\.?|historia\s*clinica|historia|dni|documento|fecha|edad|obra\s*social|metodo|cinta|spot)\b", n):
-        return False
-    if re.search(r"^ecg$|^ekg$|electrocardiograma|mm\s*/?\s*seg|ohm|calibraci[oó]n|z[- ]?logic|cardiograf|impedancia", n):
-        return False
-    if re.fullmatch(r"[#\-–—_.\s0-9]+", s):
-        return False
-    letras = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", s)
-    return len(letras) >= 3
-
-
-def normalizar_nombre_paciente(valor: Any) -> Optional[str]:
-    """Limpia el apellido y nombre para la cabecera del PDF y evita mostrar HC."""
-    if not paciente_valido(valor):
-        return None
-    s = str(valor).strip()
-    s = re.split(r"\b(?:hc|h\.?c\.?|historia\s*clinica|dni|documento|edad|fecha|obra\s*social)\b", s, flags=re.IGNORECASE)[0]
-    s = re.sub(r"\s+", " ", s).strip(" -–—:_#")
-    return s if paciente_valido(s) else None
-
-def es_paciente_pdf_invalido(valor: Any) -> bool:
-    """Bloquea falsos pacientes tomados de rótulos técnicos del ECG/CGI."""
-    if not es_valor_util(valor):
-        return True
-    n = normalizar_txt(valor)
-    patrones = [
-        r"^ecg$", r"^ekg$", r"electrocardiograma", r"^cgi$", r"z[- ]?logic",
-        r"mm\s*/?\s*seg", r"ohm", r"calibraci[oó]n", r"velocidad", r"ganancia",
-        r"historia\s*clinica", r"\bhc\b", r"obra\s*social", r"documento", r"\bdni\b",
-        r"fecha", r"edad", r"sexo", r"presi[oó]n", r"frecuencia", r"paciente$"
-    ]
-    return any(re.search(pat, n, flags=re.IGNORECASE) for pat in patrones)
-
-
-def obra_social_valida(valor: Any) -> bool:
-    """Valida cobertura médica real.
-
-    Bloquea diagnósticos, motivos de estudio, rótulos técnicos y textos clínicos.
-    La obra social solo debe venir de un campo explícito o de ingreso manual.
+    En los PDF tipo Exxer, pdfplumber puede mezclar columnas y hacer que "Paciente"
+    tome "Número de estudio" como valor. Este extractor prioriza la estructura visual
+    por líneas: Estudio # 684 / Paciente APELLIDO NOMBRE / Edad 54 / Sexo M, etc.
     """
-    if not es_valor_util(valor):
-        return False
-    s = str(valor).strip()
-    n = normalizar_txt(s)
+    out = {}
+    clean_lines = [_collapse_spaces(x) for x in lines if _collapse_spaces(x)]
 
-    # Nunca aceptar diagnóstico/motivo como obra social.
-    patrones_invalidos = [
-        r"diagn[oó]stico", r"diagnostico", r"motivo", r"hta\b", r"hipertensi[oó]n",
-        r"enfermedad", r"s[ií]ndrome", r"control", r"consulta", r"estudio",
-        r"mm\s*/?\s*seg", r"ohm", r"calibraci[oó]n", r"ecg", r"ekg",
-        r"z[- ]?logic", r"cardiograf", r"impedancia", r"paciente", r"apellido",
-        r"nombre", r"dni", r"documento", r"fecha", r"edad", r"sexo",
-        r"presi[oó]n", r"frecuencia", r"cinta", r"spot", r"m[eé]todo",
-        r"embaraz", r"gestaci", r"preeclamps", r"hdp", r"aga", r"sga", r"fetal",
-    ]
-    if any(re.search(pat, n, flags=re.IGNORECASE) for pat in patrones_invalidos):
-        return False
+    def take_num(label, key, pattern_suffix=r""):
+        for ln in clean_lines:
+            m = re.search(rf"\b{label}\b\s*[:#]?\s*([-+]?\d+(?:[\.,]\d+)?)\s*{pattern_suffix}", ln, re.I)
+            if m:
+                out[key] = to_float(m.group(1)); return
 
-    # Evitar frases largas clínicas: una cobertura suele ser corta.
-    if len(s) > 60 or len(s.split()) > 6:
-        return False
-
-    letras = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", s)
-    return len(letras) >= 3
-
-
-def normalizar_obra_social(valor: Any) -> Optional[str]:
-    if not obra_social_valida(valor):
-        return None
-    s = re.sub(r"\s+", " ", str(valor).strip())
-    s = re.split(
-        r"\b(?:paciente|apellido|nombre|dni|documento|edad|fecha|sexo|hc|h\.?c\.?|diagn[oó]stico|diagnostico|motivo|hta|m[eé]todo)\b",
-        s, flags=re.IGNORECASE
-    )[0].strip(" -–—:_#")
-    return s[:60] if obra_social_valida(s) else None
-
-
-def extraer_fecha_por_etiqueta(texto: str, etiqueta: str) -> Optional[str]:
-    """Extrae fecha asociada a etiqueta específica sin invadir otros campos de la misma línea."""
-    t = str(texto)
-    if etiqueta == "nacimiento":
-        pat = r"(?:fecha\s+de\s+nac(?:imiento)?|fecha\s+nacimiento|f\.?\s*nac\.?|fec\.?\s*nac\.?|dob|birth\s*date)\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"
-    else:
-        pat = r"(?:fecha\s+(?:del?\s*)?(?:estudio|examen|medici[oó]n|informe)|study\s*date|fecha(?!\s*(?:de\s*)?nac))\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})"
-    m = re.search(pat, t, flags=re.IGNORECASE)
-    return m.group(1) if m else None
-
-
-def extraer_demografico(clave: str, linea: str, siguientes: List[str]) -> Optional[Any]:
-    """Extrae datos demográficos sin mezclar fecha de estudio, fecha de nacimiento ni edad.
-    Regla: la fecha de nacimiento solo se toma si la etiqueta dice nacimiento/nac/DOB;
-    la fecha de estudio se toma desde 'Fecha' o 'Fecha de estudio' siempre que no esté asociada a nacimiento.
-    """
-    linea_s = str(linea)
-    bloque = " ".join([linea_s] + [str(x) for x in siguientes[:3]])
-    bloque_norm = normalizar_txt(bloque)
-
-    if clave in ["fecha_nacimiento"]:
-        return formatear_fecha_ddmmyyyy(extraer_fecha_por_etiqueta(bloque, "nacimiento"))
-
-    if clave in ["fecha_estudio", "fecha"]:
-        # Nunca tomar una fecha de nacimiento como fecha de estudio.
-        if re.search(r"(fecha\s*(de\s*)?nac|fec\.?\s*nac|nacimiento|dob|birth)", bloque_norm):
-            fecha_est = extraer_fecha_por_etiqueta(bloque, "estudio")
-            return formatear_fecha_ddmmyyyy(fecha_est) if fecha_est else None
-        fecha_est = extraer_fecha_por_etiqueta(bloque, "estudio") or extraer_fecha_texto(linea_s)
-        return formatear_fecha_ddmmyyyy(fecha_est) if fecha_est else None
-
-    if clave == "edad":
-        # Preferir el número inmediatamente posterior a la etiqueta Edad. Evita tomar fechas, talla, peso o BMI.
-        m = re.search(r"(?:edad|age)\s*[:=\-]?\s*(\d{1,3})(?![/-])", linea_s, flags=re.IGNORECASE)
-        if not m:
-            m = re.search(r"(?:edad|age)\s*[:=\-]?\s*(\d{1,3})(?![/-])", bloque, flags=re.IGNORECASE)
+    # Estudio: solo aceptar número/código inmediato luego de Estudio #, no letras sueltas como M.
+    for ln in clean_lines:
+        m = re.search(r"\bEstudio\s*#?\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_\-/]{0,30})", ln, re.I)
         if m:
-            e = int(m.group(1))
-            return e if 0 < e < 120 else None
-        return None
-
-    if clave == "dni":
-        m = re.search(r"(?:dni|documento|doc\.?|identificaci[oó]n|id)\s*[:=\-]?\s*([0-9.]{6,14})", bloque, flags=re.IGNORECASE)
-        if m:
-            return sanitizar_dni(m.group(1))
-        return None
-
-    if clave == "obra_social":
-        # Solo extraer si la línea contiene explícitamente el rótulo Obra Social/Cobertura/Prepaga/Mutual.
-        # No usar diagnósticos, motivos ni líneas siguientes salvo que la línea actual sea el rótulo limpio.
-        linea_norm = normalizar_txt(linea_s)
-        if not re.search(r"\b(obra\s+social|cobertura|prepaga|mutual|seguro\s+m[eé]dico|financiador)\b", linea_norm):
-            return None
-        val = normalizar_obra_social(extraer_texto_despues_etiqueta(linea, clave))
-        if val:
-            return val
-        # Si la línea dice solo 'Obra social', tomar como máximo la línea siguiente si es cobertura válida.
-        if re.fullmatch(r"\s*(obra\s+social|cobertura|prepaga|mutual|seguro\s+m[eé]dico|financiador)\s*[:=\-–—]?\s*", linea_norm):
-            for cand in siguientes[:1]:
-                cand = normalizar_obra_social(str(cand).strip())
-                if cand and not es_etiqueta(cand):
-                    return cand
-        return None
-
-    if clave == "paciente":
-        val = extraer_texto_despues_etiqueta(linea, clave)
-        val = normalizar_nombre_paciente(val)
-        if val and not es_etiqueta(val):
-            return val
-        for cand in siguientes[:5]:
-            cand = normalizar_nombre_paciente(str(cand).strip())
-            if cand and not es_etiqueta(cand) and not numeros_en_texto(cand):
-                return cand
-    return None
-
-
-def extraer_contexto_clinico_pdf(lineas: List[str]) -> Dict[str, Any]:
-    """Extrae texto clínico libre del PDF Z-Logic: Diagnóstico, medicación y texto completo.
-    Esto es clave para detectar frases como 'HTA Y EMB S30', que no son métricas numéricas.
-    """
-    diagnostico = None
-    medicacion = None
-    posicion = None
-
-    def limpiar_campo(v: str) -> str:
-        v = re.sub(r"^[\s:;\-–—]+", "", str(v or "")).strip()
-        v = re.sub(r"\s+", " ", v)
-        return v
-
-    for i, lin in enumerate(lineas):
-        raw = str(lin).strip()
-        n = normalizar_txt(raw)
-
-        if diagnostico is None and re.search(r"\bdiagnost(?:ico|ico:|ico\b|ico\s)", n):
-            # Puede venir como: 'Diagnóstico  HTA Y EMB S30' o 'Diagnóstico:' y el valor en la línea siguiente.
-            val = re.sub(r"(?i).*diagn[oó]stico\s*[:\-–—]?", "", raw).strip()
-            if not val or normalizar_txt(val) in ["diagnostico", "diagnóstico"]:
-                val = " ".join(str(x).strip() for x in lineas[i+1:i+4] if str(x).strip())
-            val = limpiar_campo(val)
-            if val:
-                diagnostico = val[:250]
-
-        if medicacion is None and re.search(r"\b(medicacion|medicaci[oó]n|tratamiento|medicacion actual)\b", n):
-            val = re.sub(r"(?i).*(medicaci[oó]n|medicacion|tratamiento)\s*[:\-–—]?", "", raw).strip()
-            if not val or normalizar_txt(val) in ["medicacion", "medicación", "tratamiento"]:
-                val = " ".join(str(x).strip() for x in lineas[i+1:i+4] if str(x).strip())
-            val = limpiar_campo(val)
-            if val:
-                medicacion = val[:250]
-
-        if posicion is None and re.search(r"\b(posicion|posición|situacion|situación|postura|decubito|decúbito|acostad|supin|bipedest|de pie|parad|standing|supine)\b", n):
-            val = re.sub(r"(?i).*(posici[oó]n|situaci[oó]n|postura|estudio)\s*[:\-–—]?", "", raw).strip()
-            if not val or len(val) < 3:
-                val = " ".join(str(x).strip() for x in lineas[i+1:i+3] if str(x).strip())
-            val = limpiar_campo(val)
-            if val:
-                posicion = val[:120]
-
-    texto_completo = " | ".join(str(x).strip() for x in lineas if str(x).strip())
-    return {
-        "Diagnóstico": diagnostico,
-        "Medicación": medicacion,
-        "Posición": posicion,
-        "Texto_PDF": texto_completo[:12000],
-    }
-
-
-
-# =========================================================
-# PARSER ROBUSTO PARA PDFs CON TABLAS, ABREVIATURAS Y SALTOS DE LINEA
-# =========================================================
-
-CLAVES_NUMERICAS = [
-    "pas_pad", "fc", "vm", "ic", "irv", "ca", "cftnr", "cft", "ih", "iv", "iac", "cts",
-    "ea", "ees", "ava", "ds", "ids", "z0"
-]
-
-# Patrones más tolerantes para etiquetas exportadas por Z-Logic/CGI.
-PATRONES_CLAVE = {
-    "cftnr": r"(?:\bcft\s*(?:n\.?r\.?|nr|normalizad[oa]|index|indice|índice)\b|\btfc\s*(?:index|indice|índice)\b|\btfi\b|contenido\s+(?:de\s+)?fluidos?\s+tor[aá]cicos?\s+normalizad[oa]|thoracic\s+fluid\s+(?:content\s+)?index)",
-    "cft": r"(?:\bcft\b|\btfc\b|contenido\s+(?:de\s+)?fluidos?\s+tor[aá]cicos?|thoracic\s+fluid(?:\s+content)?)",
-    "iac": r"(?:\biac\b|\baci\b|[ií]ndice\s+(?:de\s+)?aceleraci[oó]n|aceleraci[oó]n\s+(?:de\s+)?contractilidad|acceleration\s+(?:contractility\s+)?index)",
-    "cts": r"(?:\bcts\b|\bstr\b|pep\s*/\s*lvet|pep\s*/\s*tevi|relaci[oó]n\s+(?:de\s+)?tiempos?\s+sist[oó]licos?|systolic\s+time\s+ratio)",
-    "fc": r"(?:frecuencia\s+card[ií]aca|frecuencia\s+cardiaca|heart\s+rate|\bhr\b|\bfc\b)",
-    "vm": r"(?:\bvm\b|volumen\s+minuto|cardiac\s+output|\bco\b)",
-    # IC estricto: NO incluir ITC/índice de trabajo cardíaco.
-    "ic": r"(?:[ií]ndice\s+card[ií]aco|indice\s+cardiaco|cardiac\s+index|\bci\b|\bic\b)(?!.*dz\s*/\s*dt)",
-    "irv": r"(?:[ií]ndice\s+(?:de\s+)?resistencia\s+vascular|resistencia\s+vascular\s+sist[eé]mica|\brvs\b|\birv\b|\bsvr\b)",
-    "ca": r"(?:complacencia\s+arterial|arterial\s+compliance|\bca\b)",
-    "ih": r"(?:[ií]ndice\s+de\s+heather|heather|\bih\b)",
-    "iv": r"(?:[ií]ndice\s+de\s+velocidad|velocity\s+index|\bvi\b|\biv\b)",
-    "ea": r"(?:elastancia\s+arterial|arterial\s+elastance|\bea\b)",
-    "ees": r"(?:elastancia\s+(?:de\s+)?fin\s+de\s+s[ií]stole|elastancia\s+ventricular|end\s+systolic\s+elastance|\bees\b)",
-    "ava": r"(?:acoplamiento\s+ventr[ií]culo\s*[- ]?arterial|ea\s*/\s*ees|\bava\b)",
-    "ds": r"(?:descarga\s+sist[oó]lica|stroke\s+volume|\bsv\b|\bds\b)",
-    "ids": r"(?:[ií]ndice\s+(?:de\s+)?descarga\s+sist[oó]lica|stroke\s+index|\bsi\b|\bids\b)",
-    "z0": r"(?:impedancia\s+basal|\bz0\b)",
-    "pas_pad": r"(?:presi[oó]n\s+arterial(?:\s+s\s*/\s*d)?|arterial\s+s\s*/\s*d|blood\s+pressure)",
-}
-
-
-def claves_en_linea_robusto(linea: str) -> List[str]:
-    txt = str(linea)
-    bloquea_ic_por_itc = es_linea_itc_no_ic(txt)
-    halladas = []
-    # Orden intencional: CFTnr antes que CFT para no confundir ambos.
-    orden = ["cftnr", "cft", "ih", "iac", "cts", "pas_pad", "fc", "vm", "ic", "irv", "ca", "iv", "ea", "ees", "ava", "ds", "ids", "z0"]
-    for clave in orden:
-        if clave == "ic" and bloquea_ic_por_itc:
-            continue
-        pat = PATRONES_CLAVE.get(clave)
-        if pat and re.search(pat, txt, flags=re.IGNORECASE):
-            halladas.append(clave)
-    # Complemento con el detector por sinónimos existente.
-    k = clave_por_linea(linea)
-    if k == "ic" and bloquea_ic_por_itc:
-        k = None
-    if k and k not in halladas:
-        halladas.append(k)
-    # Si aparece CFTnr, no dejar que el mismo rótulo sea interpretado también como CFT.
-    if "cftnr" in halladas and "cft" in halladas and re.search(PATRONES_CLAVE["cftnr"], txt, flags=re.IGNORECASE):
-        # Mantener CFT solo si también aparece CFT como etiqueta independiente adicional.
-        txt_sin_cftnr = re.sub(PATRONES_CLAVE["cftnr"], " ", txt, flags=re.IGNORECASE)
-        if not re.search(PATRONES_CLAVE["cft"], txt_sin_cftnr, flags=re.IGNORECASE):
-            halladas.remove("cft")
-    # Evita confundir ITC/índice de trabajo cardíaco con IC/índice cardíaco.
-    if "ic" in halladas and re.search(r"\bitc\b|trabajo\s+card[ií]aco", txt, flags=re.IGNORECASE):
-        halladas.remove("ic")
-    return halladas
-
-
-def extraer_numeros_post_etiqueta(linea: str, clave: str) -> List[float]:
-    """Devuelve números preferentemente ubicados después del rótulo, evitando números de unidades."""
-    txt = str(linea)
-    if clave == "ic" and es_linea_itc_no_ic(txt):
-        return []
-    pat = PATRONES_CLAVE.get(clave)
-    candidatos: List[float] = []
-    if pat:
-        m = re.search(pat, txt, flags=re.IGNORECASE)
-        if m:
-            cola = txt[m.end():]
-            # Si hay separador, tomar lo que sigue; si no, toda la cola.
-            if any(sep in cola for sep in [":", "=", "→", "-"]):
-                cola2 = re.split(r"[:=→]", cola, maxsplit=1)[-1]
-            else:
-                cola2 = cola
-            candidatos = [n for n in numeros_en_texto(cola2) if rango_plausible(clave, n)]
-    if not candidatos:
-        candidatos = [n for n in numeros_en_texto(txt) if rango_plausible(clave, n)]
-    return candidatos
-
-
-def elegir_valor_de_linea(linea: str, clave: str) -> Optional[float]:
-    nums = extraer_numeros_post_etiqueta(linea, clave)
-    if not nums:
-        return None
-    # Si la línea contiene palabras de valor/resultado, suele estar inmediatamente después.
-    if re.search(r"(valor|resultado|result|medido|actual|observado)", str(linea), flags=re.IGNORECASE):
-        v = nums[0]
-    else:
-        # En tablas exportadas con rangos primero, el valor clínico suele quedar al final.
-        v = nums[-1]
-    if clave == "cts":
-        v = limpiar_valor_cts(v)
-    return v
-
-
-def agregar_si_util(filas: List[Dict[str, Any]], variable: str, valor: Any, linea: str) -> None:
-    if es_valor_util(valor):
-        filas.append({"variable": variable.upper(), "valor": valor, "valor_2": None, "linea_origen": linea})
-
-
-def aplicar_fallback_regex_global(lineas: List[str], filas: List[Dict[str, Any]]) -> None:
-    """Segundo barrido: recupera variables que quedaron perdidas por tablas o saltos de línea."""
-    ya = {str(f.get("variable", "")).upper() for f in filas}
-    texto = "\n".join(lineas)
-
-    # Demográficos
-    if "EDAD" not in ya:
-        m = re.search(r"(?:edad|age)\s*[:=\-]?\s*(\d{1,3})", texto, flags=re.IGNORECASE)
-        if m:
-            agregar_si_util(filas, "EDAD", int(m.group(1)), "fallback edad")
-    if "FECHA_NACIMIENTO" not in ya:
-        m = re.search(r"(?:fecha\s+de\s+nacimiento|fecha\s+nacimiento|fec\.?\s*nac\.?|fecha\s*nac\.?|dob|birth\s*date)\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", texto, flags=re.IGNORECASE)
-        if m:
-            agregar_si_util(filas, "FECHA_NACIMIENTO", m.group(1), "fallback fecha nacimiento")
-    if "FECHA_ESTUDIO" not in ya and "FECHA" not in ya:
-        m = re.search(r"(?:fecha\s+del?\s*estudio|fecha\s+de\s*estudio|fecha\s+del?\s*examen|fecha\s+de\s*medici[oó]n|study\s*date|fecha\s+informe)\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})", texto, flags=re.IGNORECASE)
-        if m:
-            agregar_si_util(filas, "FECHA_ESTUDIO", m.group(1), "fallback fecha estudio")
-        else:
-            # Respaldo: primera fecha que no esté en una línea de nacimiento.
-            for lin in lineas:
-                if re.search(r"(nacimiento|fecha\s*nac|fec\s*nac|dob|birth)", normalizar_txt(lin)):
-                    continue
-                fecha = extraer_fecha_texto(lin)
-                if fecha:
-                    agregar_si_util(filas, "FECHA_ESTUDIO", fecha, "fallback fecha estudio generica")
-                    break
-    if "DNI" not in ya:
-        m = re.search(r"(?:dni|documento|doc\.?|identificaci[oó]n)\s*[:=\-]?\s*([0-9.]{6,14})", texto, flags=re.IGNORECASE)
-        if m:
-            agregar_si_util(filas, "DNI", m.group(1).replace(".", ""), "fallback dni")
-    if "PACIENTE" not in ya:
-        m = re.search(r"(?:paciente|apellido\s+y\s+nombre|nombre\s+y\s+apellido|nombre)\s*[:=\-]?\s*([^\n\r]{3,80})", texto, flags=re.IGNORECASE)
-        if m:
-            val = m.group(1).strip(" -–—:\t")
-            val = normalizar_nombre_paciente(val)
-            if val and not numeros_en_texto(val):
-                agregar_si_util(filas, "PACIENTE", val, "fallback paciente")
-    if "OBRA_SOCIAL" not in ya:
-        m = re.search(r"(?:obra\s+social|cobertura|prepaga|mutual|seguro\s+m[eé]dico|financiador)\s*[:=\-]?\s*([^\n\r]{2,80})", texto, flags=re.IGNORECASE)
-        if m:
-            val = normalizar_obra_social(m.group(1).strip(" -–—:\t"))
-            if val:
-                agregar_si_util(filas, "OBRA_SOCIAL", val, "fallback obra social")
-
-    # Numéricos línea por línea y también con ventana de línea siguiente.
-    ya = {str(f.get("variable", "")).upper() for f in filas}
-    for clave in ["cftnr", "cft", "ih", "iac", "cts", "fc", "ic", "irv", "ca", "iv", "ea", "ees", "ava", "ds", "ids", "z0"]:
-        var = clave.upper() if clave != "ava" else "AVA"
-        if var in ya:
-            continue
-        for i, lin in enumerate(lineas):
-            if clave not in claves_en_linea_robusto(lin):
-                continue
-            v = elegir_valor_de_linea(lin, clave)
-            if v is None:
-                ventana = " ".join(lineas[i:i+4])
-                v = elegir_valor_de_linea(ventana, clave)
-            if v is not None:
-                agregar_si_util(filas, var, v, lin)
-                ya.add(var)
+            val = _collapse_spaces(m.group(1)).strip(":#- ")
+            val = re.split(r"\bH\.?\s*C\.?\b|#|Paciente|Fecha|Hora|Edad|Sexo", val, flags=re.I)[0].strip(" :#-")
+            if val and not re.fullmatch(r"(?i)(M|F|Paciente|Fecha|Hora|Edad|Sexo)", val):
+                out["estudio"] = val
                 break
 
-
-def aplicar_extraccion_tablas(lineas: List[str], filas: List[Dict[str, Any]]) -> None:
-    """Detecta líneas con varias etiquetas y una fila de valores siguiente."""
-    for i, linea in enumerate(lineas[:-1]):
-        claves = [k for k in claves_en_linea_robusto(linea) if k in CLAVES_NUMERICAS and k != "pas_pad"]
-        # Quitar duplicados manteniendo orden.
-        claves = list(dict.fromkeys(claves))
-        if len(claves) < 2:
-            continue
-        bloque_valores = " ".join(lineas[i+1:i+4])
-        nums = numeros_en_texto(bloque_valores)
-        if len(nums) < 2:
-            continue
-        pos = 0
-        for clave in claves:
-            elegido = None
-            while pos < len(nums):
-                cand = nums[pos]
-                pos += 1
-                if rango_plausible(clave, cand):
-                    elegido = limpiar_valor_cts(cand) if clave == "cts" else cand
+    # Paciente: preferir línea que empieza o contiene Paciente + nombre.
+    for i, ln in enumerate(clean_lines):
+        m = re.search(r"\bPaciente\b\s*[:#]?\s*(.+)$", ln, re.I)
+        if m:
+            cand = m.group(1)
+            cand = re.split(r"\b(Estudio\s*#?|Número\s+de\s+estudio|Numero\s+de\s+estudio|Fecha|Hora|Edad|Sexo|Peso|Altura|IMC|SC|Diagn[oó]stico|Medicaci[oó]n)\b", cand, flags=re.I)[0]
+            cand = _clean_patient_name(cand)
+            if cand and not _is_bad_patient_value(cand):
+                out["paciente"] = cand
+                break
+            # Si el valor no está en la misma línea, mirar la línea siguiente.
+            if i + 1 < len(clean_lines):
+                nxt = _clean_patient_name(clean_lines[i+1])
+                if nxt and not _is_bad_patient_value(nxt):
+                    out["paciente"] = nxt
                     break
-            if elegido is not None:
-                var = clave.upper() if clave != "ava" else "AVA"
-                agregar_si_util(filas, var, elegido, linea)
 
-def convertir_lineas_pdf_a_variables(registros: List[Dict[str, Any]]) -> pd.DataFrame:
-    """
-    Convierte líneas de PDF en una tabla clínica robusta.
-    Mejoras:
-    - Reconoce edad, fecha, paciente y DNI aunque estén con ':' o en la línea siguiente.
-    - Reconoce CFTnr antes que CFT para evitar solapamiento.
-    - Reconoce IAC/ACI y CTS/PEP-LVET aunque aparezcan como abreviaturas.
-    - Interpreta tablas con varias etiquetas en una línea y valores en la línea siguiente.
-    - Aplica fallback global por regex si el primer barrido no encuentra una variable.
-    """
-    if not registros:
-        return pd.DataFrame()
+    # Fecha/hora
+    for ln in clean_lines:
+        m = re.search(r"\bFecha\b\s*[:#]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", ln, re.I)
+        if m:
+            out["fecha"] = m.group(1); break
+    for ln in clean_lines:
+        m = re.search(r"\bHora\b\s*[:#]?\s*(\d{1,2}:\d{2}(?::\d{2})?)", ln, re.I)
+        if m:
+            out["hora"] = m.group(1); break
+
+    take_num("Edad", "edad")
+    take_num("Peso", "peso", r"(?:kg|kilos)?")
+    take_num("Altura", "altura", r"(?:cm)?")
+    take_num("IMC", "imc")
+    take_num("SC", "sc", r"(?:m2|m²)?")
+
+    for ln in clean_lines:
+        m = re.search(r"\bSexo\b\s*[:#]?\s*([MF])\b", ln, re.I)
+        if m:
+            out["sexo"] = m.group(1).upper(); break
 
-    archivo_origen = str(registros[0].get("archivo_origen", "")).strip()
-    lineas = [str(r.get("texto_extraido", "")).strip() for r in registros if str(r.get("texto_extraido", "")).strip()]
-    contexto_pdf = extraer_contexto_clinico_pdf(lineas)
-    filas: List[Dict[str, Any]] = []
-
-    # Primer barrido: tablas con varias columnas de etiquetas.
-    aplicar_extraccion_tablas(lineas, filas)
-
-    # Segundo barrido: línea por línea.
-    for i, linea in enumerate(lineas):
-        claves_linea = claves_en_linea_robusto(linea)
-        clave = claves_linea[0] if claves_linea else None
-        if not clave:
-            continue
-
-        if clave in ["paciente", "dni", "obra_social", "edad", "fecha", "fecha_estudio", "fecha_nacimiento"]:
-            val_demo = extraer_demografico(clave, linea, lineas[i + 1:i + 5])
-            if es_valor_util(val_demo):
-                agregar_si_util(filas, clave.upper(), val_demo, linea)
-            continue
-
-        # Caso especial PAS/PAD. Prioriza patrón sistólica/diastólica tipo 129/90 (96)
-        # y evita usar números de fecha, hora o rangos de referencia.
-        if clave == "pas_pad":
-            bloque = " ".join(lineas[i:i + 8])
-            m_pa = re.search(r"\b(\d{2,3})\s*/\s*(\d{2,3})(?:\s*\(\s*\d{2,3}\s*\))?", bloque)
-            if m_pa:
-                pas_v = limpiar_numero(m_pa.group(1))
-                pad_v = limpiar_numero(m_pa.group(2))
-                if rango_plausible("pas", pas_v) and rango_plausible("pad", pad_v) and pas_v > pad_v:
-                    agregar_si_util(filas, "PAS", pas_v, linea)
-                    agregar_si_util(filas, "PAD", pad_v, linea)
-            else:
-                nums_bloque = [v for v in numeros_en_texto(bloque) if 30 <= v <= 260]
-                # Buscar el primer par fisiológico PAS/PAD.
-                for a, b in zip(nums_bloque, nums_bloque[1:]):
-                    if 70 <= a <= 250 and 40 <= b <= 150 and a > b and (a - b) >= 20:
-                        agregar_si_util(filas, "PAS", a, linea)
-                        agregar_si_util(filas, "PAD", b, linea)
-                        break
-            continue
-
-        if clave in CLAVES_NUMERICAS:
-            valor = elegir_valor_de_linea(linea, clave)
-            if valor is None:
-                # Buscar en líneas siguientes, pero sin cortar prematuramente ante etiquetas repetidas.
-                for j in range(i + 1, min(i + 12, len(lineas))):
-                    cand = lineas[j].strip()
-                    if not cand or cand in ["---", "--"]:
-                        continue
-                    # Si aparece otra etiqueta y ya hay números plausibles en esta ventana, usar ventana; si no, seguir.
-                    nums_cand = [n for n in numeros_en_texto(cand) if rango_plausible(clave, n)]
-                    if nums_cand:
-                        valor = nums_cand[0]
-                        if clave == "cts":
-                            valor = limpiar_valor_cts(valor)
-                        break
-                    if es_etiqueta(cand) and clave not in claves_en_linea_robusto(cand):
-                        # Probablemente cambió a otra variable.
-                        break
-            if valor is not None:
-                var = clave.upper() if clave != "ava" else "AVA"
-                agregar_si_util(filas, var, valor, linea)
-
-    # Tercer barrido: rescate global de lo que haya quedado incompleto.
-    aplicar_fallback_regex_global(lineas, filas)
-
-    if not filas:
-        return pd.DataFrame(registros)
-
-    df_var = pd.DataFrame(filas)
-
-    # Resolver duplicados: conserva la última aparición útil, porque en Z-Logic suele estar el resumen final más abajo.
-    resumen: Dict[str, Any] = {}
-    for _, rr in df_var.iterrows():
-        var = str(rr["variable"]).upper()
-        val = rr.get("valor")
-        if es_valor_util(val):
-            resumen[var] = val
-
-    paciente_archivo = None
-    if archivo_origen:
-        paciente_archivo = re.sub("[.]pdf$", "", archivo_origen, flags=re.IGNORECASE)
-        paciente_archivo = re.sub("[-_]*logic[0-9]*", "", paciente_archivo, flags=re.IGNORECASE)
-        paciente_archivo = paciente_archivo.replace("_", " ").replace("-", " ").strip()
-
-    # Recalcular AVA si no vino explícito.
-    ava = resumen.get("AVA")
-    if limpiar_numero(ava) is None and limpiar_numero(resumen.get("EA")) is not None and limpiar_numero(resumen.get("EES")) not in [None, 0]:
-        ava = limpiar_numero(resumen.get("EA")) / limpiar_numero(resumen.get("EES"))
-
-    fecha_estudio = formatear_fecha_ddmmyyyy(resumen.get("FECHA_ESTUDIO") or resumen.get("FECHA"))
-    fecha_nacimiento = formatear_fecha_ddmmyyyy(resumen.get("FECHA_NACIMIENTO"))
-    # Si por error el campo Fecha_Estudio contiene la fecha de nacimiento, no usarlo como fecha del estudio.
-    if fecha_estudio and fecha_nacimiento and parsear_fecha(fecha_estudio) == parsear_fecha(fecha_nacimiento):
-        fecha_estudio = None
-    edad_calculada = calcular_edad_desde_fechas(fecha_nacimiento, fecha_estudio)
-    edad_final = edad_calculada if edad_calculada is not None else resumen.get("EDAD")
-
-    fila_resumen = {
-        "Paciente": normalizar_nombre_paciente(resumen.get("PACIENTE")) or normalizar_nombre_paciente(paciente_archivo) or "No disponible",
-        "DNI": sanitizar_dni(resumen.get("DNI")),
-        "Obra_Social": resumen.get("OBRA_SOCIAL"),
-        "Edad": edad_final,
-        "Fecha_Estudio": fecha_estudio,
-        "Fecha_Nacimiento": fecha_nacimiento,
-        "Diagnóstico": contexto_pdf.get("Diagnóstico"),
-        "Medicación": contexto_pdf.get("Medicación"),
-        "Posición": contexto_pdf.get("Posición"),
-        "Texto_PDF": contexto_pdf.get("Texto_PDF"),
-        "PAS": resumen.get("PAS"),
-        "PAD": resumen.get("PAD"),
-        "FC": resumen.get("FC"),
-        "IC": resumen.get("IC"),
-        "IRV": resumen.get("IRV"),
-        "RVS": resumen.get("IRV"),
-        "CA": resumen.get("CA"),
-        "CFT": resumen.get("CFT"),
-        "CFTnr": resumen.get("CFTNR"),
-        "IH": resumen.get("IH"),
-        "IV": resumen.get("IV"),
-        "IAC": resumen.get("IAC"),
-        "CTS": resumen.get("CTS") or resumen.get("CTS"),
-        "EA": resumen.get("EA"),
-        "EES": resumen.get("EES"),
-        "EA/EES": ava,
-        "DS": resumen.get("DS"),
-        "IDS": resumen.get("IDS"),
-        "Z0": resumen.get("Z0"),
-        "origen_parser": "PDF extraído y estructurado con parser robusto",
-    }
-
-    df_final = pd.DataFrame([fila_resumen])
-    df_final.attrs = {}
-    return df_final
-
-def extraer_pdf_a_dataframe(uploaded_file) -> pd.DataFrame:
-    registros = extraer_lineas_pdf(uploaded_file)
-    if not registros:
-        st.error("No se pudo extraer texto del PDF. Si es una imagen escaneada, se requiere OCR.")
-        return pd.DataFrame()
-
-    df = convertir_lineas_pdf_a_variables(registros)
-
-    # Si no logró estructurar, devuelve líneas para diagnóstico.
-    if df.empty:
-        return pd.DataFrame(registros)
-
-    return df
-
-
-# =========================================================
-# LECTURA DE ARCHIVOS
-# =========================================================
-
-def leer_archivo(uploaded_file) -> pd.DataFrame:
-    name = uploaded_file.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(uploaded_file)
-    if name.endswith(".pdf"):
-        return extraer_pdf_a_dataframe(uploaded_file)
-    st.error("Formato no soportado. Subir CSV, XLS, XLSX o PDF.")
-    return pd.DataFrame()
-
-
-def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.attrs = {}
-    nuevas = []
-    vistos = {}
-    for c in df.columns:
-        base = str(c).strip()
-        if base in vistos:
-            vistos[base] += 1
-            nuevas.append(f"{base}_{vistos[base]}")
-        else:
-            vistos[base] = 0
-            nuevas.append(base)
-    df.columns = nuevas
-    df = df.reset_index(drop=True)
-    return df
-
-
-def integrar_datos(df1: pd.DataFrame, df2: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """Integra uno o dos estudios sin perder columnas ni valores útiles."""
-    df1 = estandarizar_columnas_clinicas(df1)
-    df1["origen"] = "PDF/archivo 1"
-
-    if df2 is not None and isinstance(df2, pd.DataFrame) and not df2.empty:
-        df2 = estandarizar_columnas_clinicas(df2)
-        df2["origen"] = "PDF/archivo 2"
-        todas_cols = list(dict.fromkeys(ORDEN_VARIABLES_INFORME + list(df1.columns) + list(df2.columns)))
-        df1 = df1.reindex(columns=todas_cols)
-        df2 = df2.reindex(columns=todas_cols)
-        combinado = pd.concat([df1, df2], axis=0, ignore_index=True, sort=False)
-    else:
-        todas_cols = list(dict.fromkeys(ORDEN_VARIABLES_INFORME + list(df1.columns)))
-        combinado = df1.reindex(columns=todas_cols)
-
-    combinado.attrs = {}
-    return combinado.reset_index(drop=True)
-
-def es_valor_util(x: Any) -> bool:
-    """Evita comparaciones claras de Pandas al leer valores de filas integradas."""
-    if x is None:
-        return False
-    if isinstance(x, (pd.Series, pd.DataFrame, list, tuple, dict)):
-        return False
-    try:
-        if pd.isna(x):
-            return False
-    except Exception:
-        pass
-    s = str(x).strip()
-    if s == "" or s.lower() in ["nan", "none", "null", "no disponible"]:
-        return False
-    return True
-
-
-# =========================================================
-# INTEGRACIÓN ROBUSTA Y CONTROL DE CALIDAD
-# =========================================================
-
-SINONIMOS_COLUMNAS: Dict[str, List[str]] = {
-    "Paciente": ["paciente", "nombre", "apellido y nombre", "patient"],
-    "DNI": ["dni", "documento", "doc", "id"],
-    "Obra_Social": ["obra social", "obra_social", "cobertura", "prepaga", "mutual", "seguro medico", "seguro médico", "financiador"],
-    "Edad": ["edad", "age", "anos", "años", "years"],
-    "Fecha_Nacimiento": ["fecha de nacimiento", "fecha nacimiento", "f nacimiento", "f. nacimiento", "fec nacimiento", "fecha nac", "fec nac", "nacimiento", "dob", "birth date", "date of birth"],
-    "Fecha_Estudio": ["fecha estudio", "fecha del estudio", "fecha de estudio", "fecha examen", "fecha del examen", "fecha medicion", "fecha medición", "study date", "fecha informe", "fecha del informe", "date"],
-    "Fecha": ["fecha"],
-    "Diagnóstico": ["diagnóstico", "diagnostico", "diagnosis", "dx"],
-    "Medicación": ["medicación", "medicacion", "tratamiento", "medication"],
-    "Posición": ["posición", "posicion", "situación", "situacion", "postura", "decubito", "decúbito", "acostado", "supino", "de pie", "bipedestacion", "bipedestación", "standing", "supine"],
-    "Texto_PDF": ["texto_pdf", "texto pdf", "texto extraido", "texto_extraido"],
-    "PAS": ["pas", "sistolica", "sistólica", "sbp", "sys"],
-    "PAD": ["pad", "diastolica", "diastólica", "dbp", "dia"],
-    "FC": ["fc", "frecuencia cardiaca", "frecuencia cardíaca", "heart rate", "hr"],
-    "IC": ["ic", "indice cardiaco", "índice cardíaco", "cardiac index", "ci"],
-    "IRV": ["irv", "rvs", "resistencia vascular sistemica", "resistencia vascular sistémica", "svr"],
-    "CA": ["ca", "complacencia arterial", "arterial compliance"],
-    "CFTnr": ["cftnr", "cft nr", "cft n.r", "cft n r", "cft normalizado", "cft index", "cft indice", "cft índice", "tfc index", "tfc indice", "tfi", "contenido de fluidos toracicos normalizado", "contenido de fluidos torácicos normalizado", "thoracic fluid index"],
-    "CFT": ["cft", "tfc", "contenido de fluidos toracicos", "contenido de fluidos torácicos", "thoracic fluid"],
-    "IV": ["iv", "indice de velocidad", "índice de velocidad", "velocity index"],
-    "IH": ["ih", "hi", "indice de heather", "índice de heather", "heather"],
-    "IAC": ["iac", "aci", "indice de aceleracion", "índice de aceleración", "aceleracion de contractilidad", "aceleración de contractilidad", "acceleration index"],
-    "CTS": ["cts", "cts", "str", "coeficiente tiempos sistolicos", "coeficiente de tiempos sistolicos", "relacion tiempos sistolicos", "relación tiempos sistólicos", "relacion de tiempos sistolicos", "relación de tiempos sistólicos", "pep/lvet", "pep / lvet", "pep/tevi", "systolic time ratio"],
-    "EA": ["ea", "elastancia arterial"],
-    "EES": ["ees", "elastancia de fin de sistole", "elastancia ventricular"],
-    "EA/EES": ["ea/ees", "ava", "acoplamiento va", "acoplamiento ventriculo arterial", "acoplamiento ventrículo arterial"],
-    "DS": ["ds", "descarga sistolica", "descarga sistólica", "stroke volume"],
-    "IDS": ["ids", "indice de descarga sistolica", "índice de descarga sistólica", "stroke index"],
-    "Z0": ["z0", "impedancia basal"],
-}
-
-ORDEN_VARIABLES_INFORME = [
-    "Paciente", "DNI", "Obra_Social", "Edad", "Fecha_Estudio", "Fecha_Nacimiento", "Diagnóstico", "Medicación", "Posición", "Texto_PDF", "PAS", "PAD", "FC", "IC", "IRV", "CA", "CFT", "CFTnr",
-    "IH", "IV", "IAC", "CTS", "EA", "EES", "EA/EES", "DS", "IDS", "Z0"
-]
-
-DOMINIOS_METRICAS = {
-    "Función circulatoria": ["IC", "IRV", "FC", "PAS", "PAD", "CA"],
-    "Contractilidad": ["IH", "IV", "IAC", "CTS", "DS", "IDS"],
-    "Volemia": ["CFT", "CFTnr", "Z0"],
-    "Rendimiento CV / VA": ["EA", "EES", "EA/EES"],
-}
-
-
-def canon_col(col: Any) -> str:
-    n_original = str(col).strip()
-    n = normalizar_txt(n_original)
-    n = re.sub(r"[^a-z0-9/]+", " ", n).strip()
-
-    # Bloqueo crítico: ITC/índice de trabajo cardíaco NO debe entrar como IC.
-    if es_linea_itc_no_ic(n_original):
-        return "ITC"
-
-    pares = []
-    for canon, sinonimos in SINONIMOS_COLUMNAS.items():
-        for s in sinonimos:
-            pares.append((canon, s))
-    pares.sort(key=lambda x: len(normalizar_txt(x[1])), reverse=True)
-
-    for canon, s in pares:
-        # Si el canon candidato es IC, aceptar solo etiquetas explícitas de índice cardíaco.
-        # Rechazar cualquier columna con trabajo cardíaco/ITC.
-        if canon == "IC" and es_linea_itc_no_ic(n_original):
-            continue
-        if contiene_sinonimo_seguro(n_original, s):
-            return canon
-    return n_original
-
-def estandarizar_columnas_clinicas(df: pd.DataFrame) -> pd.DataFrame:
-    df = normalizar_columnas(df)
-    ren = {c: canon_col(c) for c in df.columns}
-    df = df.rename(columns=ren)
-    # Si dos columnas terminan con el mismo nombre canónico, consolidar el primer valor útil por fila.
-    nuevas = {}
-    for col in list(dict.fromkeys(df.columns)):
-        sub = df.loc[:, df.columns == col]
-        if sub.shape[1] == 1:
-            nuevas[col] = sub.iloc[:, 0]
-        else:
-            nuevas[col] = sub.apply(lambda fila: next((x for x in fila if es_valor_util(x)), None), axis=1)
-    out = pd.DataFrame(nuevas)
-    out.attrs = {}
-    return out.reset_index(drop=True)
-
-
-def construir_resumen_por_archivo(df: pd.DataFrame) -> pd.DataFrame:
-    filas = []
-    if df is None or df.empty:
-        return pd.DataFrame()
-    grupos = df.groupby("origen", dropna=False) if "origen" in df.columns else [("archivo", df)]
-    for origen, g in grupos:
-        fila = {"origen": origen}
-        for col in ORDEN_VARIABLES_INFORME:
-            if col in g.columns:
-                valor = None
-                for v in g[col].tolist()[::-1]:
-                    if es_valor_util(v):
-                        valor = v
-                        break
-                fila[col] = valor
-        filas.append(fila)
-    return pd.DataFrame(filas)
-
-
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    r = extraer_resumen_integrado(df)
-    resumen_pdf = construir_resumen_por_archivo(df)
-    filas = []
-    claves = {
-        "Paciente":"paciente", "DNI":"dni", "Obra_Social":"obra_social", "Edad":"edad", "Fecha_Estudio":"fecha", "Fecha_Nacimiento":"fecha_nacimiento", "PAS":"pas", "PAD":"pad", "FC":"fc",
-        "IC":"ic", "IRV":"irv", "CA":"ca", "CFT":"cft", "CFTnr":"cftnr", "IH":"ih", "IV":"iv",
-        "IAC":"iac", "CTS":"cts", "EA":"ea", "EES":"ees", "EA/EES":"ava", "DS":"ds", "IDS":"ids", "Z0":"z0"
-    }
-    for variable, key in claves.items():
-        vals_origen = []
-        for _, fila in resumen_pdf.iterrows():
-            val = fila.get(variable)
-            vals_origen.append(fmt(val) if limpiar_numero(val) is not None else (str(val) if es_valor_util(val) else "—"))
-        integrado = r.get(key)
-        if variable == "DNI":
-            vals_origen = [sanitizar_dni(v) if v != "—" else "SD" for v in vals_origen]
-            integrado_txt = sanitizar_dni(integrado)
-            estado = "OK" if integrado_txt != "SD" else "SD"
-        else:
-            integrado_txt = fmt(integrado) if limpiar_numero(integrado) is not None else (str(integrado) if es_valor_util(integrado) else "No disponible")
-            estado = "OK" if es_valor_util(integrado) else "FALTA"
-        filas.append({
-            "Variable": variable,
-            "Archivo 1": vals_origen[0] if len(vals_origen) > 0 else ("SD" if variable == "DNI" else "—"),
-            "Archivo 2": vals_origen[1] if len(vals_origen) > 1 else ("SD" if variable == "DNI" else "—"),
-            "Valor integrado": integrado_txt,
-            "Estado": estado,
-        })
-    return pd.DataFrame(filas)
-
-
-def resumen_calidad_integracion(df: pd.DataFrame) -> Dict[str, Any]:
-    tabla = generar_tabla_integracion(df)
-    criticas = ["IC", "IRV", "FC", "CFT", "CFTnr", "IH", "IV", "IAC", "CTS", "EA", "EES", "EA/EES"]
-    faltantes = tabla[(tabla["Variable"].isin(criticas)) & (tabla["Estado"] == "FALTA")]["Variable"].tolist()
-    completas = tabla[tabla["Estado"] == "OK"]["Variable"].tolist()
-    return {"tabla": tabla, "faltantes": faltantes, "completas": completas}
-
-
-def obtener_primero(row: Dict[str, Any], nombres: List[str]) -> Any:
-    for n in nombres:
-        if n in row:
-            x = row.get(n)
-            if es_valor_util(x):
-                return x
-    return None
-
-
-
-
-def normalizar_posicion_estudio(texto: Any) -> str:
-    """Devuelve 'acostado', 'de_pie' o 'no_reconocida'.
-
-    Regla clínica actualizada:
-    - Las métricas diagnósticas principales se toman del registro en CINTA,
-      que en este flujo corresponde al registro basal/acostado.
-    - El registro DE PIE se usa solo para evaluación ortostática.
-    - SPOT no debe reemplazar a CINTA para diagnóstico si existe CINTA.
-    """
-    t = normalizar_txt(texto)
-    if not t:
-        return "no_reconocida"
-
-    # Prioridad de pie: si el texto dice de pie/bipedestación, nunca clasificar como acostado.
-    patrones_de_pie = [
-        r"\bde\s*pie\b", r"\bbipedest", r"\bparad[oa]\b", r"\bortostat", r"\bstanding\b", r"\bupright\b",
-    ]
-    if any(re.search(p, t) for p in patrones_de_pie):
-        return "de_pie"
-
-    patrones_acostado = [
-        r"\bacostad[oa]\b", r"\bdecubito\b", r"\bsupin[oa]\b", r"\bclinostat", r"\breposo\b",
-        r"\blying\b", r"\bsupine\b", r"\bbasal\b", r"\bac\s*(?:cinta|spot)\b", r"\bsituacion\s+ac\b", r"\bsituación\s+ac\b",
-    ]
-    if any(re.search(p, t) for p in patrones_acostado):
-        return "acostado"
-
-    return "no_reconocida"
-
-
-def normalizar_metodo_estudio(texto: Any) -> str:
-    """Devuelve 'cinta', 'spot' o 'no_reconocido'.
-    CINTA/SPOT son método de adquisición, no posición. La selección diagnóstica
-    prioriza CINTA por ser la medición basal/acostada en este flujo.
-    """
-    t = normalizar_txt(texto)
-    if not t:
-        return "no_reconocido"
-    if re.search(r"\bcinta\b|\bbandas?\b|\bbanda\b", t):
-        return "cinta"
-    if re.search(r"\bspot\b|\bpuntual\b", t):
-        return "spot"
-    return "no_reconocido"
-
-
-def detectar_posicion_fila(fila: Dict[str, Any]) -> str:
-    partes = []
-    for col in ["Posición", "Diagnóstico", "origen", "origen_parser", "Paciente"]:
-        if col in fila and es_valor_util(fila.get(col)):
-            partes.append(str(fila.get(col)))
-    if "Texto_PDF" in fila and es_valor_util(fila.get("Texto_PDF")):
-        partes.append(str(fila.get("Texto_PDF"))[:3000])
-    return normalizar_posicion_estudio(" | ".join(partes))
-
-
-def detectar_metodo_fila(fila: Dict[str, Any]) -> str:
-    partes = []
-    for col in ["Posición", "Diagnóstico", "origen", "origen_parser", "Paciente"]:
-        if col in fila and es_valor_util(fila.get(col)):
-            partes.append(str(fila.get(col)))
-    if "Texto_PDF" in fila and es_valor_util(fila.get("Texto_PDF")):
-        partes.append(str(fila.get("Texto_PDF"))[:3000])
-    return normalizar_metodo_estudio(" | ".join(partes))
-
-
-def seleccionar_df_diagnostico(df: pd.DataFrame) -> pd.DataFrame:
-    """Selecciona el registro que debe usarse para diagnóstico clínico principal.
-
-    Prioridad nueva:
-    1) CINTA + acostado/decúbito (estándar diagnóstico).
-    2) CINTA, aunque la posición no haya sido reconocida explícitamente.
-    3) Acostado/decúbito, si no hay CINTA.
-    4) Primer registro no-de-pie.
-    5) Último recurso: primer registro.
-
-    El registro DE PIE nunca se usa para diagnóstico principal si existe otra opción.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    dfx["Posición_reconocida"] = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    dfx["Método_reconocido"] = [detectar_metodo_fila(f.to_dict()) for _, f in dfx.iterrows()]
-
-    cinta_acostado = dfx[(dfx["Método_reconocido"] == "cinta") & (dfx["Posición_reconocida"] == "acostado")]
-    if not cinta_acostado.empty:
-        return cinta_acostado.iloc[[0]].reset_index(drop=True)
-
-    cinta = dfx[dfx["Método_reconocido"] == "cinta"]
-    if not cinta.empty:
-        return cinta.iloc[[0]].reset_index(drop=True)
-
-    acostado = dfx[dfx["Posición_reconocida"] == "acostado"]
-    if not acostado.empty:
-        return acostado.iloc[[0]].reset_index(drop=True)
-
-    no_de_pie = dfx[dfx["Posición_reconocida"] != "de_pie"]
-    if not no_de_pie.empty:
-        return no_de_pie.iloc[[0]].reset_index(drop=True)
-
-    return dfx.iloc[[0]].reset_index(drop=True)
-
-
-def seleccionar_df_de_pie(df: pd.DataFrame) -> pd.DataFrame:
-    """Selecciona el registro de pie para evaluación ortostática.
-    Solo toma filas que digan explícitamente DE PIE/bipedestación/ortostatismo.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    dfx["Posición_reconocida"] = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    pie = dfx[dfx["Posición_reconocida"] == "de_pie"]
-    if not pie.empty:
-        return pie.iloc[[-1]].reset_index(drop=True)
-    return pd.DataFrame()
-
-
-def describir_regla_posicion(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        return "No hay registros para determinar posición/método."
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    posiciones = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    metodos = [detectar_metodo_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    if "cinta" in metodos:
-        if "de_pie" in posiciones:
-            return "Diagnóstico principal basado en medición con CINTA (basal/acostada). El registro que dice DE PIE se utiliza solo para evaluación ortostática."
-        return "Diagnóstico principal basado en medición con CINTA, tomada como referencia basal/acostada."
-    if "acostado" in posiciones:
-        return "Diagnóstico principal basado en el registro en decúbito/acostado. El registro de pie se utiliza solo para evaluación ortostática."
-    if "spot" in metodos:
-        return "No se encontró medición con CINTA; se usa SPOT solo como respaldo y se debe interpretar con cautela."
-    return "No se reconoció posición/método; por defecto se usa el primer archivo como referencia diagnóstica."
-def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-    if df.empty:
-        return {}
-
-    df_completo = estandarizar_columnas_clinicas(df)
-    df = seleccionar_df_diagnostico(df_completo)
-    row: Dict[str, Any] = {}
-    # Datos clínicos/númericos: usar SOLO la fila diagnóstica en decúbito/acostado.
-    for _, fila in df.iterrows():
-        for k, v in fila.to_dict().items():
-            if es_valor_util(v):
-                row[k] = v
-    # Texto contextual: conservar texto de todos los archivos para detectar embarazo/semana y no perder diagnóstico escrito.
-    textos_globales = []
-    for col in ["Diagnóstico", "Medicación", "Texto_PDF"]:
-        if col in df_completo.columns:
-            for v in df_completo[col].tolist():
-                if es_valor_util(v):
-                    textos_globales.append(str(v))
-    if textos_globales:
-        row["Texto_PDF_global"] = " | ".join(textos_globales)[:20000]
-
-    def buscar_col(col: str) -> Any:
-        if col in row and es_valor_util(row[col]):
-            return row[col]
-        if col in df.columns:
-            for v in df[col].tolist()[::-1]:
-                if es_valor_util(v):
-                    return v
-        return None
-
-    ea = buscar_col("EA")
-    ees = buscar_col("EES")
-    ava = buscar_col("EA/EES")
-    if limpiar_numero(ava) is None and limpiar_numero(ea) is not None and limpiar_numero(ees) not in [None, 0]:
-        ava = limpiar_numero(ea) / limpiar_numero(ees)
-
-    return {
-        "paciente": normalizar_nombre_paciente(buscar_col("Paciente")),
-        "dni": sanitizar_dni(buscar_col("DNI")),
-        "obra_social": normalizar_obra_social(buscar_col("Obra_Social")),
-        "edad": calcular_edad_desde_fechas(buscar_col("Fecha_Nacimiento"), buscar_col("Fecha_Estudio") or buscar_col("Fecha")) or buscar_col("Edad"),
-        "fecha": formatear_fecha_ddmmyyyy(buscar_col("Fecha_Estudio") or buscar_col("Fecha")),
-        "fecha_nacimiento": formatear_fecha_ddmmyyyy(buscar_col("Fecha_Nacimiento")),
-        "posicion_referencia": detectar_posicion_fila(row),
-        "metodo_referencia": detectar_metodo_fila(row),
-        "regla_posicion": describir_regla_posicion(df_completo),
-        "texto_global": row.get("Texto_PDF_global"),
-        "pas": buscar_col("PAS"),
-        "pad": buscar_col("PAD"),
-        "fc": buscar_col("FC"),
-        "ic": buscar_col("IC"),
-        "irv": buscar_col("IRV"),
-        "ca": buscar_col("CA"),
-        "cft": buscar_col("CFT"),
-        "cftnr": buscar_col("CFTnr"),
-        "ih": buscar_col("IH"),
-        "iv": buscar_col("IV"),
-        "iac": buscar_col("IAC"),
-        "cts": buscar_col("CTS"),
-        "ea": ea,
-        "ees": ees,
-        "ava": ava,
-        "ds": buscar_col("DS"),
-        "ids": buscar_col("IDS"),
-        "z0": buscar_col("Z0"),
-    }
-
-def clasificar_ic(ic: Any) -> str:
-    v = limpiar_numero(ic)
-    if v is None:
-        return "No disponible"
-    if v < 2.5:
-        return "Índice cardíaco bajo"
-    if v > 4.0:
-        return "Índice cardíaco elevado"
-    return "Índice cardíaco normal"
-
-
-def clasificar_irv(irv: Any) -> str:
-    v = limpiar_numero(irv)
-    if v is None:
-        return "No disponible"
-    if v < 1200:
-        return "Resistencia vascular sistémica baja"
-    if v > 2000:
-        return "Resistencia vascular sistémica elevada"
-    return "Resistencia vascular sistémica normal"
-
-
-def diagnostico_perfil_hemodinamico(ic: Any, irv: Any) -> str:
-    """Clasificación obligatoria y concisa: HIPODINAMIA, NORMODINAMIA o HIPERDINAMIA.
-
-    Regla clínica base:
-    - Hipodinamia: predominio de bajo flujo y/o resistencia vascular elevada.
-    - Hiperdinamia: predominio de alto flujo y/o resistencia vascular baja.
-    - Normodinamia: IC e IRV/RVS dentro de rango esperado.
-    """
-    icv = limpiar_numero(ic)
-    rv = limpiar_numero(irv)
-    if icv is None and rv is None:
-        return "DATOS INSUFICIENTES PARA DEFINIR PATRÓN CIRCULATORIO."
-
-    if icv is not None and rv is not None:
-        if icv > 4.0 or rv < 1200:
-            return "Patrón circulatorio de HIPERDINAMIA: predominio de alto flujo y/o baja resistencia vascular."
-        if icv < 2.5 or rv > 2000:
-            return "Patrón circulatorio de HIPODINAMIA: predominio de bajo flujo y/o resistencia vascular elevada."
-        return "Patrón circulatorio de NORMODINAMIA: IC e IRV/RVS dentro de rango esperado."
-
-    if icv is not None:
-        if icv > 4.0:
-            return "Patrón circulatorio de HIPERDINAMIA: índice cardíaco elevado."
-        if icv < 2.5:
-            return "Patrón circulatorio de HIPODINAMIA: índice cardíaco bajo."
-        return "Patrón circulatorio de NORMODINAMIA: índice cardíaco dentro de rango esperado."
-
-    if rv is not None:
-        if rv < 1200:
-            return "Patrón circulatorio de HIPERDINAMIA: resistencia vascular baja."
-        if rv > 2000:
-            return "Patrón circulatorio de HIPODINAMIA: resistencia vascular elevada."
-        return "Patrón circulatorio de NORMODINAMIA: resistencia vascular dentro de rango esperado."
-
-    return "DATOS INSUFICIENTES PARA DEFINIR PATRÓN CIRCULATORIO."
-
-
-
-def clasificacion_dinamica_obligatoria(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    """Devuelve siempre Normodinamia, Hiperdinamia o Hipodinamia.
-
-    Regla corregida de coherencia clínica:
-    - El patrón hemodinámico de referencia se define con los valores ACOSTADO/CINTA.
-    - No se clasifica Hipodinamia si IC e IRV/RVS están en rango normal.
-    - Embarazo/HDP/PE usa la misma clasificación basal IC + IRV/RVS; los datos obstétricos
-      modifican el riesgo clínico, pero no cambian el patrón circulatorio si la hemodinamia es normal.
-
-    Rangos operativos usados por la app:
-    - IC normal: 2,5 a 4,0 L/min/m².
-    - IRV/RVS normal: 1200 a 2000 dyn·s·cm⁻⁵.
-    """
-    ic = limpiar_numero((r or {}).get("ic"))
-    rvs = limpiar_numero((r or {}).get("irv"))
-
-    if ic is not None and rvs is not None:
-        if ic < 2.5 and rvs > 2000:
-            return "Hipodinamia"
-        if ic > 4.0 and rvs < 1200:
-            return "Hiperdinamia"
-        if 2.5 <= ic <= 4.0 and 1200 <= rvs <= 2000:
-            return "Normodinamia"
-        # Regla de predominio cuando solo una variable está francamente fuera de rango.
-        if ic < 2.5 or rvs > 2000:
-            return "Hipodinamia"
-        if ic > 4.0 or rvs < 1200:
-            return "Hiperdinamia"
-        return "Normodinamia"
-
-    if ic is not None:
-        if ic < 2.5:
-            return "Hipodinamia"
-        if ic > 4.0:
-            return "Hiperdinamia"
-        return "Normodinamia"
-
-    if rvs is not None:
-        if rvs > 2000:
-            return "Hipodinamia"
-        if rvs < 1200:
-            return "Hiperdinamia"
-        return "Normodinamia"
-
-    return "Normodinamia"
-
-
-# ---------------------------------------------------------
-# ALIASES DE COMPATIBILIDAD
-# ---------------------------------------------------------
-# En versiones previas del módulo paper clínico se llamaba a estas funciones
-# con nombres alternativos. Mantener estos alias evita NameError y conserva
-# una única regla clínica central: clasificacion_dinamica_obligatoria().
-def clasificar_dinamia_materna(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-def parent_dynamics_class(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-def maternal_dynamics_class(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-def texto_clasificacion_dinamica(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    contexto = contexto or {}
-    clase = clasificacion_dinamica_obligatoria(r, contexto)
-    ic = fmt(r.get("ic"), 2, " L/min/m²")
-    rvs = fmt(r.get("irv"), 0, " dyn·s·cm⁻⁵")
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    fc = limpiar_numero(r.get("fc"))
-    pam = None
-    map_hr_txt = "No disponible"
-    if pas is not None and pad is not None:
-        pam = pad + (pas - pad) / 3.0
-    if pam is not None and fc not in [None, 0]:
-        map_hr_txt = fmt(pam / fc, 2)
-    if contexto.get("embarazada"):
-        return f"Clasificación dinámica obligatoria: {clase}. Base: IC {ic}, RVS/IRV {rvs}, relación PAM/FC {map_hr_txt}. En embarazo se informa la hemodinamia basal ACOSTADO/CINTA; los datos obstétricos se integran como contexto clínico sin cambiar el patrón si IC e IRV/RVS están en rango normal."
-    return f"Clasificación dinámica obligatoria: {clase}. Base: IC {ic}, RVS/IRV {rvs}."
-
-def diagnostico_volemia(cft: Any, cftnr: Any) -> str:
-    """Clasificación volémica obligatoria en tres categorías clínicas.
-
-    Salida deliberadamente concisa: NORMOVOLEMIA, HIPOVOLEMIA o HIPERVOLEMIA.
-    Se informa la base objetiva con CFT/CFTnr para trazabilidad del informe.
-    """
-    cftv = limpiar_numero(cft)
-    cftnrv = limpiar_numero(cftnr)
-    base = f" Base: CFT {fmt(cftv, 2)}; CFTnr {fmt(cftnrv, 2)}."
-    if cftv is None and cftnrv is None:
-        return "VOLEMIA NO CLASIFICABLE: faltan CFT y CFTnr."
-    alto = (cftv is not None and cftv > 35) or (cftnrv is not None and cftnrv > 35)
-    bajo = (cftv is not None and cftv < 25) or (cftnrv is not None and cftnrv < 25)
-    if alto:
-        return "HIPERVOLEMIA." + base
-    if bajo:
-        return "HIPOVOLEMIA." + base
-    return "NORMOVOLEMIA." + base
-
-
-def diagnostico_contractilidad(iv: Any, iac: Any, cts: Any) -> str:
-    ivv, iacv, ctsv = map(limpiar_numero, [iv, iac, cts])
-    disponibles = [v for v in [ivv, iacv, ctsv] if v is not None]
-    if not disponibles:
-        return "CONTRACTILIDAD: datos insuficientes para definir resultado."
-
-    aumentada = 0
-    disminuida = 0
-    if ivv is not None:
-        aumentada += ivv > 60
-        disminuida += ivv < 35
-    if iacv is not None:
-        aumentada += iacv > 1.2
-        disminuida += iacv < 0.6
-    if ctsv is not None:
-        disminuida += ctsv > 0.45
-        aumentada += ctsv < 0.30
-
-    if aumentada > disminuida and aumentada >= 2:
-        return "Contractilidad aumentada por predominio de parámetros sistólicos elevados."
-    if disminuida > aumentada and disminuida >= 2:
-        return "Contractilidad disminuida por predominio de parámetros sistólicos reducidos."
-    return "Contractilidad conservada o sin alteración predominante."
-
-
-def diagnostico_acoplamiento(ea: Any, ees: Any, ava: Any = None) -> str:
-    eav, eesv, avav = map(limpiar_numero, [ea, ees, ava])
-    if avav is None and eav is not None and eesv not in [None, 0]:
-        avav = eav / eesv
-    if avav is None:
-        return "ACOPLAMIENTO VENTRÍCULO-ARTERIAL: datos insuficientes para definir resultado."
-
-    if 0 <= avav <= 1.0:
-        return f"Acoplamiento ventrículo-arterial óptimo. Relación EA/EES: {fmt(avav)}."
-    if 1.0 < avav <= 1.3:
-        return f"Acoplamiento ventrículo-arterial en rango de precaución. Relación EA/EES: {fmt(avav)}. Sugiere incremento relativo de la carga arterial o menor reserva ventricular."
-    if avav > 1.3:
-        return f"Desacoplamiento ventrículo-arterial. Relación EA/EES: {fmt(avav)}. Se asocia a mayor estrés hemodinámico y riesgo de insuficiencia cardíaca, según el contexto clínico."
-
-    return f"Relación EA/EES fuera de rango fisiológico esperado: {fmt(avav)}. Revisar datos fuente."
-
-
-def _valor_fila_case_insensitive(fila: Dict[str, Any], *claves: str) -> Any:
-    """Busca valores de una fila sin depender de mayúsculas/minúsculas ni del nombre exacto.
-
-    Corrección crítica para ortostatismo:
-    - IC puede venir como IC, ic, Índice Cardíaco, Cardiac Index o CI.
-    - IRV puede venir como IRV, RVS, SVR o Resistencia Vascular Sistémica.
-    - Evita que el delta quede artificialmente en 0 por no encontrar la clave correcta.
-    """
-    if not fila:
-        return None
-
-    mapa = {normalizar_txt(k).replace(" ", "_"): v for k, v in fila.items()}
-
-    for clave in claves:
-        k = normalizar_txt(clave).replace(" ", "_")
-        if k in mapa and es_valor_util(mapa[k]):
-            return mapa[k]
-
-    equivalencias = {
-        "ic": ["ic", "indice_cardiaco", "índice_cardíaco", "cardiac_index", "ci"],
-        "irv": ["irv", "rvs", "svr", "resistencia_vascular_sistemica", "resistencia_vascular_sistémica"],
-        "rvs": ["irv", "rvs", "svr", "resistencia_vascular_sistemica", "resistencia_vascular_sistémica"],
-        "fc": ["fc", "frecuencia_cardiaca", "frecuencia_cardíaca", "heart_rate", "hr"],
-        "pas": ["pas", "sistolica", "sistólica", "sbp", "sys"],
-        "pad": ["pad", "diastolica", "diastólica", "dbp", "dia"],
-        "ca": ["ca", "complacencia_arterial", "arterial_compliance"],
-        "cft": ["cft", "tfc", "contenido_de_fluidos_toracicos", "contenido_de_fluidos_torácicos"],
-        "cftnr": ["cftnr", "cft_nr", "cft_normalizado", "thoracic_fluid_index", "tfi"],
-    }
-
-    for clave in claves:
-        ck = normalizar_txt(clave).replace(" ", "_")
-        for alt in equivalencias.get(ck, []):
-            alt_n = normalizar_txt(alt).replace(" ", "_")
-            if alt_n in mapa and es_valor_util(mapa[alt_n]):
-                return mapa[alt_n]
-
-    return None
-
-
-def extraer_resumen_ortostatico_desde_fila(fila: pd.Series) -> Dict[str, Any]:
-    """Extrae métricas directamente de UNA fila real.
-
-    No usa extraer_resumen_integrado(), porque esa función puede volver a seleccionar
-    el registro basal y hacer que acostado y de pie queden iguales.
-    """
-    d = fila.to_dict()
-    return {
-        "paciente": _valor_fila_case_insensitive(d, "Paciente", "paciente"),
-        "posicion": detectar_posicion_fila(d),
-        "metodo": detectar_metodo_fila(d),
-        "ic": limpiar_numero(_valor_fila_case_insensitive(d, "IC", "ic", "indice cardiaco", "cardiac index", "ci")),
-        "irv": limpiar_numero(_valor_fila_case_insensitive(d, "IRV", "RVS", "SVR", "irv", "rvs")),
-        "fc": limpiar_numero(_valor_fila_case_insensitive(d, "FC", "fc", "frecuencia cardiaca", "heart rate")),
-        "pas": limpiar_numero(_valor_fila_case_insensitive(d, "PAS", "pas")),
-        "pad": limpiar_numero(_valor_fila_case_insensitive(d, "PAD", "pad")),
-        "ca": limpiar_numero(_valor_fila_case_insensitive(d, "CA", "ca")),
-        "cft": limpiar_numero(_valor_fila_case_insensitive(d, "CFT", "cft")),
-        "cftnr": limpiar_numero(_valor_fila_case_insensitive(d, "CFTnr", "cftnr")),
-    }
-
-
-def obtener_resumenes_ortostaticos(df: pd.DataFrame) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Devuelve resumen basal/acostado y de pie con selección real de filas.
-
-    Basal:
-    1) CINTA no-de-pie.
-    2) Acostado/decúbito.
-    3) Cualquier fila no-de-pie.
-
-    De pie:
-    - Solo fila reconocida explícitamente como de pie.
-
-    Corrección crítica:
-    no se reintegra cada sub-DataFrame, para evitar que el registro basal sea reutilizado
-    como registro de pie y genere ΔIC = 0 o ΔIRV = 0 artificial.
-    """
-    if df is None or df.empty:
-        return {}, {}
-
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    if dfx.empty:
-        return {}, {}
-
-    dfx["Posición_reconocida"] = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    dfx["Método_reconocido"] = [detectar_metodo_fila(f.to_dict()) for _, f in dfx.iterrows()]
-
-    basal = dfx[(dfx["Método_reconocido"] == "cinta") & (dfx["Posición_reconocida"] != "de_pie")]
-
-    if basal.empty:
-        basal = dfx[dfx["Posición_reconocida"] == "acostado"]
-
-    if basal.empty:
-        basal = dfx[dfx["Posición_reconocida"] != "de_pie"]
-
-    pie = dfx[dfx["Posición_reconocida"] == "de_pie"]
-
-    r_basal = extraer_resumen_ortostatico_desde_fila(basal.iloc[0]) if not basal.empty else {}
-    r_pie = extraer_resumen_ortostatico_desde_fila(pie.iloc[-1]) if not pie.empty else {}
-
-    return r_basal, r_pie
-
-
-def calcular_delta_ortostatico(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calcula deltas ortostáticos como: valor de pie - valor basal/acostado."""
-    r1, r2 = obtener_resumenes_ortostaticos(df)
-
-    resultado = {
-        "basal": r1,
-        "de_pie": r2,
-        "delta_ic": None,
-        "delta_irv": None,
-        "delta_fc": None,
-        "delta_pas": None,
-        "delta_pad": None,
-        "detalle": "",
-    }
-
-    pares = [
-        ("ic", "delta_ic", "IC", "L/min/m²"),
-        ("irv", "delta_irv", "IRV/RVS", "dyn·s·cm⁻⁵"),
-        ("fc", "delta_fc", "FC", "lpm"),
-        ("pas", "delta_pas", "PAS", "mmHg"),
-        ("pad", "delta_pad", "PAD", "mmHg"),
-    ]
-
-    partes = []
-    for key, out_key, nombre, unidad in pares:
-        v1 = limpiar_numero(r1.get(key))
-        v2 = limpiar_numero(r2.get(key))
-        if v1 is None or v2 is None:
-            continue
-        delta = v2 - v1
-        resultado[out_key] = delta
-        partes.append(f"{nombre}: basal {fmt(v1)} → de pie {fmt(v2)}; Δ {fmt(delta)} {unidad}")
-
-    resultado["detalle"] = " | ".join(partes) if partes else "No se pudieron calcular deltas ortostáticos por datos insuficientes."
-    return resultado
-
-
-def definir_patron_ortostatico(delta: Dict[str, Any]) -> str:
-    """Define un patrón de comportamiento ortostático claro y breve."""
-    dic = limpiar_numero(delta.get("delta_ic"))
-    dirv = limpiar_numero(delta.get("delta_irv"))
-    dfc = limpiar_numero(delta.get("delta_fc"))
-    dpas = limpiar_numero(delta.get("delta_pas"))
-
-    if dic is None and dirv is None and dfc is None:
-        return "PATRÓN ORTOSTÁTICO NO CLASIFICABLE"
-
-    caida_pas = dpas is not None and dpas <= -20
-    taquicardia = dfc is not None and dfc >= 30
-    bajo_flujo = dic is not None and dic <= -0.20
-    alto_flujo = dic is not None and dic >= 0.20
-    vasoconstriccion = dirv is not None and dirv >= 100
-    vasodilatacion = dirv is not None and dirv <= -100
-
-    if caida_pas or taquicardia:
-        return "PATRÓN ORTOSTÁTICO ALTERADO"
-    if bajo_flujo and vasoconstriccion:
-        return "PATRÓN ORTOSTÁTICO HIPODINÁMICO"
-    if alto_flujo and vasodilatacion:
-        return "PATRÓN ORTOSTÁTICO HIPERDINÁMICO"
-    if bajo_flujo:
-        return "PATRÓN ORTOSTÁTICO CON CAÍDA DE FLUJO"
-    if vasodilatacion:
-        return "PATRÓN ORTOSTÁTICO VASODILATADOR"
-    if vasoconstriccion:
-        return "PATRÓN ORTOSTÁTICO VASOCONSTRICTOR COMPENSADO"
-    return "PATRÓN ORTOSTÁTICO CONSERVADO"
-
-
-def descripcion_patron_ortostatico(patron: str) -> str:
-    """Descripción clínica breve para incorporar el significado del patrón en la conclusión."""
-    p = normalizar_txt(patron)
-    if "no clasificable" in p:
-        return "No hay datos comparables suficientes para definir la respuesta al cambio postural."
-    if "hipodinamico" in p or "caida de flujo" in p:
-        return "Respuesta con caída o incremento insuficiente del índice cardíaco en bipedestación; sugiere menor reserva hemodinámica o menor volumen efectivo circulante."
-    if "hiperdinamico" in p:
-        return "Respuesta con aumento exagerado del índice cardíaco o del volumen minuto en bipedestación; sugiere activación simpática aumentada o compensación circulatoria intensa."
-    if "vasodilatador" in p:
-        return "Respuesta con caída o aumento insuficiente de la resistencia vascular sistémica al ponerse de pie; sugiere vasoconstricción periférica inadecuada o vasodilatación relativa."
-    if "vasoconstrictor" in p:
-        return "Respuesta con aumento predominante de la resistencia vascular sistémica, manteniendo compensación tensional y perfusional."
-    if "alterado" in p:
-        return "Respuesta ortostática no fisiológica o insuficientemente compensada, por caída tensional, taquicardia marcada o combinación de respuestas desadaptativas."
-    if "conservado" in p:
-        return "Respuesta fisiológica adecuada al pasar de decúbito a bipedestación, con compensación cardiovascular preservada."
-    return "Patrón definido por la integración de índice cardíaco, resistencia vascular sistémica, frecuencia cardíaca y presión arterial durante el cambio postural."
-
-
-def interpretar_ortostatismo(df: pd.DataFrame) -> str:
-    if df is None or len(df) < 2:
-        return "No aplicable: se requieren dos registros comparables, basal/acostado y de pie."
-
-    d = calcular_delta_ortostatico(df)
-    if not d.get("detalle") or "No se pudieron" in d.get("detalle", ""):
-        return d.get("detalle", "No se pudo definir el análisis ortostático automático por datos insuficientes.")
-
-    patron = definir_patron_ortostatico(d)
-    descripcion = descripcion_patron_ortostatico(patron)
-    return f"<b>{patron}</b>. <b>Significado clínico:</b> {descripcion} <b>Cambios observados:</b> {d['detalle']}."
-
-
-def texto_patron_hemodinamico_acostado_y_de_pie(df: pd.DataFrame, contexto: Optional[Dict[str, Any]] = None) -> str:
-    """Diferencia el patrón hemodinámico de referencia del patrón en bipedestación.
-
-    Regla clínica solicitada:
-    - El patrón diagnóstico de referencia es el registro ACOSTADO/CINTA.
-    - El registro DE PIE describe la respuesta ortostática y no reemplaza el diagnóstico basal.
-    - Ambos se expresan solo como HIPODINAMIA, NORMODINAMIA o HIPERDINAMIA.
-    """
-    contexto = contexto or {}
-    r_basal, r_pie = obtener_resumenes_ortostaticos(df)
-
-    def linea(r_local: Dict[str, Any], titulo: str, referencia: bool = False) -> str:
-        if not r_local:
-            return f"- **{titulo}:** no disponible por falta de registro reconocible."
-        clase = clasificacion_dinamica_obligatoria(r_local, contexto).upper()
-        metodo = str(r_local.get("metodo") or "no reconocido").upper()
-        posicion = str(r_local.get("posicion") or "no reconocida").replace("_", " ").upper()
-        suf = " Referencia diagnóstica principal." if referencia else " Registro usado para respuesta ortostática; no reemplaza al patrón basal."
-        return (
-            f"- **{titulo}: {clase}.** "
-            f"IC {fmt(r_local.get('ic'), 2, ' L/min/m²')}; "
-            f"IRV/RVS {fmt(r_local.get('irv'), 0, ' dyn·s·cm⁻⁵')}; "
-            f"método {metodo}; posición {posicion}.{suf}"
-        )
-
-    lineas = [
-        "**El patrón hemodinámico de referencia es el basal/acostado o CINTA.** El registro de pie se informa por separado para caracterizar la adaptación ortostática.",
-        linea(r_basal, "Patrón hemodinámico ACOSTADO/CINTA", referencia=True),
-        linea(r_pie, "Patrón hemodinámico DE PIE", referencia=False),
-    ]
-    return "\n".join(lineas)
-
-
-# =========================================================
-# GRÁFICOS Y DOMINIOS HEMODINÁMICOS
-# =========================================================
-
-def score_dominio(valor: Any, bajo: float, alto: float, invertido: bool = False) -> Optional[float]:
-    v = limpiar_numero(valor)
-    if v is None:
-        return None
-    if bajo <= v <= alto:
-        s = 1.0
-    elif v < bajo:
-        s = max(0.0, v / bajo) if bajo else 0.0
-    else:
-        s = max(0.0, 1.0 - ((v - alto) / alto)) if alto else 0.0
-    if invertido:
-        s = 1.0 - s
-    return max(0.0, min(1.0, s))
-
-
-def evaluar_dominio_ortostatico(df: pd.DataFrame) -> Dict[str, Any]:
-    if df is None or len(df) < 2:
-        return {
-            "score": None,
-            "estado": "No disponible",
-            "detalle": "Dominio ortostático no evaluable: se requieren dos registros comparables.",
-        }
-
-    d = calcular_delta_ortostatico(df)
-
-    cambios = []
-    scores = []
-
-    reglas = [
-        ("IC", "delta_ic", 0.20, 1.00, "L/min/m²"),
-        ("IRV/RVS", "delta_irv", 100, 800, "dyn·s·cm⁻⁵"),
-        ("FC", "delta_fc", 3, 30, "lpm"),
-    ]
-
-    for nombre, key, limite_adecuado, limite_alterado, unidad in reglas:
-        delta = limpiar_numero(d.get(key))
-        if delta is None:
-            continue
-
-        cambios.append(f"Δ{nombre}: {fmt(delta)} {unidad}")
-        abs_delta = abs(delta)
-
-        if abs_delta <= limite_adecuado:
-            scores.append(1.0)
-        elif abs_delta >= limite_alterado:
-            scores.append(0.25)
-        else:
-            scores.append(0.65)
-
-    if not scores:
-        return {
-            "score": None,
-            "estado": "No disponible",
-            "detalle": "Dominio ortostático no evaluable por ausencia de IC/IRV/FC comparables entre basal y de pie.",
-        }
-
-    score = sum(scores) / len(scores)
-    patron = definir_patron_ortostatico(d)
-
-    descripcion = descripcion_patron_ortostatico(patron)
-
-    return {
-        "score": score,
-        "estado": patron,
-        "detalle": patron + ". " + descripcion + " Cambios: " + " | ".join(cambios),
-    }
-
-
-def evaluar_dominios_hemodinamicos(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Dict[str, Any]]:
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    iv = limpiar_numero(r.get("iv"))
-    iac = limpiar_numero(r.get("iac"))
-    cts = limpiar_numero(r.get("cts"))
-    ava = limpiar_numero(r.get("ava"))
-    ea = limpiar_numero(r.get("ea"))
-    ees = limpiar_numero(r.get("ees"))
-    if ava is None and ea is not None and ees not in [None, 0]:
-        ava = ea / ees
-
-    s_ic = score_dominio(ic, 2.5, 4.0)
-    s_irv = score_dominio(irv, 1200, 2000)
-    scores_funcion = [x for x in [s_ic, s_irv] if x is not None]
-    score_funcion = sum(scores_funcion) / len(scores_funcion) if scores_funcion else None
-
-    s_iv = score_dominio(iv, 35, 60)
-    s_iac = score_dominio(iac, 0.6, 1.2)
-    s_cts = score_dominio(cts, 0.30, 0.45)
-    scores_contractilidad = [x for x in [s_iv, s_iac, s_cts] if x is not None]
-    score_contractilidad = sum(scores_contractilidad) / len(scores_contractilidad) if scores_contractilidad else None
-
-    s_cft = score_dominio(cft, 25, 35)
-    s_cftnr = score_dominio(cftnr, 25, 35)
-    scores_volemia = [x for x in [s_cft, s_cftnr] if x is not None]
-    score_volemia = sum(scores_volemia) / len(scores_volemia) if scores_volemia else None
-
-    if ava is None:
-        score_acoplamiento = None
-    elif 0 <= ava <= 1:
-        score_acoplamiento = 1.0
-    elif 1 < ava <= 1.3:
-        score_acoplamiento = 0.65
-    else:
-        score_acoplamiento = 0.25
-
-    def estado(score: Optional[float]) -> str:
-        if score is None:
-            return "No disponible"
-        if score >= 0.80:
-            return "Conservado"
-        if score >= 0.50:
-            return "Precaución clínica"
-        return "Alterado"
-
-    dominios = {
-        "Función circulatoria": {
-            "score": score_funcion,
-            "estado": estado(score_funcion),
-            "detalle": diagnostico_perfil_hemodinamico(ic, irv),
-        },
-        "Contractilidad": {
-            "score": score_contractilidad,
-            "estado": estado(score_contractilidad),
-            "detalle": diagnostico_contractilidad(iv, iac, cts),
-        },
-        "Volemia": {
-            "score": score_volemia,
-            "estado": estado(score_volemia),
-            "detalle": diagnostico_volemia(cft, cftnr),
-        },
-        "Rendimiento CV / VA": {
-            "score": score_acoplamiento,
-            "estado": estado(score_acoplamiento),
-            "detalle": diagnostico_acoplamiento(ea, ees, ava),
-        },
-    }
-    dominios["Dominio ortostático"] = evaluar_dominio_ortostatico(df) if df is not None else {
-        "score": None,
-        "estado": "No disponible",
-        "detalle": "Dominio ortostático no evaluable: se requieren dos registros comparables.",
-    }
-    return dominios
-
-
-def perfil_hemodinamico_integrado(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> str:
-    perfil = diagnostico_perfil_hemodinamico(r.get("ic"), r.get("irv"))
-    volemia = diagnostico_volemia(r.get("cft"), r.get("cftnr"))
-    contractilidad = diagnostico_contractilidad(r.get("iv"), r.get("iac"), r.get("cts"))
-    acoplamiento = diagnostico_acoplamiento(r.get("ea"), r.get("ees"), r.get("ava"))
-    ortostatico = evaluar_dominio_ortostatico(df) if df is not None else None
-
-    dominios = evaluar_dominios_hemodinamicos(r, df)
-    scores = [d["score"] for d in dominios.values() if d.get("score") is not None]
-    score_global = sum(scores) / len(scores) if scores else None
-
-    if score_global is None:
-        categoria = "perfil hemodinámico integrado con datos insuficientes para definir resultado"
-    elif score_global >= 0.80:
-        categoria = "patrón de referencia ACOSTADO/CINTA conservado"
-    elif score_global >= 0.50:
-        categoria = "patrón de referencia ACOSTADO/CINTA con variables en precaución clínica"
-    else:
-        categoria = "patrón de referencia ACOSTADO/CINTA con alteración hemodinámica"
-
-    texto_orto = ""
-    if ortostatico is not None:
-        texto_orto = f" Dominio ortostático: {ortostatico.get('detalle', '')}"
-
-    texto_posicion = ""
-    if df is not None:
-        texto_posicion = " " + re.sub(r"\s+", " ", texto_patron_hemodinamico_acostado_y_de_pie(df, None)).strip()
-
-    return (
-        f"Integración global: {categoria}. "
-        f"Función circulatoria: {perfil} "
-        f"Volemia: {volemia} "
-        f"Contractilidad: {contractilidad} "
-        f"Rendimiento cardiovascular/acoplamiento: {acoplamiento}"
-        f"{texto_posicion}"
-        f"{texto_orto}"
-    )
-
-
-
-# =========================================================
-# SEMAFORIZACION DE ACELERADORES CIRCULARES
-# =========================================================
-
-def referencia_metrica(nombre: str) -> Optional[Tuple[float, float, str]]:
-    """Rangos clínicos de referencia para construir y semaforizar gauges.
-
-    Devuelve: limite_bajo_normal, limite_alto_normal, unidad.
-    """
-    n = normalizar_txt(nombre).replace(" ", "").replace("_", "")
-    refs = {
-        "pas": (90, 139, "mmHg"),
-        "pad": (60, 89, "mmHg"),
-        "fc": (60, 100, "lpm"),
-        "ic": (2.5, 4.0, "L/min/m²"),
-        "irv": (1200, 2000, "dyn·s·cm⁻⁵"),
-        "rvs": (1200, 2000, "dyn·s·cm⁻⁵"),
-        "ca": (1.0, 3.0, "mL/mmHg"),
-        "cft": (25, 35, "1/kΩ"),
-        "cftnr": (25, 35, "1/kΩ/m²"),
-        "ih": (10, 30, "Ω/s²"),
-        "iv": (35, 60, "1/s"),
-        "iac": (0.6, 1.2, "1/s²"),
-        "cts": (0.30, 0.45, "relación"),
-        "ea": (0.5, 2.2, "mmHg/mL"),
-        "ees": (1.0, 4.0, "mmHg/mL"),
-        "ea/ees": (0.0, 1.0, "relación"),
-        "ava": (0.0, 1.0, "relación"),
-        "ds": (50, 100, "mL/lat"),
-        "ids": (30, 55, "mL/lat/m²"),
-        "z0": (20, 35, "Ω"),
-    }
-    if n in refs:
-        return refs[n]
-    return None
-
-
-def estado_semaforo_metrica(nombre: str, valor: Any) -> Tuple[str, str, str]:
-    """Clasifica una métrica para el acelerador.
-
-    Retorna: estado clínico, color principal, zona textual.
-    Verde = normal/favorable; amarillo = en rango de precaución/intermedio; rojo = alterado.
-    """
-    v = limpiar_numero(valor)
-    ref = referencia_metrica(nombre)
-    if v is None or ref is None:
-        return "No disponible", "#64748B", "sin dato"
-    bajo, alto, _unidad = ref
-    n = normalizar_txt(nombre).replace(" ", "").replace("_", "")
-
-    # Métricas donde estar por debajo también es patológico relevante.
-    bajo_rojo = {"ic", "ca", "ih", "iv", "iac", "ds", "ids", "ees"}
-    alto_rojo = {"pas", "pad", "fc", "irv", "rvs", "cft", "cftnr", "cts", "ea", "ea/ees", "ava", "z0"}
-
-    if bajo <= v <= alto:
-        return "NORMAL / FAVORABLE", "#10B981", "normal"
-
-    # Zona amarilla: desviación leve hasta 15% del rango/referencia; zona roja: desviación mayor.
-    ancho = max(alto - bajo, 1e-9)
-    margen = max(ancho * 0.50, abs(alto) * 0.15, abs(bajo) * 0.15, 0.01)
-
-    if v < bajo:
-        if n in bajo_rojo:
-            return ("BAJO - ALTERADO" if v < bajo - margen else "BAJO - PRECAUCIÓN", "#EF4444" if v < bajo - margen else "#F59E0B", "bajo")
-        return ("BAJO - PRECAUCIÓN", "#F59E0B", "bajo")
-
-    if v > alto:
-        if n in alto_rojo or n not in bajo_rojo:
-            return ("ALTO - ALTERADO" if v > alto + margen else "ALTO - PRECAUCIÓN", "#EF4444" if v > alto + margen else "#F59E0B", "alto")
-        return ("ALTO - PRECAUCIÓN", "#F59E0B", "alto")
-
-    return "No clasificable", "#64748B", "sin dato"
-
-
-def color_semaforo_por_estado(estado: Any) -> str:
-    t = normalizar_txt(estado)
-    if any(x in t for x in ["normal", "favorable", "conservado", "optimo", "óptimo", "ok", "verde"]):
-        return "#10B981"
-    if any(x in t for x in ["precaucion", "precaucion", "precaución", "intermedio", "moderado", "amarillo"]):
-        return "#F59E0B"
-    if any(x in t for x in ["alter", "patolog", "rojo", "riesgo", "bajo - alterado", "alto - alterado"]):
-        return "#EF4444"
-    return "#64748B"
-
-
-def metricas_por_dominio(r: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-    """Organiza métricas disponibles por dominio para mostrar gauges semaforizados."""
-    dominios = {
-        "Función circulatoria": ["PAS", "PAD", "FC", "IC", "IRV", "CA"],
-        "Contractilidad": ["IH", "IV", "IAC", "CTS", "DS", "IDS"],
-        "Volemia": ["CFT", "CFTnr", "Z0"],
-        "Rendimiento CV / VA": ["EA", "EES", "EA/EES"],
-    }
-    keymap = {
-        "PAS": "pas", "PAD": "pad", "FC": "fc", "IC": "ic", "IRV": "irv", "CA": "ca",
-        "CFT": "cft", "CFTnr": "cftnr", "IH": "ih", "IV": "iv", "IAC": "iac", "CTS": "cts",
-        "EA": "ea", "EES": "ees", "EA/EES": "ava", "DS": "ds", "IDS": "ids", "Z0": "z0",
-    }
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    for dominio, variables in dominios.items():
-        out[dominio] = []
-        for var in variables:
-            val = r.get(keymap.get(var, var.lower()))
-            if not es_valor_util(val):
-                continue
-            ref = referencia_metrica(var)
-            if ref is None:
-                continue
-            bajo, alto, unidad = ref
-            estado, color, zona = estado_semaforo_metrica(var, val)
-            out[dominio].append({
-                "variable": var,
-                "valor": val,
-                "referencia_baja": bajo,
-                "referencia_alta": alto,
-                "unidad": unidad,
-                "estado": estado,
-                "color": color,
-                "zona": zona,
-            })
     return out
 
+def _validate_and_repair_pac_data(data):
+    """Repara valores mal cargados por columnas pegadas del PDF y limpia etiquetas contaminantes."""
+    cand_patient = _patient_name_strict(data.get("paciente", ""))
+    data["paciente"] = cand_patient if cand_patient else ""
+    if _is_bad_patient_value(data.get("paciente", "")) or re.search(r"(?i)\b(en\s+posici[oó]n|posici[oó]n|realizado)\b", str(data.get("paciente", ""))):
+        data["paciente"] = ""
+    # Evitar que el número de estudio quede como sexo u otra etiqueta.
+    if re.fullmatch(r"(?i)(M|F)", _collapse_spaces(data.get("estudio", ""))):
+        data["estudio"] = ""
+    data["sexo"] = _normalize_sex(data.get("sexo", ""))
 
-def _valor_normalizado_acelerador(nombre: str, valor: Any) -> Optional[float]:
-    """Convierte una métrica a escala 0-100 para gauge semicircular.
-    0 = muy bajo, 50 = centro del rango normal, 100 = muy alto.
+    # Si falta PAD/PAM/PP central y hay periféricos, no inventar; solo completar PP si PAS/PAD central son reales.
+    pas_c, pad_c = to_float(data.get("pas_central")), to_float(data.get("pad_central"))
+    if (np.isnan(data.get("pp_central", np.nan)) or data.get("pp_central", 0) == 0) and not np.isnan(pas_c) and not np.isnan(pad_c) and pas_c > pad_c:
+        data["pp_central"] = pas_c - pad_c
+    pas_r, pad_r = to_float(data.get("pas_radial")), to_float(data.get("pad_radial"))
+    if (np.isnan(data.get("pp_radial", np.nan)) or data.get("pp_radial", 0) == 0) and not np.isnan(pas_r) and not np.isnan(pad_r) and pas_r > pad_r:
+        data["pp_radial"] = pas_r - pad_r
+
+    # Rango fisiológico/administrativo: si falla, dejar editable como vacío en la interfaz.
+    for k, lo, hi in [
+        ("edad", 1, 120), ("peso", 20, 250), ("altura", 80, 230), ("imc", 10, 80), ("sc", 0.5, 3.5),
+        ("pas_radial", 50, 260), ("pad_radial", 30, 160), ("pam_radial", 40, 200), ("pp_radial", 10, 120),
+        ("pas_central", 50, 260), ("pad_central", 30, 160), ("pam_central", 40, 200), ("pp_central", 10, 120),
+        ("fc", 25, 180), ("au", -80, 100), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 10, 60), ("apc", 0.2, 3.5)
+    ]:
+        v = to_float(data.get(k))
+        if np.isnan(v) or not (lo <= v <= hi):
+            data[k] = np.nan
+        else:
+            data[k] = v
+    return data
+
+
+def parse_model_pac(text):
+    """Parser robusto para PDF PAC/Exxer.
+
+    Corrige errores frecuentes de pdfplumber: etiquetas pegadas al valor, paciente cargado como
+    'Número de estudio', sexo dentro de estudio, altura/IMC mezclados y PAM/PP intercambiados.
     """
-    v = limpiar_numero(valor)
-    ref = referencia_metrica(nombre)
-    if v is None or ref is None:
-        return None
-    bajo, alto, _unidad = ref
-    if alto == bajo:
-        return None
-    centro = (bajo + alto) / 2
-    ancho = (alto - bajo) / 2
-    # 50 puntos equivalen a un semiancho del rango normal.
-    pct = 50 + ((v - centro) / ancho) * 25
-    return max(0, min(100, pct))
+    lines = [_collapse_spaces(x) for x in text.splitlines() if _collapse_spaces(x)]
+    joined = "\n".join(lines)
+    flat = _collapse_spaces(" ".join(lines))
+
+    data = {
+        "paciente": _clean_patient_name(_value_after_label(flat, [r"Paciente", r"Nombre\s+del\s+paciente"], max_chars=90)),
+        "estudio": _value_after_label(flat, [r"Estudio\s*#", r"Número\s+de\s+estudio"], max_chars=30),
+        "fecha": _value_after_label(flat, [r"Fecha"], max_chars=25),
+        "hora": _value_after_label(flat, [r"Hora"], max_chars=20),
+        "hc": _value_after_label(flat, [r"H\.C\."], max_chars=30),
+        "diagnostico_previo": _value_after_label(flat, [r"Diagnóstico", r"Diagnostico"], max_chars=80),
+        "medicacion": _value_after_label(flat, [r"Medicación", r"Medicacion"], max_chars=80),
+        "edad": _number_after_label(flat, [r"Edad"]),
+        "sexo": _normalize_sex(_value_after_label(flat, [r"Sexo"], max_chars=20)),
+        "peso": _number_after_label(flat, [r"Peso"]),
+        "altura": _number_after_label(flat, [r"Altura"]),
+        "imc": _number_after_label(flat, [r"IMC"]),
+        "sc": _number_after_label(flat, [r"SC"]),
+        "fc": _number_after_label(flat, [r"FC"]),
+    }
+
+    # Corrección prioritaria por líneas: evita que "Paciente" quede como "Número de estudio"
+    # y que "Estudio" tome "M" u otra etiqueta de la cabecera.
+    header_by_lines = _parse_header_fields_from_lines(lines)
+    header_by_regex = _extract_header_by_regex(flat)
+    for source in (header_by_lines, header_by_regex):
+        for k, v in source.items():
+            if k in ["paciente", "estudio", "fecha", "hora", "sexo"]:
+                if v not in [None, ""]:
+                    data[k] = v
+            else:
+                if not np.isnan(to_float(v)):
+                    data[k] = v
+
+    _parse_radial_central_table(flat, data)
+    _parse_central_parameters(flat, data)
+
+    # Respaldo para el patrón compacto antiguo: Radial Central 127 119 87 88 102 102 40 31.
+    if any(np.isnan(to_float(data.get(k))) for k in ["pas_radial","pas_central","pad_radial","pad_central","pam_radial","pam_central","pp_radial","pp_central"]):
+        m = re.search(r"Radial\s+Central\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", flat, re.I)
+        if m:
+            vals = list(map(float, m.groups()))
+            data.update({
+                "pas_radial": vals[0], "pas_central": vals[1],
+                "pad_radial": vals[2], "pad_central": vals[3],
+                "pam_radial": vals[4], "pam_central": vals[5],
+                "pp_radial": vals[6], "pp_central": vals[7],
+            })
+
+    for k in ["pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","au","iau","rvse","pe","apc"]:
+        data.setdefault(k, np.nan)
+
+    return _validate_and_repair_pac_data(data)
+
+def brachial_bp_category(pas, pad):
+    if np.isnan(pas) or np.isnan(pad): return "No clasificable"
+    if pas >= 180 or pad >= 110: return "Etapa 3"
+    if pas >= 160 or pad >= 100: return "Etapa 2"
+    if pas >= 140 or pad >= 90: return "Etapa 1"
+    if pas >= 130 or pad >= 85: return "Normal alta"
+    if pas >= 120 or pad >= 80: return "Normal"
+    return "Óptimo"
+
+def central_diagnosis(row):
+    cSBP = to_float(row.get("pas_central")); cPP = to_float(row.get("pp_central"));
+    pSBP = to_float(row.get("pas_radial")); pDBP = to_float(row.get("pad_radial"));
+    sex = (row.get("sexo") or "M").upper()[:1]
+    cat = brachial_bp_category(pSBP, pDBP)
+    ref = CENTRAL_SBP_TABLE.get(cat, {}).get(sex, np.nan)
+    amp_sbp = pSBP - cSBP if not np.isnan(pSBP) and not np.isnan(cSBP) else np.nan
+    ppa = (to_float(row.get("pp_radial")) / cPP) if cPP and not np.isnan(cPP) and cPP != 0 else np.nan
+    if np.isnan(cSBP):
+        dx = "No clasificable por falta de PAS central."
+    elif cSBP >= 130:
+        dx = "Hipertensión central probable / PAS aórtica central elevada."
+    elif not np.isnan(ref) and cSBP > ref:
+        dx = f"PAS central por encima del percentil 50 de referencia para la categoría braquial {cat}."
+    else:
+        dx = "Sin hipertensión central por el umbral operativo de la app."
+    risk = []
+    if not np.isnan(ppa) and ppa < 1.30: risk.append("amplificación de presión de pulso reducida (<1,30)")
+    if not np.isnan(cPP) and cPP >= 50: risk.append("presión de pulso central aumentada")
+    if not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25: risk.append("índice de aumentación elevado")
+    return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
 
 
-def _dibujar_acelerador_circular(
-    ax,
-    porcentaje: float,
-    titulo: str,
-    valor_txt: str,
-    estado: str,
-    subtitulo: str = "",
-    color_estado: Optional[str] = None,
-) -> None:
-    """Dibuja un gauge semicircular tipo tablero clínico con fondo blanco.
+def _norm01_from_value(value, low, high, default=0.5):
+    """Normaliza un valor clínico a 0-1 para modular la morfología de la onda."""
+    v = to_float(value)
+    if np.isnan(v):
+        return float(default)
+    return float(np.clip((v - low) / max(high - low, 1e-6), 0, 1))
 
-    Diseño solicitado: bandas amarillo-verde-rojo, aguja central, valor de la
-    métrica, estado clínico y rango normal, con fondo blanco para mejor lectura
-    en pantalla y PDF. Mantiene la misma firma para no romper el resto de la app.
+
+def make_waveform(row, n=512):
+    """Curva sintética fisiológica individualizada y calibrada con PAS/PAD central.
+
+    La versión previa generaba ondas demasiado parecidas porque usaba tiempos y amplitudes
+    casi fijos. Esta versión modula forma, pico sistólico, hombro, cola diastólica y contenido
+    armónico según PP central, Au, IAu, PE, FC y amplificación periférico-central.
     """
-    import numpy as np
-    import matplotlib.patches as patches
+    cSBP = to_float(row.get("pas_central"))
+    cDBP = to_float(row.get("pad_central"))
+    pp_c = to_float(row.get("pp_central"))
+    pSBP = to_float(row.get("pas_radial"))
+    pp_r = to_float(row.get("pp_radial"))
+    au = to_float(row.get("au"))
+    iau = to_float(row.get("iau"))
+    pe = to_float(row.get("pe"))
+    fc = to_float(row.get("fc"))
 
-    ax.set_aspect("equal")
-    ax.axis("off")
+    if np.isnan(cSBP) or cSBP <= 0:
+        cSBP = 120.0
+    if np.isnan(cDBP) or cDBP <= 0:
+        cDBP = 80.0
+    if cSBP <= cDBP:
+        cSBP = cDBP + (pp_c if not np.isnan(pp_c) and pp_c > 10 else 35.0)
 
-    porcentaje = max(0, min(100, float(porcentaje)))
-    estado_txt = str(estado or "").upper()
-    color_estado = color_estado or color_semaforo_por_estado(estado)
+    pp = max(cSBP - cDBP, 12.0)
+    t = np.linspace(0, 1, n)
 
-    # Fondo blanco con borde suave, apto para pantalla y PDF.
+    stiffness = _norm01_from_value(iau, 0, 45, 0.45)
+    au_rel = 0.0 if np.isnan(au) else float(np.clip(au / max(pp, 1.0), -0.25, 0.55))
+    pp_load = _norm01_from_value(pp, 25, 80, 0.45)
+    fc_load = _norm01_from_value(fc, 55, 105, 0.45)
+    pe_load = _norm01_from_value(pe, 25, 45, 0.50)
+    amp_sbp = 0.0 if np.isnan(pSBP) else float(np.clip((pSBP - cSBP) / 35.0, -0.25, 1.0))
+    ppa = np.nan
+    if not np.isnan(pp_r) and pp > 0:
+        ppa = pp_r / pp
+    amp_load = 0.5 if np.isnan(ppa) else float(np.clip((1.70 - ppa) / 0.70, 0, 1))  # menor PPA = más carga central
+
+    # Tiempos: rigidez/IAu alto => retorno más temprano y hombro más próximo al pico.
+    peak_t = 0.18 + 0.055 * (1 - fc_load) + 0.025 * (1 - pe_load)
+    peak_t = float(np.clip(peak_t, 0.16, 0.27))
+    refl_t = 0.46 - 0.13 * stiffness - 0.04 * amp_load + 0.03 * (1 - pe_load)
+    refl_t = float(np.clip(refl_t, peak_t + 0.08, 0.54))
+    notch_t = float(np.clip(0.34 + 0.18 * pe_load, 0.34, 0.58))
+
+    # Amplitudes: Au/IAu/PP/PPA modifican claramente el hombro reflejado.
+    refl_amp = 0.12 + 0.35 * stiffness + 0.20 * max(au_rel, 0) + 0.12 * pp_load + 0.10 * amp_load
+    refl_amp = float(np.clip(refl_amp, 0.08, 0.72))
+    primary_width = 0.075 + 0.04 * (1 - stiffness) + 0.015 * pe_load
+    refl_width = 0.085 + 0.07 * (1 - stiffness) + 0.025 * pe_load
+    tail_amp = 0.10 + 0.16 * (1 - stiffness) + 0.05 * (1 - pp_load)
+
+    primary = np.exp(-((t - peak_t) / primary_width) ** 2)
+    reflected = refl_amp * np.exp(-((t - refl_t) / refl_width) ** 2)
+    notch = -0.07 * (1 - stiffness) * np.exp(-((t - notch_t) / 0.040) ** 2)
+    diastolic_tail = tail_amp * np.exp(-((t - 0.70) / (0.22 + 0.07*(1-stiffness))) ** 2)
+    runoff = (0.04 + 0.07 * (1 - stiffness)) * (1 - t)
+
+    # Componente armónico leve: evita ondas idénticas cuando los parámetros son cercanos.
+    harmonic_shape = 0.018 * (pp_load - 0.5) * np.sin(2*np.pi*3*t) + 0.012 * (stiffness - 0.5) * np.sin(2*np.pi*5*t)
+
+    raw = primary + reflected + notch + diastolic_tail + runoff + harmonic_shape
+    raw = pd.Series(raw).rolling(5, center=True, min_periods=1).mean().to_numpy()
+    p = cDBP + pp * (raw - raw.min()) / max(raw.max() - raw.min(), 1e-6)
+
+    # Fijar exactamente PAD y PAS del estudio.
+    p = cDBP + (p - p.min()) * (cSBP - cDBP) / max(p.max() - p.min(), 1e-6)
+    return pd.DataFrame({"tiempo_ms": t * 1000, "presion_central_mmHg": p})
+
+def harmonic_analysis(wave_df):
+    y = wave_df.iloc[:,1].astype(float).to_numpy()
+    t = wave_df.iloc[:,0].astype(float).to_numpy()
+    y0 = y - np.mean(y)
+    fft = np.fft.rfft(y0)
+    amp = np.abs(fft) / len(y0) * 2
+    freq = np.fft.rfftfreq(len(y0), d=np.mean(np.diff(t))/1000.0)
+    df = pd.DataFrame({"frecuencia_hz": freq, "amplitud": amp})
+    df["energia_relativa_%"] = (df["amplitud"]**2) / np.sum(df["amplitud"]**2) * 100
+    df = df.iloc[1:11].reset_index(drop=True)
+    return df
+
+def _apply_professional_axes(ax, title=None, xlabel=None, ylabel=None):
+    """Aplica formato profesional homogéneo a los gráficos clínicos."""
     ax.set_facecolor("#FFFFFF")
-    card = patches.FancyBboxPatch(
-        (-1.42, -0.55), 2.84, 1.72,
-        boxstyle="round,pad=0.045,rounding_size=0.08",
-        facecolor="#FFFFFF",
-        edgecolor="#CBD5E1",
-        linewidth=1.1,
-        alpha=0.98,
-    )
-    ax.add_patch(card)
-
-    # Sombra interna sutil clara.
-    sombra = patches.FancyBboxPatch(
-        (-1.36, -0.49), 2.72, 1.60,
-        boxstyle="round,pad=0.02,rounding_size=0.07",
-        facecolor="#F8FAFC",
-        edgecolor="none",
-        alpha=0.85,
-    )
-    ax.add_patch(sombra)
-
-    # Arcos: bajo/precaución, normal, alto/alerta.
-    # El gauge ocupa el semicírculo superior de izquierda a derecha.
-    segmentos = [
-        (145, 205, "#FBBF24"),   # amarillo
-        (35, 145, "#34D399"),    # verde
-        (-25, 35, "#EF4444"),    # rojo
-    ]
-    for t1, t2, color in segmentos:
-        arco = patches.Wedge(
-            (0, 0), 0.82, t1, t2,
-            width=0.105,
-            facecolor=color,
-            edgecolor="#FFFFFF",
-            linewidth=2.0,
-            alpha=0.96,
-        )
-        ax.add_patch(arco)
-
-    # Borde externo tenue para dar lectura de tablero.
-    borde = patches.Wedge(
-        (0, 0), 0.89, -25, 205,
-        width=0.018,
-        facecolor="#64748B",
-        edgecolor="none",
-        alpha=0.35,
-    )
-    ax.add_patch(borde)
-
-    # Aguja: 0 -> izquierda, 100 -> derecha.
-    ang = np.deg2rad(205 - porcentaje * 2.30)
-    x, y = 0.67 * np.cos(ang), 0.67 * np.sin(ang)
-    ax.plot([0, x], [0, y], color="#64748B", linewidth=4.0, solid_capstyle="round", zorder=10)
-    ax.plot([0, x * 0.92], [0, y * 0.92], color="#0F172A", linewidth=1.1, alpha=0.55, zorder=11)
-    ax.add_patch(patches.Circle((0, 0), 0.070, color="#CBD5E1", zorder=12))
-    ax.add_patch(patches.Circle((0, 0), 0.030, color="#64748B", zorder=13))
-
-    # Título y textos: alto contraste.
-    ax.text(
-        -1.28, 0.94, titulo,
-        ha="left", va="center",
-        fontsize=12.5, fontweight="bold",
-        color="#0F172A",
-    )
-
-    # Estado con semaforización textual: mantiene lectura clínica rápida.
-    estado_color = color_estado
-    if "NORMAL" in estado_txt or "FAVORABLE" in estado_txt:
-        estado_color = "#34D399"
-    elif "PRECA" in estado_txt or "INTERMED" in estado_txt or "SUB" in estado_txt:
-        estado_color = "#FBBF24"
-    elif "ALTER" in estado_txt or "ALTO" in estado_txt or "BAJO" in estado_txt:
-        estado_color = "#F87171" if "PRECA" not in estado_txt else "#FBBF24"
-
-    # Línea principal: métrica, valor y estado.
-    linea_valor = f"{titulo}:  {valor_txt}"
-    ax.text(
-        -1.08, -0.30, linea_valor,
-        ha="left", va="center",
-        fontsize=9.5, fontweight="bold",
-        color="#0F172A",
-        family="monospace",
-    )
-    ax.text(
-        0.55, -0.30, f"[{estado_txt}]",
-        ha="left", va="center",
-        fontsize=9.5, fontweight="bold",
-        color=estado_color,
-        family="monospace",
-    )
-
-    if subtitulo:
-        ax.text(
-            -0.95, -0.43, subtitulo,
-            ha="left", va="center",
-            fontsize=7.6,
-            color="#475569",
-        )
-
-    ax.set_xlim(-1.48, 1.48)
-    ax.set_ylim(-0.62, 1.20)
-
-def crear_acelerador_circular_bytes(
-    porcentaje: Any,
-    titulo: str,
-    valor_txt: str,
-    estado: str,
-    subtitulo: str = "",
-    figsize: Tuple[float, float] = (4.0, 2.7),
-) -> Optional[io.BytesIO]:
-    try:
-        import matplotlib.pyplot as plt
-    except Exception:
-        return None
-    pct = limpiar_numero(porcentaje)
-    if pct is None:
-        return None
-    try:
-        fig, ax = plt.subplots(figsize=figsize)
-        _dibujar_acelerador_circular(ax, pct, titulo, valor_txt, estado, subtitulo)
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-
-
-def _puntos_fenotipado_paciente(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> List[Dict[str, Any]]:
-    """Devuelve puntos reales del paciente para el gráfico IC vs IRV/RVS.
-
-    Si hay dos registros comparables, muestra Acostado/CINTA como referencia diagnóstica y De pie como respuesta ortostática con flecha.
-    Si no, muestra el valor integrado disponible.
-    """
-    puntos: List[Dict[str, Any]] = []
-    if df is not None and isinstance(df, pd.DataFrame) and len(df) >= 2:
-        basal, pie = obtener_resumenes_ortostaticos(df)
-        for etiqueta, fuente in [("Acostado/CINTA (referencia)", basal), ("De pie (respuesta ortostática)", pie)]:
-            ic = limpiar_numero(fuente.get("ic"))
-            irv = limpiar_numero(fuente.get("irv"))
-            if ic is not None and irv is not None:
-                puntos.append({"etiqueta": etiqueta, "ic": ic, "irv": irv})
-    if not puntos:
-        ic = limpiar_numero(r.get("ic"))
-        irv = limpiar_numero(r.get("irv"))
-        if ic is not None and irv is not None:
-            puntos.append({"etiqueta": "Acostado/CINTA (referencia)", "ic": ic, "irv": irv})
-    return puntos
-
-
-def crear_grafico_fenotipado_dinamico_bytes(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Optional[io.BytesIO]:
-    """Gráfico dinámico del fenotipo circulatorio real del paciente.
-
-    Eje X: IRV/RVS. Eje Y: IC. El punto del paciente se ubica sobre zonas clínicas
-    de hipodinamia, normodinamia o hiperdinamia. Si existen mediciones basal y de pie,
-    se dibuja una flecha para mostrar el comportamiento ortostático real, pero la clasificación principal se calcula con el registro Acostado/CINTA.
-    """
-    puntos = _puntos_fenotipado_paciente(r, df)
-    if not puntos:
-        return None
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-    except Exception:
-        return None
-
-    try:
-        xs = [float(p["irv"]) for p in puntos]
-        ys = [float(p["ic"]) for p in puntos]
-        x_min = max(500, min(800, min(xs) - 350))
-        x_max = max(2400, max(xs) + 450)
-        y_min = max(1.2, min(2.0, min(ys) - 0.6))
-        y_max = max(5.0, max(ys) + 0.8)
-
-        fig, ax = plt.subplots(figsize=(15.0, 5.8))
-        ax.set_facecolor("#F8FAFC")
-
-        # Zonas clínicas. Los límites se corresponden con la clasificación usada por la app.
-        zonas = [
-            (x_min, 1200, 4.0, y_max, "#D1FAE5", "HIPERDINAMIA\nvasodilatada"),
-            (1200, 2000, 2.5, 4.0, "#E0F2FE", "NORMODINAMIA"),
-            (2000, x_max, 4.0, y_max, "#FEF3C7", "HIPERDINAMIA\ncon poscarga elevada"),
-            (x_min, 1200, y_min, 2.5, "#FDE68A", "HIPODINAMIA\ncon baja poscarga"),
-            (1200, 2000, y_min, 2.5, "#FFEDD5", "HIPODINAMIA\npor bajo flujo"),
-            (2000, x_max, y_min, 2.5, "#FECACA", "HIPODINAMIA\nvasoconstrictora"),
-            (2000, x_max, 2.5, 4.0, "#FBCFE8", "Fenotipo\nvasoconstrictor"),
-            (x_min, 1200, 2.5, 4.0, "#CCFBF1", "Tendencia\nvasodilatada"),
-        ]
-        for x0, x1, y0, y1, color, texto in zonas:
-            ax.add_patch(patches.Rectangle((x0, y0), x1-x0, y1-y0, facecolor=color, alpha=0.46, edgecolor="white", linewidth=1.5))
-            ax.text((x0+x1)/2, (y0+y1)/2, texto, ha="center", va="center", fontsize=10, color="#0F172A", fontweight="bold", alpha=0.78)
-
-        ax.axvline(1200, color="#0F172A", linewidth=1.1, linestyle="--", alpha=0.65)
-        ax.axvline(2000, color="#0F172A", linewidth=1.1, linestyle="--", alpha=0.65)
-        ax.axhline(2.5, color="#0F172A", linewidth=1.1, linestyle="--", alpha=0.65)
-        ax.axhline(4.0, color="#0F172A", linewidth=1.1, linestyle="--", alpha=0.65)
-
-        # Punto(s) reales del paciente.
-        if len(puntos) >= 2:
-            p0, p1 = puntos[0], puntos[-1]
-            ax.annotate("", xy=(p1["irv"], p1["ic"]), xytext=(p0["irv"], p0["ic"]), arrowprops=dict(arrowstyle="->", lw=2.2, color="#111827"))
-        for idx, pto in enumerate(puntos):
-            marker = "o" if idx == 0 else "s"
-            ax.scatter(pto["irv"], pto["ic"], s=165, marker=marker, color="#111827", edgecolor="#FFFFFF", linewidth=2.2, zorder=5)
-            ax.text(
-                pto["irv"] + (x_max-x_min)*0.025,
-                pto["ic"] + (y_max-y_min)*0.035,
-                f"{pto['etiqueta']}\nIC {pto['ic']:.2f} | RVS {pto['irv']:.0f}",
-                fontsize=9,
-                fontweight="bold",
-                color="#111827",
-                bbox=dict(boxstyle="round,pad=0.35", fc="#FFFFFF", ec="#CBD5E1", alpha=0.94),
-                zorder=6,
-            )
-
-        punto_referencia = puntos[0]
-        patron = diagnostico_perfil_hemodinamico(punto_referencia.get("ic"), punto_referencia.get("irv"))
-        ax.set_title("Fenotipado clínico automatizado: patrón ACOSTADO/CINTA de referencia", fontsize=14, fontweight="bold", color="#0B4F8A")
-        ax.set_xlabel("Resistencia vascular sistémica - IRV/RVS (dyn·s·cm⁻⁵)", fontsize=11, fontweight="bold")
-        ax.set_ylabel("Índice cardíaco - IC (L/min/m²)", fontsize=11, fontweight="bold")
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.grid(True, alpha=0.20)
-        ax.text(0.01, -0.18, f"Clasificación automática del patrón ACOSTADO/CINTA: {patron}", transform=ax.transAxes, fontsize=10, color="#0F172A", fontweight="bold")
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-def crear_grafico_dominios_bytes(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Optional[io.BytesIO]:
-    """Reemplaza el gráfico de barras global por gauges semicirculares por dominio."""
-    try:
-        import matplotlib.pyplot as plt
-        import math
-    except Exception:
-        return None
-
-    dominios = evaluar_dominios_hemodinamicos(r, df)
-    items = [(k, v) for k, v in dominios.items() if v.get("score") is not None]
-    if not items:
-        return None
-    try:
-        n = len(items)
-        cols = min(3, n)
-        rows = math.ceil(n / cols)
-        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 2.9 * rows))
-        if not isinstance(axes, (list, tuple)):
-            axes_flat = getattr(axes, "flat", [axes])
-        else:
-            axes_flat = axes
-        axes_flat = list(axes_flat)
-        for ax, (dominio, datos) in zip(axes_flat, items):
-            score = float(datos.get("score", 0)) * 100
-            estado = datos.get("estado", "")
-            _dibujar_acelerador_circular(ax, score, dominio, f"{score:.0f}%", estado, "Integridad del dominio")
-        for ax in axes_flat[len(items):]:
-            ax.axis("off")
-        fig.suptitle("Aceleradores circulares de integración hemodinámica", fontsize=14, fontweight="bold", color="#0B4F8A")
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-def crear_grafico_metricas_por_dominio_bytes(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Optional[io.BytesIO]:
-    """Reemplaza barras agrupadas por gauges semicirculares de métricas disponibles."""
-    grafs = crear_graficos_dominios_individuales_bytes(r)
-    if not grafs:
-        return None
-    # Devuelve el primer panel disponible para mantener compatibilidad si alguna parte antigua llama esta función.
-    return next(iter(grafs.values()))
-
-
-def crear_graficos_dominios_individuales_bytes(r: Dict[str, Any]) -> Dict[str, io.BytesIO]:
-    """Genera un panel de gauges semicirculares por dominio.
-    Cada acelerador muestra la posición de la métrica respecto de su rango de referencia.
-    """
-    try:
-        import matplotlib.pyplot as plt
-        import math
-    except Exception:
-        return {}
-
-    resultado: Dict[str, io.BytesIO] = {}
-    for dominio, items in metricas_por_dominio(r).items():
-        items = [i for i in items if i.get("referencia_baja") is not None and i.get("referencia_alta") is not None]
-        if not items:
-            continue
-        try:
-            n = len(items)
-            cols = min(3, n)
-            rows = math.ceil(n / cols)
-            fig, axes = plt.subplots(rows, cols, figsize=(4.1 * cols, 2.85 * rows))
-            axes_flat = list(getattr(axes, "flat", [axes]))
-
-            for ax, item in zip(axes_flat, items):
-                var = item["variable"]
-                val = limpiar_numero(item["valor"])
-                bajo = limpiar_numero(item.get("referencia_baja"))
-                alto = limpiar_numero(item.get("referencia_alta"))
-                unidad = item.get("unidad") or ""
-                pct = _valor_normalizado_acelerador(var, val)
-                if pct is None:
-                    ax.axis("off")
-                    continue
-                valor_txt = f"{fmt(val)} {unidad}".strip()
-                subtitulo = f"Normal: {fmt(bajo)}–{fmt(alto)} {unidad}".strip()
-                _dibujar_acelerador_circular(ax, pct, var, valor_txt, item.get("estado", ""), subtitulo, item.get("color"))
-
-            for ax in axes_flat[len(items):]:
-                ax.axis("off")
-            fig.suptitle(f"{dominio}: gauges semicirculares", fontsize=14, fontweight="bold", color="#0B4F8A")
-            plt.tight_layout()
-            buffer = io.BytesIO()
-            fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
-            plt.close(fig)
-            buffer.seek(0)
-            resultado[dominio] = buffer
-        except Exception:
-            pass
-    return resultado
-
-
-def crear_grafico_barras_bytes(labels: List[str], valores: List[Any], titulo: str) -> Optional[io.BytesIO]:
-    """Compatibilidad: donde antes había barras, ahora se muestran gauges semicirculares."""
-    try:
-        import matplotlib.pyplot as plt
-        import math
-    except Exception:
-        return None
-    pares = [(l, limpiar_numero(v)) for l, v in zip(labels, valores) if limpiar_numero(v) is not None]
-    if not pares:
-        return None
-    try:
-        max_abs = max(abs(v) for _, v in pares) or 1
-        n = len(pares)
-        cols = min(3, n)
-        rows = math.ceil(n / cols)
-        fig, axes = plt.subplots(rows, cols, figsize=(4.1 * cols, 2.85 * rows))
-        axes_flat = list(getattr(axes, "flat", [axes]))
-        for ax, (lab, val) in zip(axes_flat, pares):
-            pct = max(0, min(100, (val / max_abs) * 100))
-            _dibujar_acelerador_circular(ax, pct, str(lab), fmt(val), "Valor relativo", f"Máximo del panel: {fmt(max_abs)}")
-        for ax in axes_flat[len(pares):]:
-            ax.axis("off")
-        fig.suptitle(titulo, fontsize=14, fontweight="bold", color="#0B4F8A")
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=170, bbox_inches="tight")
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-def texto_tabla_metricas_por_dominio(r: Dict[str, Any]) -> str:
-    bloques = []
-    for dominio, items in metricas_por_dominio(r).items():
-        if not items:
-            bloques.append(f"{dominio}: sin métricas reconocidas.")
-            continue
-        partes = []
-        for item in items:
-            score = item.get("score")
-            score_txt = "sin score" if score is None else f"{score*100:.0f}%"
-            if item.get("referencia_baja") is not None and item.get("referencia_alta") is not None:
-                ref_txt = f"normal {fmt(item.get('referencia_baja'))}-{fmt(item.get('referencia_alta'))} {item.get('unidad','')}"
-                partes.append(f"{item['variable']}={fmt(item['valor'])} ({item.get('estado','')}; {ref_txt}; score {score_txt})")
-            else:
-                partes.append(f"{item['variable']}={fmt(item['valor'])} ({score_txt})")
-        bloques.append(f"{dominio}: " + "; ".join(partes) + ".")
-    return "\n".join(bloques)
-
-def crear_grafico_barras_bytes(labels: List[str], valores: List[Any], titulo: str) -> Optional[io.BytesIO]:
-    try:
-        import matplotlib.pyplot as plt
-    except Exception:
-        return None
-
-    labs, vals = [], []
-    for l, v in zip(labels, valores):
-        vv = limpiar_numero(v)
-        if vv is not None:
-            labs.append(l)
-            vals.append(vv)
-
-    if not vals:
-        return None
-
-    try:
-        fig, ax = plt.subplots(figsize=(7, 3.4))
-        ax.bar(labs, vals)
-        ax.set_title(titulo)
-        ax.set_ylabel("Valor")
-        ax.grid(axis="y", alpha=0.25)
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=170)
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-
-
-# =========================================================
-# MODULO EMBARAZO - INTERPRETACION HEMODINAMICA MATERNA
-# Basado en Ferrazzi et al., AJOG 2018: en trastornos hipertensivos del embarazo,
-# el fenotipo asociado a restriccion del crecimiento/SGA suele mostrar menor gasto/indice
-# cardiaco y mayor resistencia vascular total; el fenotipo AGA puede presentar gasto/IC
-# conservado o elevado con resistencia menor o intermedia. La obesidad puede elevar el gasto.
-# =========================================================
-
-def construir_contexto_embarazo(
-    embarazada: bool = False,
-    edad_gestacional: Optional[Any] = None,
-    hdp: bool = False,
-    crecimiento_fetal: str = "No informado",
-    imc: Optional[Any] = None,
-    doppler_uterino: str = "No informado",
-    diagnostico_textual: Optional[Any] = None,
-) -> Dict[str, Any]:
-    return {
-        "embarazada": bool(embarazada),
-        "edad_gestacional": edad_gestacional,
-        "hdp": bool(hdp),
-        "crecimiento_fetal": crecimiento_fetal or "No informado",
-        "imc": imc,
-        "doppler_uterino": doppler_uterino or "No informado",
-        "diagnostico_textual": diagnostico_textual,
-    }
-
-
-
-def texto_total_dataframe(df: pd.DataFrame) -> str:
-    """Concatena todo el texto disponible del/los PDF o archivos importados."""
-    try:
-        return " ".join(str(x) for x in df.astype(str).values.flatten())
-    except Exception:
-        return ""
-
-
-
-def extraer_edad_gestacional_desde_texto(texto: Any) -> Optional[int]:
-    """
-    Reconoce edad gestacional en formatos habituales del campo Diagnóstico Z-Logic:
-    S30, S 30, S30+4, SG30, EG 30, semana 30, 30 semanas, EMB S20, HTA Y EMB S18.
-    Devuelve semanas completas como entero. No interpreta la edad cronológica de la paciente.
-    """
-    raw = str(texto or "")
-    if not raw.strip():
-        return None
-
-    # Versión normalizada, conservando separadores útiles.
-    t = normalizar_txt(raw)
-    t = re.sub(r"[\n\r\t|;]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    t_sp = f" {t} "
-
-    def valido(x: Any) -> Optional[int]:
-        try:
-            v = int(float(str(x).replace(",", ".")))
-            return v if 4 <= v <= 43 else None
-        except Exception:
-            return None
-
-    patrones_prioritarios = [
-        # Diagnóstico/embarazo/HTA cerca de Sxx: "Diagnóstico HTA Y EMB S30"
-        r"\b(?:diagnostico|dx|hta|hdp|emb|embarazo|embarazada|gestante|gestacion|gesta|preeclampsia|eclampsia|hellp)\b.{0,100}?\bs\s*[:=\-]?\s*(\d{1,2})(?:\s*[+\-]\s*\d{1,2})?\b",
-        # Abreviaturas específicas: S30, S 30, SG30, EG30, EG: 30
-        r"\b(?:s|sg|eg)\s*[:=\-]?\s*(\d{1,2})(?:\s*[+\-]\s*\d{1,2})?\b",
-        # Texto explícito: semana 30, edad gestacional 30, gestación 30 semanas
-        r"\b(?:edad\s+gestacional|semanas?\s+de\s+gestacion|semana|semanas|sem|gestacion|gestacional)\s*[:=\-]?\s*(\d{1,2})(?:\s*[+\-]\s*\d{1,2})?\b",
-        # Formato inverso: 30 semanas / 30 sem / 30 semanas de gestación
-        r"\b(\d{1,2})(?:\s*[+\-]\s*\d{1,2})?\s*(?:sem|semanas?|semanas?\s+de\s+gestacion)\b",
-        # Abreviado: EMB30 / GESTA30, menos frecuente.
-        r"\b(?:emb|gesta|gestante)\s*[:=\-]?\s*(\d{1,2})(?:\s*[+\-]\s*\d{1,2})?\b",
-    ]
-
-    for pat in patrones_prioritarios:
-        for m in re.finditer(pat, t_sp):
-            v = valido(m.group(1))
-            if v is not None:
-                return v
-
-    return None
-
-
-def detectar_contexto_embarazo_desde_texto(texto: Any) -> Dict[str, Any]:
-    """
-    Detecta expresiones clínicas abreviadas frecuentes de Z-Logic/PDF.
-    Ejemplos:
-    - "HTA Y EMB S30" -> embarazada=True, hdp=True, edad_gestacional=30
-    - "HTA EMB S20"   -> embarazada=True, hdp=True, edad_gestacional=20
-    - "EMB S18"       -> embarazada=True, edad_gestacional=18
-    - "S9" con contexto EMB/GESTA -> embarazada=True, edad_gestacional=9
-    - "PREECLAMPSIA S28" -> embarazada=True, hdp=True, edad_gestacional=28
-    """
-    raw = str(texto or "")
-    t = normalizar_txt(raw)
-    t = re.sub(r"[\n\r\t|;]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    t_sp = f" {t} "
-
-    # Detectores de embarazo: EMB, embarazo, gestante, gesta, gestación o una semana Sxx junto a contexto obstétrico.
-    embarazo = bool(re.search(r"\b(emb|embarazo|embarazada|gestante|gestacion|gestacional|gravida|gesta)\b", t_sp))
-    hdp = bool(re.search(r"\b(hta|hipertension|hipertensiva|hipertensivo|preeclampsia|pre\s*eclampsia|eclampsia|hellp|hdp)\b", t_sp))
-
-    if re.search(r"\b(preeclampsia|pre\s*eclampsia|eclampsia|hellp|hta\s+gestacional|hipertension\s+gestacional|hdp)\b", t_sp):
-        embarazo = True
-        hdp = True
-
-    semana = extraer_edad_gestacional_desde_texto(raw)
-    if semana is not None:
-        # S30/S20/S18/S9 son edad gestacional. Si aparece junto a HTA/EMB/diagnóstico obstétrico, activa embarazo.
-        if embarazo or hdp or re.search(r"\b(diagnostico|dx|gesta|emb|preeclampsia|hdp|hta)\b", t_sp):
-            embarazo = True
-        else:
-            # Si solo aparece Sxx aislado en un PDF CGI, no forzar embarazo para evitar falsos positivos.
-            embarazo = embarazo
-
-    crecimiento = "No informado"
-    if re.search(r"\b(sga|rciu|fgr|iugr|restriccion|pequeno\s+para\s+edad\s+gestacional|bajo\s+peso|p\s*<\s*10|percentil\s*<\s*10)\b", t_sp):
-        crecimiento = "SGA / RCIU / FGR / IUGR"
-    elif re.search(r"\b(aga|adecuado\s+para\s+edad\s+gestacional|crecimiento\s+adecuado|peso\s+adecuado)\b", t_sp):
-        crecimiento = "AGA / adecuado para edad gestacional"
-    elif re.search(r"\b(lga|grande\s+para\s+edad\s+gestacional|macrosomia)\b", t_sp):
-        crecimiento = "Grande para edad gestacional"
-
-    doppler = "No informado"
-    if re.search(r"\b(doppler|uterina|uterino|ip\s+uterina|pulsatilidad)\b", t_sp):
-        if re.search(r"\b(alterado|aumentado|patologico|notch|notching|incisura)\b", t_sp):
-            doppler = "Índice de pulsatilidad aumentado / alterado"
-        elif re.search(r"\b(normal|conservado)\b", t_sp):
-            doppler = "Normal"
-
-    frag = raw[:500]
-    mfrag = re.search(r"(?i)(diagn[oó]stico.{0,180}|hta.{0,140}|emb.{0,140}|embaraz.{0,140}|gesta.{0,140}|preeclampsia.{0,140})", raw)
-    if mfrag:
-        frag = mfrag.group(0)[:500]
-
-    return {
-        "embarazada": embarazo,
-        "hdp": hdp,
-        "edad_gestacional": semana,
-        "crecimiento_fetal": crecimiento,
-        "doppler_uterino": doppler,
-        "diagnostico_textual": frag,
-    }
-
-def sospecha_embarazo_por_texto(df: pd.DataFrame) -> bool:
-    info = detectar_contexto_embarazo_desde_texto(texto_total_dataframe(df))
-    return bool(info.get("embarazada"))
-
-
-def interpretar_hemodinamica_embarazo(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    contexto = contexto or {}
-    if not contexto.get("embarazada", False):
-        return "No aplicable: paciente no marcada como embarazada."
-
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    iv = limpiar_numero(r.get("iv"))
-    iac = limpiar_numero(r.get("iac"))
-    fc = limpiar_numero(r.get("fc"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    imc = limpiar_numero(contexto.get("imc"))
-    eg = contexto.get("edad_gestacional")
-    crecimiento = str(contexto.get("crecimiento_fetal") or "No informado")
-    doppler = str(contexto.get("doppler_uterino") or "No informado")
-    hdp = bool(contexto.get("hdp", False))
-
-    lineas: List[str] = []
-    lineas.append("Interpretación hemodinámica materna en embarazo")
-    if es_valor_util(eg):
-        lineas.append(f"- Edad gestacional informada: {eg} semanas.")
-    if imc is not None:
-        lineas.append(f"- IMC informado: {fmt(imc, 1)} kg/m²" + ("; considerar efecto hemodinámico de obesidad." if imc >= 30 else "."))
-    if contexto.get("diagnostico_textual"):
-        lineas.append(f"- Diagnóstico/texto fuente reconocido: {str(contexto.get('diagnostico_textual'))[:120]}.")
-    lineas.append(f"- Trastorno hipertensivo del embarazo: {'sí' if hdp else 'no/no informado'}.")
-    lineas.append(f"- Crecimiento fetal informado: {crecimiento}.")
-    lineas.append(f"- Doppler uterino: {doppler}.")
-    lineas.append("- " + texto_clasificacion_dinamica(r, contexto))
-
-    # Clasificación orientativa inspirada en Ferrazzi: no reemplaza diagnóstico obstétrico.
-    fenotipo = "Datos insuficientes para definir resultado."
-    if ic is not None and irv is not None:
-        if hdp and ("SGA" in crecimiento.upper() or "RCIU" in crecimiento.upper() or "FGR" in crecimiento.upper() or "IUGR" in crecimiento.upper()):
-            if ic < 3.8 and irv >= 1200:
-                fenotipo = "Fenotipo compatible con HDP asociado a compromiso placentario/crecimiento fetal restringido: índice cardíaco relativamente bajo y resistencia vascular elevada."
-            elif ic >= 3.8 and irv < 1200:
-                fenotipo = "Fenotipo no típico para HDP-SGA: índice cardíaco conservado/elevado con resistencia baja; revisar obesidad, volumen, tratamiento y calidad de datos."
-            else:
-                fenotipo = "Fenotipo intermedio en HDP-SGA: requiere integrar Doppler uterino, crecimiento fetal, proteinuria, tratamiento y evolución clínica."
-        elif hdp and ("AGA" in crecimiento.upper() or "ADECUADO" in crecimiento.upper()):
-            if ic >= 3.8 and irv <= 1500:
-                fenotipo = "Fenotipo más compatible con HDP-AGA/metabólico: índice cardíaco conservado o elevado con resistencia vascular no marcadamente aumentada."
-            elif ic < 3.8 and irv > 1500:
-                fenotipo = "HDP-AGA con patrón de mayor resistencia y menor flujo: vigilar posibilidad de disfunción placentaria no expresada aún o evolución hacia restricción de crecimiento."
-            else:
-                fenotipo = "HDP-AGA con patrón circulatorio definido según HIPODINAMIA, NORMODINAMIA o HIPERDINAMIA."
-        elif hdp:
-            if ic < 3.8 and irv > 1500:
-                fenotipo = "HDP con patrón bajo flujo/alta resistencia, orientador de fenotipo vascular-placentario; completar con crecimiento fetal y Doppler uterino."
-            elif ic >= 3.8 and irv <= 1500:
-                fenotipo = "HDP con patrón alto flujo/resistencia baja-intermedia, orientador de fenotipo AGA/metabólico o influido por obesidad/volumen."
-            else:
-                fenotipo = "HDP con patrón circulatorio de NORMODINAMIA; completar caracterización obstétrica."
-        else:
-            if ic < 3.5 and irv > 1500:
-                fenotipo = "Gestante sin HDP informado pero con patrón de bajo flujo/alta resistencia; sugiere vigilancia estrecha si hay factores de riesgo obstétrico."
-            else:
-                fenotipo = "Gestante sin HDP informado; interpretar como evaluación cardiovascular materna complementaria."
-    lineas.append(f"- Fenotipo materno sugerido: {fenotipo}")
-
-    # Semaforización obstétrica orientativa por combinación clínica-hemodinámica.
-    riesgo = "No clasificable"
-    if ic is not None and irv is not None and hdp:
-        if (ic < 3.8 and irv > 1500) or ("SGA" in crecimiento.upper() or "RCIU" in crecimiento.upper() or "FGR" in crecimiento.upper() or "IUGR" in crecimiento.upper()) or ("alter" in doppler.lower() or "aument" in doppler.lower()):
-            riesgo = "ALTO: patrón bajo flujo/alta resistencia o dato fetal/uterino sugestivo de compromiso placentario."
-        elif ic >= 3.8 and irv <= 1500:
-            riesgo = "INTERMEDIO: patrón alto flujo/resistencia baja-intermedia; valorar fenotipo AGA/metabólico, obesidad y volumen."
-        else:
-            riesgo = "INTERMEDIO: patrón de NORMODINAMIA; requiere seguimiento obstétrico-hemodinámico."
-    elif contexto.get("embarazada"):
-        riesgo = "A contextualizar: no se informó HTA/HDP, pero se conserva interpretación hemodinámica materna."
-    lineas.append(f"- Semaforización obstétrica integrada: {riesgo}")
-
-    if iv is not None or iac is not None:
-        datos = []
-        if iv is not None:
-            datos.append(f"IV={fmt(iv, 2)}")
-        if iac is not None:
-            datos.append(f"IAC/ACI={fmt(iac, 2)}")
-        lineas.append("- Función aórtica/onda sistólica: " + ", ".join(datos) + ". Valores reducidos deben interpretarse como posible disfunción hemodinámica arterial central en el contexto de HDP.")
-
-    if imc is not None and imc >= 30:
-        lineas.append("- Nota por obesidad: la obesidad puede aumentar el gasto/índice cardíaco y modificar la resistencia vascular; conviene analizarla como condición fisiopatológica adicional y no solo como dato demográfico.")
-
-    if cft is not None or cftnr is not None:
-        lineas.append(f"- Estado de fluidos torácicos: CFT {fmt(cft,2)}, CFTnr {fmt(cftnr,2)}. Integrar con edema, proteinuria, función renal, síntomas respiratorios y tratamiento antihipertensivo.")
-
-    lineas.append("- Conducta sugerida: integrar este perfil con presión arterial seriada, proteinuria/laboratorio, Doppler uterino, biometría fetal, tratamiento actual y criterio de obstetricia de alto riesgo. Esta interpretación no reemplaza la clasificación obstétrica ni la decisión terapéutica individual.")
-    return "\n".join(lineas)
-
-
-
-# =========================================================
-# MODULO RIESGO DE PREECLAMPSIA - SOPORTE CLINICO
-# Basado en fenotipos hemodinámicos maternos: presión arterial + IC/GC + RVS/TPVR,
-# crecimiento fetal, Doppler uterino, IMC y estado de fluidos. No reemplaza criterios
-# diagnósticos obstétricos; orienta seguimiento y priorización de riesgo.
-# =========================================================
-
-def _map_desde_pas_pad(pas: Any, pad: Any) -> Optional[float]:
-    pasv = limpiar_numero(pas)
-    padv = limpiar_numero(pad)
-    if pasv is None or padv is None:
-        return None
-    return padv + (pasv - padv) / 3.0
-
-
-def calcular_riesgo_preeclampsia(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    contexto = contexto or {}
-    if not contexto.get("embarazada", False):
-        return {
-            "aplicable": False,
-            "puntaje": None,
-            "categoria": "No aplicable",
-            "color": "gris",
-            "factores": ["Paciente no marcada como embarazada."],
-            "conducta": "No corresponde calcular riesgo obstétrico.",
-        }
-
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    fc = limpiar_numero(r.get("fc"))
-    iv = limpiar_numero(r.get("iv"))
-    iac = limpiar_numero(r.get("iac"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    imc = limpiar_numero(contexto.get("imc"))
-    mapv = _map_desde_pas_pad(pas, pad)
-
-    eg = limpiar_numero(contexto.get("edad_gestacional"))
-    hdp = bool(contexto.get("hdp", False))
-    crecimiento = normalizar_txt(contexto.get("crecimiento_fetal") or "")
-    doppler = normalizar_txt(contexto.get("doppler_uterino") or "")
-
-    puntaje = 0.0
-    factores: List[str] = []
-    fenotipo = "Datos insuficientes para definir resultado"
-
-    if hdp:
-        puntaje += 2.0
-        factores.append("HTA/HDP/preeclampsia sospechada o informada en el diagnóstico.")
-
-    if pas is not None and pad is not None:
-        if pas >= 160 or pad >= 110:
-            puntaje += 3.0
-            factores.append(f"Presión arterial en rango severo ({fmt(pas,0)}/{fmt(pad,0)} mmHg).")
-        elif pas >= 140 or pad >= 90:
-            puntaje += 2.0
-            factores.append(f"Presión arterial compatible con hipertensión del embarazo ({fmt(pas,0)}/{fmt(pad,0)} mmHg).")
-    elif mapv is not None and mapv >= 105:
-        puntaje += 1.5
-        factores.append(f"PAM elevada ({fmt(mapv,0)} mmHg).")
-
-    if eg is not None:
-        if 20 <= eg < 34:
-            puntaje += 1.5
-            factores.append(f"Edad gestacional {fmt(eg,0)} semanas: ventana de riesgo para fenotipo precoz si hay HTA/HDP.")
-        elif eg >= 34:
-            puntaje += 0.5
-            factores.append(f"Edad gestacional {fmt(eg,0)} semanas: valorar fenotipo tardío/metabólico según clínica.")
-
-    if ic is not None and irv is not None:
-        if ic < 3.5 and irv > 1300:
-            puntaje += 3.0
-            fenotipo = "Hipodinámico placentario"
-            factores.append(f"Patrón hipodinámico: IC bajo/relativamente bajo ({fmt(ic,2)}) + RVS elevada ({fmt(irv,0)}).")
-        elif ic < 3.8 and irv > 1500:
-            puntaje += 3.0
-            fenotipo = "Bajo flujo / alta resistencia"
-            factores.append(f"Bajo flujo con resistencia marcada: IC {fmt(ic,2)} y RVS {fmt(irv,0)}.")
-        elif ic >= 3.8 and irv < 900:
-            puntaje += 1.0
-            fenotipo = "Hiperdinámico materno/metabólico"
-            factores.append(f"Patrón hiperdinámico: IC elevado ({fmt(ic,2)}) + RVS baja ({fmt(irv,0)}); mayor orientación a fenotipo materno/metabólico si hay obesidad o hipervolemia.")
-        elif 900 <= irv <= 1300:
-            fenotipo = "Normo/intermedio"
-            factores.append(f"RVS en rango intermedio ({fmt(irv,0)}); riesgo dependiente de PA, Doppler, crecimiento fetal y laboratorio.")
-
-    if any(x in crecimiento for x in ["sga", "rciu", "fgr", "iugr", "restriccion", "pequeno"]):
-        puntaje += 3.0
-        factores.append("Crecimiento fetal informado como SGA/RCIU/FGR/IUGR: alto peso para fenotipo placentario.")
-    elif any(x in crecimiento for x in ["aga", "adecuado"]):
-        factores.append("Crecimiento fetal AGA/adecuado: reduce probabilidad de fenotipo placentario expresado, pero no descarta HDP.")
-
-    if any(x in doppler for x in ["alter", "aument", "notch", "incisura", "patolog"]):
-        puntaje += 3.0
-        factores.append("Doppler uterino alterado/aumentado/notching: alto peso para disfunción placentaria.")
-    elif "normal" in doppler:
-        factores.append("Doppler uterino informado normal: contextualiza menor riesgo placentario si los demás datos son favorables.")
-
-    if imc is not None and imc >= 30:
-        puntaje += 1.0
-        factores.append(f"IMC elevado ({fmt(imc,1)} kg/m²): aumenta probabilidad de fenotipo materno/metabólico y riesgo cardiovascular obstétrico.")
-
-    if cft is not None and cft > 45:
-        puntaje += 0.75
-        factores.append(f"CFT aumentado ({fmt(cft,2)}): sugiere sobrecarga de fluidos torácicos; vigilar edema/disnea y función renal.")
-    if cftnr is not None and cftnr > 45:
-        puntaje += 0.75
-        factores.append(f"CFTnr aumentado ({fmt(cftnr,2)}): refuerza componente de sobrecarga de volumen.")
-    if cft is not None and cft < 25:
-        puntaje += 1.0
-        factores.append(f"CFT bajo ({fmt(cft,2)}): puede acompañar bajo volumen intravascular en fenotipo placentario.")
-
-    if iv is not None and iv < 50:
-        puntaje += 0.75
-        factores.append(f"IV bajo ({fmt(iv,2)}): posible reducción de amplitud/velocidad aórtica en contexto de HDP.")
-    if iac is not None and iac < 90:
-        puntaje += 0.75
-        factores.append(f"IAC/ACI bajo ({fmt(iac,2)}): posible alteración de aceleración sistólica aórtica.")
-
-    # Limitar escala a 0-10 para una lectura tipo score clínico.
-    puntaje = max(0.0, min(10.0, puntaje))
-
-    if puntaje >= 7:
-        categoria = "RIESGO ALTO"
-        color = "rojo"
-        conducta = "Derivar o manejar como obstetricia de alto riesgo; integrar proteinuria, plaquetas, enzimas hepáticas, creatinina, síntomas, Doppler uterino/umbilical y biometría fetal. Repetir hemodinamia y control obstétrico estrecho."
-    elif puntaje >= 4:
-        categoria = "RIESGO INTERMEDIO"
-        color = "amarillo"
-        conducta = "Seguimiento estrecho, completar laboratorio de preeclampsia y evaluación fetal. Repetir evaluación si progresa PA, síntomas, proteinuria o cambios Doppler/crecimiento."
-    else:
-        categoria = "RIESGO BAJO/NO ELEVADO POR HEMODINAMIA"
-        color = "verde"
-        conducta = "Continuar control obstétrico habitual según riesgo basal; no descarta preeclampsia si aparecen criterios clínicos o de laboratorio."
-
-    if not factores:
-        factores.append("Datos insuficientes para estratificación robusta; completar PA, edad gestacional, IC/RVS, Doppler, crecimiento fetal y laboratorio.")
-
-    return {
-        "aplicable": True,
-        "puntaje": puntaje,
-        "categoria": categoria,
-        "color": color,
-        "fenotipo": fenotipo,
-        "factores": factores,
-        "conducta": conducta,
-    }
-
-
-def texto_riesgo_preeclampsia(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    res = calcular_riesgo_preeclampsia(r, contexto)
-    if not res.get("aplicable"):
-        return "No aplicable: paciente no marcada como embarazada."
-    factores_txt = "\n".join([f"- {x}" for x in res.get("factores", [])])
-    puntaje = res.get("puntaje")
-    puntaje_txt = "No disponible" if puntaje is None else f"{puntaje:.1f}/10".replace(".", ",")
-    return f"""Score hemodinámico orientativo de riesgo de preeclampsia: {puntaje_txt}
-Categoría: {res.get('categoria')}
-Fenotipo sugerido: {res.get('fenotipo', 'No clasificable')}
-Factores que modifican el riesgo:
-{factores_txt}
-Conducta sugerida:
-{res.get('conducta')}
-Advertencia: este módulo es un apoyo a la decisión clínica. No diagnostica ni descarta preeclampsia; debe integrarse con criterios obstétricos, proteinuria, laboratorio, síntomas maternos y evaluación fetal."""
-
-
-def crear_grafico_riesgo_preeclampsia_bytes(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Optional[io.BytesIO]:
-    """Acelerador circular para score hemodinámico orientativo de preeclampsia."""
-    res = calcular_riesgo_preeclampsia(r, contexto)
-    if not res.get("aplicable") or res.get("puntaje") is None:
-        return None
-    puntaje = limpiar_numero(res.get("puntaje"))
-    if puntaje is None:
-        return None
-    porcentaje = max(0, min(100, puntaje * 10))
-    return crear_acelerador_circular_bytes(
-        porcentaje,
-        "Riesgo PE",
-        f"{puntaje:.1f}/10",
-        str(res.get("categoria", "")),
-        "Bajo <4 | Intermedio 4-6,9 | Alto ≥7",
-        figsize=(5.0, 3.1),
-    )
-
-
-def crear_curva_impedancia_representativa_bytes(r: Dict[str, Any]) -> Optional[io.BytesIO]:
-    """Curva representativa para el informe cuando no se extrae la imagen original del PDF.
-    No reemplaza la curva cruda del equipo; se rotula como reconstrucción visual orientativa.
-    """
-    try:
-        import numpy as np
-        import matplotlib.pyplot as plt
-    except Exception:
-        return None
-    try:
-        fc = limpiar_numero(r.get("fc")) or 80.0
-        iac = limpiar_numero(r.get("iac")) or 120.0
-        iv = limpiar_numero(r.get("iv")) or 70.0
-        ih = limpiar_numero(r.get("ih")) or 12.0
-        t = np.linspace(0, 1000, 600)
-        peak_t = max(160, min(360, 260 - (fc - 80) * 1.2))
-        width = max(35, min(90, 70 - (iac - 100) * 0.08))
-        amp = max(0.6, min(2.2, iv / 70.0))
-        main = amp * np.exp(-0.5 * ((t - peak_t) / width) ** 2)
-        pre = 0.35 * amp * np.exp(-0.5 * ((t - (peak_t - 120)) / 45) ** 2)
-        refl = 0.25 * amp * np.exp(-0.5 * ((t - (peak_t + 160)) / 80) ** 2)
-        baseline = 0.06 * np.sin(2 * np.pi * t / 220) * np.exp(-t / 1200)
-        dzdt = pre + main + refl + baseline
-        ecg = 0.15 * np.sin(2 * np.pi * t / 900)
-        # Complejo QRS sintético
-        ecg += 1.3 * np.exp(-0.5 * ((t - 80) / 10) ** 2)
-        ecg += 1.1 * np.exp(-0.5 * ((t - 820) / 10) ** 2)
-
-        fig, ax = plt.subplots(figsize=(8.2, 3.2))
-        ax.plot(t, dzdt, label="dZ/dt representativa")
-        ax.plot(t, ecg - 0.55, label="ECG representativo")
-        ax.set_title("Curva de cardiografía de impedancia (representativa)")
-        ax.set_xlabel("Tiempo (ms)")
-        ax.set_ylabel("Señal relativa")
-        ax.grid(alpha=0.25)
-        ax.legend(loc="upper right", fontsize=8)
-        ax.text(10, max(dzdt) * 0.85, f"FC {fmt(fc,0)} lpm | IV {fmt(iv,1)} | IAC {fmt(iac,1)}", fontsize=8)
-        plt.tight_layout()
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=180)
-        plt.close(fig)
-        buffer.seek(0)
-        return buffer
-    except Exception:
-        return None
-
-
-
-
-# =========================================================
-# MODULO NO EMBARAZADAS - SUGERENCIA TERAPEUTICA ICG
-# Basado en Ferrario et al. 2010: individualizacion del tratamiento
-# antihipertensivo con cardiografia de impedancia segun fenotipo hemodinamico.
-# =========================================================
-
-def _valor_previo_y_actual(df: Optional[pd.DataFrame], key: str) -> Tuple[Optional[float], Optional[float]]:
-    if df is None or df.empty:
-        return None, None
-    if len(df) == 1:
-        r = extraer_resumen_integrado(df)
-        return None, limpiar_numero(r.get(key))
-    r1 = extraer_resumen_integrado(df.iloc[[0]])
-    r2 = extraer_resumen_integrado(df.iloc[[-1]])
-    return limpiar_numero(r1.get(key)), limpiar_numero(r2.get(key))
-
-
-def sugerencia_tratamiento_no_embarazada(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> str:
-    """Sugerencia orientativa para HTA en no embarazadas, basada en perfil ICG.
-
-    No reemplaza guías clínicas ni criterio médico. La lógica sigue el algoritmo
-    de Ferrario/ICG: CI alto -> beta bloqueante o calcioantagonista no DHP;
-    SVRI/RVS alta -> IECA/ARA-II/calcioantagonista DHP/vasodilatador;
-    TFC/CFT alto o en ascenso -> diurético.
-    """
-    ic = limpiar_numero(r.get("ic"))
-    rvs = limpiar_numero(r.get("irv"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    fc = limpiar_numero(r.get("fc"))
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    cft_prev, cft_act = _valor_previo_y_actual(df, "cft")
-
-    lineas = []
-    lineas.append("Sugerencia terapéutica orientativa para paciente con HTA")
-    lineas.append("Base: individualización del tratamiento según cardiografía de impedancia y fenotipo hemodinámico.")
-
-    if pas is not None or pad is not None:
-        lineas.append(f"- PA integrada: {fmt(pas,0,' mmHg')} / {fmt(pad,0,' mmHg')}.")
-    if ic is not None:
-        lineas.append(f"- Índice cardíaco (IC): {fmt(ic,2,' L/min/m²')}.")
-    if rvs is not None:
-        lineas.append(f"- Resistencia vascular sistémica / IRV: {fmt(rvs,0,' dyn·s·cm⁻⁵')}.")
-    if cft is not None or cftnr is not None:
-        lineas.append(f"- Contenido de fluido torácico: CFT {fmt(cft,2)}; CFTnr {fmt(cftnr,2)}.")
-
-    recomendaciones = []
-    fenotipos = []
-
-    # 1. Fenotipo hiperdinámico: CI elevado.
-    if ic is not None and ic > 4.2:
-        fenotipos.append("Fenotipo hiperdinámico por IC elevado")
-        rec = "Considerar agregar o titular beta-bloqueante o calcioantagonista no dihidropiridínico, si no existen contraindicaciones clínicas."
-        if fc is not None and fc < 60:
-            rec += " Precaución: la frecuencia cardíaca es baja, por lo que debe evitarse intensificar fármacos cronotrópicos negativos sin evaluación clínica."
-        recomendaciones.append(rec)
-
-    # 2. Fenotipo hipodinámico: CI bajo.
-    if ic is not None and ic < 2.5:
-        fenotipos.append("Fenotipo hipodinámico por IC bajo")
-        recomendaciones.append("Evitar o reducir beta-bloqueo si no hay indicación obligatoria; priorizar corrección de vasoconstricción/volumen según RVS y CFT.")
-
-    # 3. Fenotipo vasoconstrictor: SVRI/RVS alta.
-    # El algoritmo original usa SVRI >2580; si la app solo dispone de IRV/RVS, se usa como aproximación clínica.
-    if rvs is not None and rvs > 2580:
-        fenotipos.append("Fenotipo vasoconstrictor severo por RVS/SVRI elevada")
-        recomendaciones.append("Considerar agregar o titular IECA, ARA-II, calcioantagonista dihidropiridínico o vasodilatador directo, según comorbilidades, función renal, potasio y tolerancia.")
-    elif rvs is not None and rvs > 2000:
-        fenotipos.append("Fenotipo vasoconstrictor probable por RVS elevada")
-        recomendaciones.append("Favorecer estrategia vasodilatadora o bloqueo del sistema renina-angiotensina: IECA/ARA-II o calcioantagonista dihidropiridínico, individualizando por edad, ERC, diabetes y efectos adversos.")
-
-    # 4. Retención hídrica: TFC/CFT alto o incremento entre estudios.
-    cft_alto = (cft is not None and cft > 37) or (cftnr is not None and cftnr > 37)
-    cft_ascenso = (cft_prev is not None and cft_act is not None and (cft_act - cft_prev) > 2)
-    if cft_alto or cft_ascenso:
-        fenotipos.append("Fenotipo con probable retención de volumen por CFT/CFTnr elevado o en ascenso")
-        recomendaciones.append("Considerar agregar o titular diurético, con control de función renal, ionograma, ácido úrico, síntomas de hipovolemia y respuesta tensional.")
-
-    # 5. Si no domina ningún patrón, orientar combinación racional.
-    if not recomendaciones:
-        if ic is not None or rvs is not None or cft is not None:
-            fenotipos.append("Fenotipo sin predominio hemodinámico extremo")
-            recomendaciones.append("Mantener enfoque escalonado basado en riesgo cardiovascular global, daño de órgano blanco y tolerancia; si la PA no está controlada, intensificar combinación racional según guías clínicas y repetir evaluación hemodinámica.")
-        else:
-            fenotipos.append("Datos insuficientes para definir resultado")
-            recomendaciones.append("No se emite sugerencia farmacológica hemodinámica porque no están disponibles IC, RVS/SVRI y CFT/TFC.")
-
-    lineas.append("- Fenotipo terapéutico detectado: " + "; ".join(dict.fromkeys(fenotipos)) + ".")
-    lineas.append("- Sugerencia farmacológica orientativa:")
-    for i, rec in enumerate(dict.fromkeys(recomendaciones), start=1):
-        lineas.append(f"  {i}. {rec}")
-
-    lineas.append("- Recomendación operativa: reevaluar PA y perfil hemodinámico luego de modificar tratamiento, especialmente si se detecta IC alto, RVS elevada o CFT en ascenso.")
-    lineas.append("- Advertencia clínica: esta sección es un apoyo a la decisión; debe ajustarse a guías vigentes, contraindicaciones, laboratorio, edad, comorbilidades y medicación previa.")
-    return "\n".join(lineas)
-
-
-def crear_grafico_propuesta_terapeutica_bytes(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Optional[io.BytesIO]:
-    """
-    Flujograma ICG terapéutico basado en Ferrario et al. / Therapeutic Advances in Cardiovascular Disease.
-    Muestra las 4 ramas del algoritmo (hiperdinámica, hipodinámica, vasoconstrictora, retención de fluidos)
-    y resalta en color la(s) que aplica(n) al paciente según sus valores reales.
-    Ref: Ferrario CM et al. Ther Adv Cardiovasc Dis 2010;4(1):53-62. Figure 2.
-    """
-    try:
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as mpatches
-        from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-        import io as _io
-    except Exception:
-        return None
-
-    ic  = limpiar_numero((r or {}).get("ic"))
-    rvs = limpiar_numero((r or {}).get("irv"))
-    cft = limpiar_numero((r or {}).get("cft"))
-    cftnr = limpiar_numero((r or {}).get("cftnr"))
-    fc  = limpiar_numero((r or {}).get("fc"))
-
-    # ── Evaluar qué ramas aplican ────────────────────────────────────────────
-    rama_hiper  = ic is not None and ic > 4.2
-    rama_hipo   = ic is not None and ic < 2.5
-    rama_vaso   = rvs is not None and rvs > 2000   # ≥2580 severo; >2000 probable
-    rama_vaso_sev = rvs is not None and rvs > 2580
-    rama_fluid  = (cft is not None and cft > 37) or (cftnr is not None and cftnr > 37)
-
-    try:
-        cft_prev, cft_act = _valor_previo_y_actual(df, "cft")
-        if cft_prev is not None and cft_act is not None and (cft_act - cft_prev) > 2:
-            rama_fluid = True
-    except Exception:
-        pass
-
-    ninguna = not (rama_hiper or rama_hipo or rama_vaso or rama_fluid)
-
-    # ── Colores ──────────────────────────────────────────────────────────────
-    C_ACTIVO   = "#1D4ED8"   # azul oscuro — rama del paciente
-    C_INACTIVO = "#CBD5E1"   # gris claro  — rama no aplicable
-    C_TERAPIA  = "#D97706"   # ámbar       — caja de terapia activa
-    C_TERAPIA_N= "#FEF3C7"   # ámbar claro — terapia inactiva
-    C_ASSESS   = "#0EA5E9"   # celeste     — assessment
-    C_HEADER   = "#64748B"   # slate       — encabezado columna
-    C_OK       = "#15803D"   # verde       — ninguna rama (perfil favorable)
-
-    fig, ax = plt.subplots(figsize=(14, 9.5), dpi=160)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
-    ax.set_xlim(0, 14)
-    ax.set_ylim(0, 10)
-    ax.axis("off")
-
-    def caja(x, y, w, h, texto, color_fondo, color_borde, color_txt="#0F172A", fs=9.5, bold=False, centrado=True, alpha=1.0):
-        rect = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.12",
-                              facecolor=color_fondo, edgecolor=color_borde,
-                              linewidth=2.0 if color_borde != C_INACTIVO else 0.8, alpha=alpha, zorder=3)
-        ax.add_patch(rect)
-        ax.text(x + w/2, y + h/2, texto,
-                ha="center" if centrado else "left",
-                va="center", fontsize=fs,
-                fontweight="bold" if bold else "normal",
-                color=color_txt, wrap=True, zorder=4,
-                multialignment="center")
-
-    def flecha(x1, y1, x2, y2, color, lw=1.8):
-        ax.annotate("", xy=(x2, y2), xytext=(x1, y1),
-                    arrowprops=dict(arrowstyle="-|>", color=color, lw=lw),
-                    zorder=2)
-
-    # ── Encabezados de columnas ──────────────────────────────────────────────
-    for x_col, titulo in [(0.2, "EVALUACION"), (3.6, "PERFIL\nHEMODINAMICO"), (6.8, "IMPLICACION\nDIAGNOSTICA"), (10.2, "OPCION\nTERAPEUTICA")]:
-        caja(x_col, 8.8, 3.2, 0.95, titulo, C_HEADER, C_HEADER, "#FFFFFF", 9, True)
-
-    # ── Caja Assessment (izquierda, siempre activa) ──────────────────────────
-    vals_txt = []
-    if ic is not None:  vals_txt.append(f"IC: {fmt(ic,2)} L/min/m²")
-    if rvs is not None: vals_txt.append(f"RVS: {fmt(rvs,0)}")
-    if cft is not None: vals_txt.append(f"CFT: {fmt(cft,2)}")
-    val_str = "\n".join(vals_txt) if vals_txt else "Sin datos"
-    caja(0.2, 4.5, 3.2, 3.8,
-         f"Historia clinica\nPA / labs\n+\nTest ICG\n\n{val_str}",
-         "#E0F2FE", C_ASSESS, "#0C4A6E", 9.0, False)
-
-    # ── 4 filas de ramas ─────────────────────────────────────────────────────
-    ramas = [
-        # (y_centro, activa, label_perfil, label_dx, label_terapia, umbral_txt)
-        (7.45, rama_hiper,
-         "IC > 4.2",
-         "Hiperdinámica",
-         "Agregar / aumentar:\nbeta bloqueante o\ncalcioantagonista no DHP",
-         f"IC={fmt(ic,2)}" if ic else ""),
-        (5.75, rama_hipo,
-         "IC < 2.5",
-         "Hipodinámica",
-         "Reducir:\nbeta bloqueante\n(salvo indicación\ncomórbida obligatoria)",
-         f"IC={fmt(ic,2)}" if ic else ""),
-        (4.05, rama_vaso,
-         f"SVRI > 2580{'*' if rama_vaso and not rama_vaso_sev else ''}",
-         "Vasoconstricción",
-         "Agregar / aumentar:\nIECA, ARA-II,\ncalcioantagonista DHP\no vasodilatador directo",
-         f"RVS={fmt(rvs,0)}" if rvs else ""),
-        (2.20, rama_fluid,
-         "CFT/TFC elevado\no en ascenso",
-         "Retención\nde fluidos",
-         "Agregar / aumentar:\ndiurético",
-         f"CFT={fmt(cft,2)}" if cft else ""),
-    ]
-
-    for (y_c, activa, lbl_perf, lbl_dx, lbl_ter, umbral) in ramas:
-        h_box = 1.05
-        yb = y_c - h_box / 2
-
-        c_fondo_p  = "#DBEAFE" if activa else "#F8FAFC"
-        c_borde_p  = C_ACTIVO  if activa else C_INACTIVO
-        c_fondo_d  = "#DBEAFE" if activa else "#F8FAFC"
-        c_borde_d  = C_ACTIVO  if activa else C_INACTIVO
-        c_fondo_t  = "#FEF3C7" if activa else "#FAFAFA"
-        c_borde_t  = C_TERAPIA if activa else C_INACTIVO
-        c_txt      = "#1E3A5F" if activa else "#94A3B8"
-
-        lbl_p_full = lbl_perf + (f"\n({umbral})" if activa and umbral else "")
-        caja(3.6, yb, 2.95, h_box, lbl_p_full, c_fondo_p, c_borde_p, c_txt, 9.0, activa)
-        caja(6.8, yb, 3.1,  h_box, lbl_dx,     c_fondo_d, c_borde_d, c_txt, 9.0, activa)
-        caja(10.1, yb, 3.7, h_box, lbl_ter,     c_fondo_t, c_borde_t,
-             "#92400E" if activa else "#94A3B8", 8.5, activa)
-
-        col_flecha = C_ACTIVO if activa else C_INACTIVO
-        lw_f = 2.0 if activa else 0.8
-        flecha(3.45, y_c, 3.6, y_c, col_flecha, lw_f)
-        flecha(6.55, y_c, 6.8, y_c, col_flecha, lw_f)
-        flecha(9.9,  y_c, 10.1, y_c, col_flecha, lw_f)
-
-    # Flechas del bloque assessment al centro
-    flecha(3.4, 6.0, 3.6, 7.45, C_ASSESS, 1.4)
-    flecha(3.4, 5.85, 3.6, 5.75, C_ASSESS, 1.4)
-    flecha(3.4, 5.55, 3.6, 4.05, C_ASSESS, 1.4)
-    flecha(3.4, 5.3, 3.6, 2.20, C_ASSESS, 1.4)
-
-    # Nota pie
-    nota = "* Si ninguno de IC ni SVRI está en rango alto, seleccionar terapia según el más alto dentro del rango normal.  |  Ref: Ferrario et al. Ther Adv Cardiovasc Dis 2010;4(1):53-62."
-    ax.text(0.15, 0.25, nota, fontsize=7.5, color="#64748B", va="bottom", style="italic")
-
-    # Título y leyenda
-    titulo_color = C_OK if ninguna else C_ACTIVO
-    if ninguna:
-        titulo_estado = "SIN FENOTIPO EXTREMO DETECTADO — perfil hemodinamico dentro de rangos"
-    else:
-        ramas_act = []
-        if rama_hiper: ramas_act.append("HIPERDINÁMICA")
-        if rama_hipo:  ramas_act.append("HIPODINÁMICA")
-        if rama_vaso:  ramas_act.append("VASOCONSTRICTORA")
-        if rama_fluid: ramas_act.append("RETENCIÓN DE FLUIDOS")
-        titulo_estado = "RAMAS ACTIVAS: " + " + ".join(ramas_act)
-
-    ax.set_title(
-        f"Propuesta terapéutica ICG individualizada\n{titulo_estado}",
-        fontsize=13, fontweight="bold", color=titulo_color, pad=10
-    )
-
-    patch_act = mpatches.Patch(color=C_ACTIVO, label="Rama activa del paciente")
-    patch_ter = mpatches.Patch(color=C_TERAPIA, label="Terapia sugerida")
-    patch_ina = mpatches.Patch(color=C_INACTIVO, label="Rama no aplicable")
-    ax.legend(handles=[patch_act, patch_ter, patch_ina], loc="lower right", fontsize=8.5, framealpha=0.9)
-
-    fig.tight_layout()
-    buf = _io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    ax.figure.patch.set_facecolor("#FFFFFF")
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold", color="#12355B", pad=10)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=9, color="#263238")
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9, color="#263238")
+    ax.tick_params(axis="both", labelsize=8, colors="#263238")
+    ax.grid(True, alpha=0.22, linewidth=0.6)
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    ax.spines["left"].set_color("#B0BEC5")
+    ax.spines["bottom"].set_color("#B0BEC5")
+
+def fig_to_png(fig):
+    fig.tight_layout(pad=1.15)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     buf.seek(0)
     return buf
 
+def plot_pressure_comparison(row):
+    labels = ["PAS", "PAD", "PAM", "PP"]
+    radial = [row.get("pas_radial"), row.get("pad_radial"), row.get("pam_radial"), row.get("pp_radial")]
+    central = [row.get("pas_central"), row.get("pad_central"), row.get("pam_central"), row.get("pp_central")]
+    x = np.arange(len(labels)); w = 0.35
+    fig, ax = plt.subplots(figsize=(7,4))
+    ax.bar(x-w/2, radial, w, label="Radial/Braquial")
+    ax.bar(x+w/2, central, w, label="Central")
+    ax.set_xticks(x); ax.set_xticklabels(labels); ax.set_ylabel("mmHg"); ax.set_title("Presiones periféricas vs centrales"); ax.legend(); ax.grid(axis="y", alpha=.25)
+    return fig_to_png(fig)
 
-# =========================================================
-# INFORME
-# =========================================================
 
-def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    r = extraer_resumen_integrado(df)
-    calidad = resumen_calidad_integracion(df)
-    perfil = diagnostico_perfil_hemodinamico(r.get("ic"), r.get("irv"))
-    volemia = diagnostico_volemia(r.get("cft"), r.get("cftnr"))
-    contractilidad = diagnostico_contractilidad(r.get("iv"), r.get("iac"), r.get("cts"))
-    acoplamiento = diagnostico_acoplamiento(r.get("ea"), r.get("ees"), r.get("ava"))
-    orto = interpretar_ortostatismo(df)
-    faltantes = calidad["faltantes"]
-    faltantes_txt = "Sin faltantes críticos reconocidos." if not faltantes else "Variables críticas no reconocidas: " + ", ".join(faltantes) + "."
-    es_embarazo = bool(contexto_embarazo and contexto_embarazo.get("embarazada"))
 
-    if es_embarazo:
-        siglas = """
-Siglas utilizadas:
-- HDP: trastornos hipertensivos del embarazo. Incluye hipertensión gestacional, preeclampsia y otras formas hipertensivas asociadas al embarazo.
-- HTA gestacional/GH: hipertensión arterial que aparece después de la semana 20 sin criterios completos de preeclampsia.
-- PE: preeclampsia; HDP con compromiso materno/fetal según criterios obstétricos, proteinuria y/o daño de órgano blanco.
-- AGA: adecuado para edad gestacional; crecimiento fetal dentro del rango esperado.
-- SGA: pequeño para edad gestacional.
-- RCIU/FGR/IUGR: restricción del crecimiento fetal; se usa como equivalente clínico-operativo cuando el informe lo menciona.
-- EG: edad gestacional en semanas; por ejemplo S30, S20, S18 o S9 significan semana 30, 20, 18 o 9.
-- IC/CI: índice cardíaco. GC/CO: gasto cardíaco.
-- IRV/RVS/SVR/TPVR: resistencia vascular sistémica o resistencia vascular periférica total.
-- PAM/MAP: presión arterial media.
-- CFT/CFTnr/TFC: contenido de fluido torácico y contenido de fluido torácico normalizado.
-- IV/VI: índice de velocidad.
-- IAC/ACI: índice de aceleración.
-- CTS: coeficiente de tiempos sistólicos, equivalente operativo a la relación PEP/LVET cuando el equipo lo informa así.
-- EA/EES: acoplamiento ventrículo-arterial.
-""".strip()
+
+def _curve_fingerprint(t, p):
+    """Firma numérica corta de la morfología real para verificar que cada paciente use su propia curva."""
+    try:
+        t = np.asarray(t, dtype=float)
+        p = np.asarray(p, dtype=float)
+        ok = np.isfinite(t) & np.isfinite(p)
+        t, p = t[ok], p[ok]
+        if len(p) < 20:
+            return "curva_insuficiente"
+        x = np.linspace(0, 1, 48)
+        tn = (t - np.nanmin(t)) / max(np.nanmax(t) - np.nanmin(t), 1e-6)
+        pn = (p - np.nanmin(p)) / max(np.nanmax(p) - np.nanmin(p), 1e-6)
+        sig = np.interp(x, tn, pn)
+        sig = np.round(sig, 3)
+        return str(abs(hash(tuple(sig))) % 10_000_000).zfill(7)
+    except Exception:
+        return "sin_firma"
+
+
+def _first_true_index(mask, default=0):
+    idx = np.where(mask)[0]
+    return int(idx[0]) if len(idx) else int(default)
+
+
+def _last_true_index(mask, default=0):
+    idx = np.where(mask)[0]
+    return int(idx[-1]) if len(idx) else int(default)
+
+
+def _regularize_real_pressure_curve(wave_df, row, n=720):
+    """Regulariza la curva real importada sin inventar morfología.
+
+    La única calibración permitida es lineal contra PAS/PAD central reales del estudio.
+    Si no hay suficientes puntos reales, la función falla y bloquea el informe.
+    """
+    df = wave_df.copy()
+    t = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+    p = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(t) & np.isfinite(p)
+    t, p = t[ok], p[ok]
+    if len(p) < 40:
+        raise ValueError("Curva real insuficiente: se requieren al menos 40 puntos válidos del paciente.")
+
+    order = np.argsort(t)
+    t, p = t[order], p[order]
+    keep = np.r_[True, np.diff(t) > 0]
+    t, p = t[keep], p[keep]
+    if len(p) < 40:
+        raise ValueError("Curva real insuficiente luego de quitar tiempos duplicados.")
+
+    t_norm = (t - np.nanmin(t)) / max(np.nanmax(t) - np.nanmin(t), 1e-6) * 1000.0
+    t0 = np.linspace(0, 1000, n)
+    p0 = np.interp(t0, t_norm, p)
+
+    # Suavizado mínimo, proporcional a la cantidad de puntos, para no borrar morfología individual.
+    win = max(5, min(17, (n // 90) * 2 + 1))
+    p0 = pd.Series(p0).rolling(win, center=True, min_periods=1).median().to_numpy()
+    p0 = pd.Series(p0).rolling(win, center=True, min_periods=1).mean().to_numpy()
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    raw_min, raw_max = float(np.nanmin(p0)), float(np.nanmax(p0))
+    if raw_max - raw_min < 5:
+        raise ValueError("La curva real tiene amplitud insuficiente; se bloquea análisis para evitar curvas genéricas.")
+
+    if not np.isnan(pas) and not np.isnan(pad) and pas > pad:
+        p0 = pad + (p0 - raw_min) * (pas - pad) / max(raw_max - raw_min, 1e-6)
     else:
-        siglas = """
-MODULO DE EVALUACION HEMODINAMICA NO INVASIVA POR CARDIOGRAFIA DE IMPEDANCIA
+        pad, pas = raw_min, raw_max
 
-Siglas utilizadas:
-- IC/CI: índice cardíaco. GC/CO: gasto cardíaco.
-- IRV/RVS/SVR/TPVR: resistencia vascular sistémica o resistencia vascular periférica total.
-- PAM/MAP: presión arterial media.
-- CFT/CFTnr/TFC: contenido de fluido torácico y contenido de fluido torácico normalizado.
-- IV/VI: índice de velocidad.
-- IAC/ACI: índice de aceleración.
-- CTS: coeficiente de tiempos sistólicos, equivalente operativo a la relación PEP/LVET cuando el equipo lo informa así.
-- EA/EES: acoplamiento ventrículo-arterial.
-""".strip()
+    return t0, p0, _curve_fingerprint(t0, p0)
 
-    bloque_comun = f"""
-INFORME MÉDICO HEMODINÁMICO INTEGRADO
 
-Paciente: {r.get('paciente') or 'No disponible'}
-DNI: {r.get('dni') or 'SD'}
-Obra social: {r.get('obra_social') or 'No disponible'}
-Edad: {r.get('edad') or 'No disponible'}
-Fecha de nacimiento: {r.get('fecha_nacimiento') or 'No disponible'}
-Fecha del estudio: {r.get('fecha') or 'No disponible'}
-Fecha de emisión del informe: {datetime.now().strftime('%d/%m/%Y %H:%M')}
-Posición usada para diagnóstico: {r.get('posicion_referencia') or 'No reconocida'}
-Método usado para métricas diagnósticas: {r.get('metodo_referencia') or 'No reconocido'}
-Regla aplicada: {r.get('regla_posicion') or 'Diagnóstico basado en estudio acostado cuando esté disponible.'}
+def estimate_wave_separation(wave_df, row):
+    """Separación morfológica Pf/Pb derivada de la curva real del paciente.
 
-{siglas}
+    Modo estricto:
+    - No usa curva sintética.
+    - No usa plantilla fija entre pacientes.
+    - Pf + Pb reconstruyen la onda real sobre PAD.
+    - El flujo aórtico se deriva de la pendiente positiva real de la curva, no de una onda triangular.
+    """
+    t0, p0, curve_id = _regularize_real_pressure_curve(wave_df, row, n=720)
 
-0. Control de integración de PDFs importados
-La integración fue realizada usando el último valor clínico útil disponible entre los archivos importados, conservando datos demográficos aunque aparezcan solo en uno de los PDFs. {faltantes_txt}
+    pad = float(np.nanmin(p0))
+    pas = float(np.nanmax(p0))
+    pp = max(pas - pad, 1.0)
+    excess = np.clip(p0 - pad, 0, None)
 
-1. Parámetros principales integrados
-- Presión arterial sistólica: {fmt(r.get('pas'), 0, ' mmHg')}
-- Presión arterial diastólica: {fmt(r.get('pad'), 0, ' mmHg')}
-- Frecuencia cardíaca: {fmt(r.get('fc'), 0, ' lpm')}
-- Índice cardíaco: {fmt(r.get('ic'), 2, ' L/min/m²')}
-- Resistencia vascular sistémica / IRV: {fmt(r.get('irv'), 0, ' dyn·s·cm⁻⁵')}
-- Complacencia arterial: {fmt(r.get('ca'), 2, ' mL/mmHg')}
-- CFT: {fmt(r.get('cft'), 2)}
-- CFTnr: {fmt(r.get('cftnr'), 2)}
-- Índice de velocidad: {fmt(r.get('iv'), 2)}
-- IAC: {fmt(r.get('iac'), 2)}
-- CTS: {fmt(r.get('cts'), 2)}
-- Elastancia arterial: {fmt(r.get('ea'), 2)}
-- Elastancia ventricular / EES: {fmt(r.get('ees'), 2)}
-- Acoplamiento EA/EES: {fmt(r.get('ava'), 2)}
-- Descarga sistólica: {fmt(r.get('ds'), 2)}
-- Índice de descarga sistólica: {fmt(r.get('ids'), 2)}
-- Impedancia basal Z0: {fmt(r.get('z0'), 2)}
+    peak_i = int(np.nanargmax(p0))
+    t_peak = float(t0[peak_i])
 
-2. Perfil hemodinámico general
-{perfil}
-{texto_clasificacion_dinamica(r, contexto_embarazo)}
+    # Landmarks reales por derivadas: pie sistólico, punto de máxima pendiente y hombro/retorno reflejo.
+    dt = float(np.nanmedian(np.diff(t0)))
+    dp = np.gradient(p0, dt)
+    d2 = np.gradient(dp, dt)
 
-2A. Patrón hemodinámico por posición
-{texto_patron_hemodinamico_acostado_y_de_pie(df, contexto_embarazo)}
+    pre = np.arange(0, max(peak_i, 1))
+    foot_i = _first_true_index(excess[:max(peak_i, 1)] > 0.04 * pp, default=0)
+    max_dp_i = int(pre[np.nanargmax(dp[pre])]) if len(pre) else max(0, peak_i // 2)
 
-3. Diagnóstico de volemia
-**{volemia}**
-
-4. Contractilidad
-{contractilidad}
-
-5. Acoplamiento ventrículo-arterial
-{acoplamiento}
-
-6. Análisis ortostático automático
-{orto}
-
-**Conclusión ortostática relevante:** el patrón ortostático se interpreta integrando cambios de IC, IRV/RVS, FC y presión arterial entre basal/acostado y bipedestación.
-
-7. Métricas por dominio
-{texto_tabla_metricas_por_dominio(r)}
-""".strip()
-
-    if es_embarazo:
-        modulo = f"""
-8. Módulo embarazo / hemodinamia materna
-{interpretar_hemodinamica_embarazo(r_panel, contexto_embarazo)}
-
-9. Módulo riesgo de preeclampsia
-{texto_riesgo_preeclampsia(r_panel, contexto_embarazo)}
-
-10. Conclusión clínica integrada para paciente embarazada
-Paciente clasificada como embarazada/gestante. Por lo tanto, el informe utiliza exclusivamente el módulo obstétrico: hemodinamia materna, HDP (trastornos hipertensivos del embarazo) y riesgo de PE (preeclampsia). No se aplica el módulo terapéutico para HTA no embarazada. La interpretación debe correlacionarse con edad gestacional, proteinuria, laboratorio, Doppler uterino, crecimiento fetal y evaluación obstétrica.
-""".strip()
+    post_start = min(len(t0)-1, peak_i + max(8, int(25/dt)))
+    post_end = min(len(t0)-1, peak_i + max(45, int(380/dt)))
+    post = np.arange(post_start, post_end)
+    if len(post) > 10:
+        # El retorno reflejo se ubica en la mayor convexidad/meseta pospico real, no en un tiempo fijo.
+        curv_score = d2[post] - 0.20 * np.abs(dp[post])
+        refl_i = int(post[np.nanargmax(curv_score)])
     else:
-        modulo = f"""
-8. MODULO DE EVALUACION HEMODINAMICA NO INVASIVA POR CARDIOGRAFIA DE IMPEDANCIA
-{sugerencia_tratamiento_no_embarazada(r, df)}
+        refl_i = min(len(t0)-1, peak_i + int(140/dt))
 
-9. Conclusión clínica integrada
-El informe corresponde al MODULO DE EVALUACION HEMODINAMICA NO INVASIVA POR CARDIOGRAFIA DE IMPEDANCIA.
-""".strip()
+    # Si la curva tiene hombro tardío visible, priorizar máximo local tardío.
+    local_max = []
+    for i in range(post_start + 1, post_end - 1):
+        if p0[i-1] <= p0[i] >= p0[i+1] and t0[i] > t_peak + 45:
+            local_max.append(i)
+    if local_max:
+        refl_i = int(local_max[0])
 
-    return (bloque_comun + "\n\n" + modulo + f"\n\n{AUTOR_APP}").strip()
+    t_ref = float(t0[refl_i])
+    transition = float(np.clip(28 + 0.10 * max(t_ref - t_peak, 40), 28, 85))
 
+    # Pesos temporales derivados de la curva real: antes de t_ref domina Pf; después domina Pb.
+    late_weight = 1.0 / (1.0 + np.exp(-(t0 - t_ref) / transition))
+    early_weight = 1.0 - late_weight
 
-def crear_pdf_objeto():
-    try:
-        from fpdf import FPDF
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        return pdf
-    except Exception:
-        return None
+    # La reflexión no aparece antes del pie sistólico ni domina al inicio.
+    early_weight[t0 < t0[foot_i]] = 1.0
+    late_weight[t0 < t0[foot_i]] = 0.0
 
+    # Reparto estricto del exceso real: no se inventa presión. Pf + Pb = presión real - PAD.
+    pf = excess * early_weight
+    pb = excess * late_weight
 
-def preparar_texto_pdf(texto: Any, max_token: int = 42) -> str:
-    """Texto seguro para FPDF.
+    # Refuerzo de hombro reflejado real: si hay convexidad/segunda meseta, se asigna a Pb con forma tomada del exceso real.
+    shoulder_window = np.exp(-((t0 - t_ref) / max(transition * 2.2, 80)) ** 2)
+    pb = np.maximum(pb, excess * shoulder_window * np.clip(0.35 + 0.45 * (excess / max(pp, 1)), 0.20, 0.80))
+    # Rebalancear para que no exceda la presión real.
+    total = pf + pb
+    over = total > excess
+    scale = np.ones_like(total)
+    scale[over] = excess[over] / np.maximum(total[over], 1e-6)
+    pf *= scale
+    pb *= scale
 
-    Evita el error: "Not enough horizontal space to render a single character",
-    que aparece cuando una palabra/cadena muy larga, una URL, una unidad o un
-    valor pegado no entra en el ancho disponible de la celda.
-    """
-    s = str(texto or "")
-    s = s.replace("\t", " ")
-    s = re.sub(r"[ ]{2,}", " ", s)
-    s = s.encode("latin-1", "replace").decode("latin-1")
-    partes = []
-    for tok in s.split(" "):
-        if len(tok) > max_token:
-            partes.append(" ".join(tok[i:i + max_token] for i in range(0, len(tok), max_token)))
-        else:
-            partes.append(tok)
-    return " ".join(partes)
+    pf_abs = pad + pf
+    pb_abs = pad + pb
+    p_model = pad + pf + pb  # exactamente la curva real suavizada/calibrada
 
+    pf_peak = float(np.nanmax(pf))
+    pb_peak = float(np.nanmax(pb))
+    tfor = float(t0[int(np.nanargmax(pf))]) if pf_peak > 0 else np.nan
+    tref_m = float(t0[int(np.nanargmax(pb))]) if pb_peak > 0 else np.nan
+    rm = pb_peak / pf_peak if pf_peak > 0 else np.nan
+    ri = pb_peak / (pf_peak + pb_peak) if (pf_peak + pb_peak) > 0 else np.nan
+    t_ratio = tfor / tref_m if not np.isnan(tref_m) and tref_m > 0 else np.nan
 
-def pdf_texto(pdf, texto: str, size: int = 10, bold: bool = False, h: float = 5.5) -> None:
-    pdf.set_font("Arial", "B" if bold else "", size)
-    safe = preparar_texto_pdf(texto, max_token=38 if size >= 10 else 46)
-    ancho = max(20, pdf.w - pdf.l_margin - pdf.r_margin)
-    try:
-        pdf.multi_cell(ancho, h, safe)
-    except Exception:
-        # Fallback ultraseguro: baja fuente y corta tokens más agresivamente.
-        pdf.set_font("Arial", "B" if bold else "", max(6, size - 2))
-        safe = preparar_texto_pdf(texto, max_token=24)
-        pdf.multi_cell(ancho, h, safe)
-
-
-def pdf_celda_segura(pdf, w: float, h: float, texto: Any, border: int = 0, ln: int = 0, align: str = "L",
-                     size: int = 8, bold: bool = False) -> None:
-    """Celda segura para textos cortos en tablas estrechas."""
-    pdf.set_font("Arial", "B" if bold else "", size)
-    w = max(float(w), 18.0)
-    max_chars = max(4, int(w / max(size * 0.36, 2.2)))
-    safe = preparar_texto_pdf(texto, max_token=max_chars)
-    if len(safe) > max_chars + 6:
-        safe = safe[:max_chars + 3] + "..."
-    try:
-        pdf.cell(w, h, safe, border=border, ln=ln, align=align)
-    except Exception:
-        pdf.set_font("Arial", "B" if bold else "", 6)
-        pdf.cell(w, h, preparar_texto_pdf(safe[:max_chars], max_token=10), border=border, ln=ln, align=align)
-
-
-
-# =========================================================
-# FIRMA DIGITAL CONDICIONAL POR USUARIO
-# =========================================================
-
-FIRMA_RICARDO_DANIEL_OLANO_B64 = """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"""
-
-
-def _normalizar_identidad_usuario_firma(valor: Any) -> str:
-    """Normaliza nombre/usuario para reconocer al Dr. Ricardo Daniel Olano."""
-    t = normalizar_txt(valor)
-    t = t.replace("_", " ").replace("-", " ")
-    t = re.sub(r"[^a-z0-9 ]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-
-def usuario_habilitado_firma_olano(usuario_info: Optional[Dict[str, Any]] = None) -> bool:
-    """Compatibilidad: mantiene firma predeterminada de Olano si no cargó firma propia."""
-    try:
-        info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    except Exception:
-        info = usuario_info or {}
-    candidatos = [info.get("nombre", ""), info.get("usuario", ""), info.get("matricula", "")]
-    identidad = " | ".join(_normalizar_identidad_usuario_firma(x) for x in candidatos if es_valor_util(x))
-    return (
-        "ricardo daniel olano" in identidad
-        or "daniel olano" in identidad
-        or "ricardo_olano" in identidad
-        or ("ricardo daniel" in identidad and "olano" in identidad)
-    )
-
-
-def obtener_path_firma_olano() -> Optional[str]:
-    """Firma histórica predeterminada de Olano, usada solo como respaldo."""
-    try:
-        _asegurar_directorio_app()
-        firma_path = APP_DATA_DIR / "firma_ricardo_daniel_olano.png"
-        if not firma_path.exists() or firma_path.stat().st_size < 1000:
-            import base64 as _base64
-            firma_path.write_bytes(_base64.b64decode(FIRMA_RICARDO_DANIEL_OLANO_B64.encode("ascii")))
-        return str(firma_path)
-    except Exception:
-        return None
-
-
-def obtener_path_firma_usuario(usuario_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """Firma cargada por el usuario; Olano conserva respaldo automático si no carga una propia."""
-    info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    ruta = path_asset_usuario(info, "firma") if "path_asset_usuario" in globals() else None
-    if ruta:
-        return ruta
-    if usuario_habilitado_firma_olano(info):
-        return obtener_path_firma_olano()
-    return None
-
-
-def obtener_path_sello_usuario(usuario_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    return path_asset_usuario(info, "sello") if "path_asset_usuario" in globals() else None
-
-
-def insertar_firma_olano_en_pdf(pdf, usuario_info: Optional[Dict[str, Any]] = None, ancho: int = 58, y: Optional[float] = None) -> None:
-    """Inserta firma y sello del usuario autenticado sin distorsión. Nombre histórico conservado para no romper llamadas."""
-    info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    firma_path = obtener_path_firma_usuario(info)
-    sello_path = obtener_path_sello_usuario(info)
-    if not firma_path and not sello_path:
-        return
-    try:
-        if y is None:
-            if pdf.get_y() > 218:
-                pdf.add_page()
-                pdf.ln(8)
-            else:
-                pdf.ln(6)
-            y = pdf.get_y()
-        x_center = 105
-        if sello_path:
-            pdf.image(sello_path, x=x_center - 55, y=y, w=42)
-        if firma_path:
-            pdf.image(firma_path, x=x_center - 10, y=y, w=ancho)
-        pdf.set_y(y + 42)
-        pdf.set_font("Arial", "", 8)
-        texto = texto_firma_usuario(info) if "texto_firma_usuario" in globals() else "Firma y sello digital autorizados"
-        pdf.multi_cell(0, 4, texto.encode("latin-1", "replace").decode("latin-1"), align="C")
-    except Exception:
-        pass
-
-def generar_pdf_integrado(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> bytes:
-    pdf = crear_pdf_objeto()
-    if pdf is None:
-        return generar_informe_texto(df, contexto_embarazo).encode("utf-8")
-
-    import tempfile
-    import os
-
-    r = extraer_resumen_integrado(df)
-    calidad = resumen_calidad_integracion(df)
-
-    # HOJA 1: Informe clínico textual.
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 15)
-    pdf.multi_cell(0, 8, "INFORME MEDICO HEMODINAMICO INTEGRADO", align="C")
-    pdf.ln(2)
-    pdf_texto(pdf, AUTOR_APP, 10, True)
-    pdf_texto(pdf, f"Fecha de emisión del informe: {datetime.now().strftime('%d/%m/%Y %H:%M')}", 9)
-    pdf_texto(pdf, f"Fecha del estudio: {r.get('fecha') or 'No disponible'}", 9)
-    pdf_texto(pdf, f"Fecha de nacimiento: {r.get('fecha_nacimiento') or 'No disponible'}", 9)
-    pdf.ln(3)
-
-    informe_pdf = generar_informe_texto(df, contexto_embarazo)
-    for bloque in informe_pdf.split("\n\n"):
-        pdf_texto(pdf, bloque, 10, bold=bloque[:2].isdigit() or bloque.startswith("INFORME"))
-        pdf.ln(1)
-
-
-    # HOJA 2: Fenotipado clínico automatizado IC vs IRV/RVS.
-    graf_fenotipo = crear_grafico_fenotipado_dinamico_bytes(r, df)
-    if graf_fenotipo is not None:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 15)
-        pdf.multi_cell(0, 8, "FENOTIPADO CLINICO AUTOMATIZADO", align="C")
-        pdf.ln(2)
-        pdf_texto(pdf, "Ubicacion real del paciente en el plano indice cardiaco versus resistencia vascular sistemica. Si existen mediciones basal y de pie, la flecha muestra el comportamiento ortostatico real.", 9)
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                tmp.write(graf_fenotipo.getvalue())
-                tmp_path = tmp.name
-            pdf.image(tmp_path, x=12, w=185)
-            os.remove(tmp_path)
-        except Exception as e:
-            pdf_texto(pdf, f"No se pudo insertar el grafico de fenotipado dinamico: {e}", 9)
-
-    # HOJA 2: Control de integración.
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 15)
-    pdf.multi_cell(0, 8, "CONTROL DE INTEGRACION DE DATOS", align="C")
-    pdf.ln(2)
-    pdf_texto(pdf, "Tabla de trazabilidad: valores detectados por archivo y valor final integrado.", 10, True)
-    tabla = calidad["tabla"]
-    for _, fila in tabla.iterrows():
-        pdf_texto(
-            pdf,
-            f"{fila['Variable']}: archivo 1={fila['Archivo 1']} | archivo 2={fila['Archivo 2']} | integrado={fila['Valor integrado']} | {fila['Estado']}",
-            8,
-        )
-    if calidad["faltantes"]:
-        pdf.ln(2)
-        pdf_texto(pdf, "Variables criticas faltantes: " + ", ".join(calidad["faltantes"]), 9, True)
-
-    # Se retiró la antigua hoja 3 de resumen global por dominios.
-    # La interpretación se mantiene dentro del texto principal y en las hojas individuales de cada dominio.
-
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 15)
-        pdf.multi_cell(0, 8, "MODULO EMBARAZO - HEMODINAMIA MATERNA", align="C")
-        pdf.ln(2)
-        pdf_texto(pdf, interpretar_hemodinamica_embarazo(r_panel, contexto_embarazo), 9)
-        pdf.ln(2)
-        pdf_texto(pdf, "MODULO RIESGO DE PREECLAMPSIA", 11, True)
-        pdf_texto(pdf, texto_riesgo_preeclampsia(r_panel, contexto_embarazo), 9)
-        graf_pe = crear_grafico_riesgo_preeclampsia_bytes(r_panel, contexto_embarazo)
-        if graf_pe is not None:
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(graf_pe.getvalue())
-                    tmp_path = tmp.name
-                pdf.image(tmp_path, x=25, w=160)
-                os.remove(tmp_path)
-            except Exception as e:
-                pdf_texto(pdf, f"No se pudo insertar el gauge semicircular de riesgo PE: {e}", 9)
-        curva = crear_curva_impedancia_representativa_bytes(r_panel)
-        if curva is not None:
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 15)
-            pdf.multi_cell(0, 8, "CURVA DE IMPEDANCIA", align="C")
-            pdf.ln(2)
-            pdf_texto(pdf, "Curva representativa basada en las metricas extraidas. Para incorporar la imagen cruda exacta del equipo, usar el PDF original o captura de la curva.", 9)
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(curva.getvalue())
-                    tmp_path = tmp.name
-                pdf.image(tmp_path, x=15, w=180)
-                os.remove(tmp_path)
-            except Exception as e:
-                pdf_texto(pdf, f"No se pudo insertar la curva de impedancia: {e}", 9)
-        pdf.ln(2)
-        pdf_texto(pdf, "Base conceptual: Ferrazzi et al. describen que en trastornos hipertensivos del embarazo con SGA predomina bajo gasto/indice cardiaco y mayor resistencia vascular; el consenso AIPE/SIMP propone estratificar perfiles hemodinamicos maternos y considerar la hemodinamia para orientar tratamiento y seguimiento.", 9)
+    # Flujo aórtico del paciente: derivado de la pendiente positiva real, redondeado, sin triángulo fijo.
+    fc = to_float(row.get("fc"))
+    pe_pct = to_float(row.get("pe"))
+    cycle_ms = 60000.0 / fc if not np.isnan(fc) and fc > 20 else 1000.0
+    if not np.isnan(pe_pct) and pe_pct > 10:
+        ej_duration = float(np.clip(cycle_ms * pe_pct / 100.0, 190, 520))
     else:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 15)
-        pdf.multi_cell(0, 8, "MODULO NO EMBARAZADAS - TRATAMIENTO HEMODINAMICO", align="C")
-        pdf.ln(2)
-        pdf_texto(pdf, limpiar_referencias_obstetricas_en_linea(sugerencia_tratamiento_no_embarazada(r, df)), 10)
-        pdf.ln(2)
-        pdf_texto(pdf, "Base conceptual: Ferrario et al. describen que la cardiografia de impedancia permite individualizar el tratamiento antihipertensivo segun IC/GC, RVS/SVRI y CFT/TFC.", 9)
-
-    # Hojas siguientes: gauges semicirculares individuales por cada dominio con sus métricas propias.
-    grafs_ind = crear_graficos_dominios_individuales_bytes(r)
-    metricas_dom = metricas_por_dominio(r)
-    for dominio, items in metricas_dom.items():
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 15)
-        pdf.multi_cell(0, 8, f"DOMINIO: {dominio.upper()}", align="C")
-        pdf.ln(2)
-        graf = grafs_ind.get(dominio)
-        if graf is not None:
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(graf.getvalue())
-                    tmp_path = tmp.name
-                pdf.image(tmp_path, x=15, w=180)
-                os.remove(tmp_path)
-            except Exception as e:
-                pdf_texto(pdf, f"No se pudo insertar el gauge semicircular del dominio: {e}", 9)
-        else:
-            pdf_texto(pdf, "No hay metricas numericas suficientes para generar gauges semicirculares en este dominio.", 9)
-        pdf.ln(4)
-        pdf_texto(pdf, "Metricas incluidas:", 11, True)
-        if items:
-            for item in items:
-                score = item.get("score")
-                score_txt = "sin score" if score is None else f"{score*100:.0f}%"
-                if item.get("referencia_baja") is not None and item.get("referencia_alta") is not None:
-                    pdf_texto(pdf, f"- {item['variable']}: {fmt(item['valor'])} {item.get('unidad','')} | Normal: {fmt(item.get('referencia_baja'))}-{fmt(item.get('referencia_alta'))} {item.get('unidad','')} | Estado: {item.get('estado','')} | Score: {score_txt}", 9)
-                else:
-                    pdf_texto(pdf, f"- {item['variable']}: {fmt(item['valor'])} | Score: {score_txt}", 9)
-        else:
-            pdf_texto(pdf, "No se reconocieron metricas para este dominio.", 9)
-
-    # Firma digital condicional: solo para usuario Ricardo Daniel Olano.
-    insertar_firma_olano_en_pdf(pdf)
-
-    # Bibliografia clínica utilizada en la app: se agrega al informe médico integrado.
-    try:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 12)
-        pdf.multi_cell(0, 6, "REFERENCIAS BIBLIOGRAFICAS UTILIZADAS")
-        pdf.ln(2)
-        pdf.set_font("Arial", size=8)
-        for i, ref in enumerate(REFERENCIAS_BIBLIOGRAFICAS, start=1):
-            pdf.multi_cell(0, 4, safe_pdf_texto_simple(f"{i}. {ref}"))
-    except Exception:
-        pass
-
-    try:
-
-
-        pdf.add_page()
-
-
-        pdf.set_font('Arial', 'B', 10)
-
-
-        pdf.multi_cell(0, 5, 'SOPORTE BIBLIOGRÁFICO DE LA APP')
-
-
-        pdf.ln(2)
-
-
-        pdf.set_font('Arial', '', 8)
-
-
-        pdf.multi_cell(0, 4, construir_bloque_referencias_pdf())
-
-
-    except Exception:
-
-
-        pass
-
-
-    out = pdf.output(dest="S")
-    if isinstance(out, bytearray):
-        return bytes(out)
-    if isinstance(out, bytes):
-        return out
-    return str(out).encode("latin-1", "replace")
-
-
-
-def generar_pdf_resumido_una_hoja(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> bytes:
-    """Genera un informe ejecutivo de una sola hoja PDF.
-    Usa el registro acostado/decúbito para diagnóstico principal y reserva de pie para ortostatismo.
-    """
-    pdf = crear_pdf_objeto()
-    texto_fallback = generar_informe_texto(df, contexto_embarazo)
-    if pdf is None:
-        return texto_fallback.encode("utf-8")
-
-    import tempfile
-    import os
-
-    r = extraer_resumen_integrado(df)
-    es_embarazo = bool(contexto_embarazo and contexto_embarazo.get("embarazada"))
-
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=False)
-    pdf.set_font("Arial", "B", 13)
-    titulo = "INFORME RESUMIDO CGI - HEMODINAMIA MATERNA" if es_embarazo else "INFORME RESUMIDO CGI - HTA NO EMBARAZADA"
-    pdf.multi_cell(0, 7, titulo, align="C")
-    pdf.set_font("Arial", "", 8)
-    pdf.multi_cell(pdf.w - pdf.l_margin - pdf.r_margin, 4, preparar_texto_pdf(AUTOR_APP, max_token=40), align="C")
-    pdf.ln(1)
-
-    # Encabezado paciente
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(0, 5, "Datos del paciente", ln=1)
-    pdf.set_font("Arial", "", 8)
-    datos = [
-        f"Paciente: {r.get('paciente') or 'No disponible'}",
-        f"DNI: {r.get('dni') or 'SD'}",
-        f"Edad: {r.get('edad') or 'No disponible'}",
-        f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-        f"Fecha del estudio: {r.get('fecha') or 'No disponible'}",
-        f"Fecha de nacimiento: {r.get('fecha_nacimiento') or 'No disponible'}",
-        f"Diagnóstico basado en posición: {r.get('posicion_referencia') or 'Acostado/decúbito si está disponible'}",
-    ]
-    if es_embarazo:
-        eg = contexto_embarazo.get("edad_gestacional") or "No especificada"
-        datos.append(f"Embarazo: sí | Edad gestacional: {eg} semanas")
-    for d in datos:
-        pdf_texto(pdf, d, size=8, h=4)
-
-    # Métricas clave en dos columnas
-    pdf.ln(1)
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(0, 5, "Métricas principales", ln=1)
-    pdf.set_font("Arial", "", 8)
-    metricas = [
-        ("PA", f"{fmt(r.get('pas'),0)}/{fmt(r.get('pad'),0)} mmHg"),
-        ("FC", fmt(r.get('fc'),0," lpm")),
-        ("IC", fmt(r.get('ic'),2," L/min/m2")),
-        ("RVS/IRV", fmt(r.get('irv'),0," dyn.s.cm-5")),
-        ("CFT", fmt(r.get('cft'),2)),
-        ("CFTnr", fmt(r.get('cftnr'),2)),
-        ("IV", fmt(r.get('iv'),2)),
-        ("IAC/ACI", fmt(r.get('iac'),2)),
-        ("CTS", fmt(r.get('cts'),2)),
-        ("Dinamia", clasificacion_dinamica_obligatoria(r, contexto_embarazo)),
-        ("EA/EES", fmt(r.get('ava'),2)),
-    ]
-    x0 = pdf.get_x(); y0 = pdf.get_y(); col_w = 92
-    for idx, (k, v) in enumerate(metricas):
-        x = 10 if idx % 2 == 0 else 105
-        if idx % 2 == 0 and idx > 0:
-            y0 += 5
-        pdf.set_xy(x, y0)
-        pdf.set_font("Arial", "B", 8)
-        pdf_celda_segura(pdf, 24, 4, k, border=0, size=8, bold=True)
-        pdf_celda_segura(pdf, col_w-24, 4, v, border=0, size=8, bold=False)
-    pdf.set_y(y0 + 7)
-
-    # Interpretación excluyente
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(0, 5, "Interpretación clínica resumida", ln=1)
-    pdf.set_font("Arial", "", 8)
-    if es_embarazo:
-        resumen_clinico = interpretar_hemodinamica_embarazo(r_panel, contexto_embarazo)
-        riesgo = texto_riesgo_preeclampsia(r_panel, contexto_embarazo)
-        texto = (
-            "Módulo aplicado: embarazo/HDP/PE. No se aplica módulo de HTA no embarazada.\n"
-            + resumen_clinico + "\n" + riesgo + "\n"
-            + "Siglas: HDP=trastornos hipertensivos del embarazo; PE=preeclampsia; "
-              "AGA=adecuado para edad gestacional; SGA/RCIU/FGR/IUGR=restricción del crecimiento fetal; "
-              "EG=edad gestacional; IC/CI=índice cardíaco; RVS/IRV/TPVR=resistencia vascular sistémica; PAM/MAP=presión arterial media."
-        )
-    else:
-        texto = (
-            "Módulo aplicado: HTA no embarazada. No se aplica módulo obstétrico ni score PE/HDP.\n"
-            + limpiar_referencias_obstetricas_en_linea(sugerencia_tratamiento_no_embarazada(r, df))
-        )
-    # Limitar para que entre en una hoja
-    lineas = []
-    for linea in str(texto).splitlines():
-        linea = linea.strip()
-        if linea:
-            lineas.append(linea)
-    texto_corto = "\n".join(lineas[:18])
-    pdf_texto(pdf, texto_corto, size=8, h=4)
-
-    # Mini gráfico: riesgo PE si embarazada, si no métricas por dominio/primero disponible
-    y_actual = pdf.get_y()
-    espacio_restante = 260 - y_actual
-    if espacio_restante > 38:
-        graf = crear_grafico_riesgo_preeclampsia_bytes(r_panel, contexto_embarazo) if es_embarazo else None
-        if graf is None:
-            grafs = crear_graficos_dominios_individuales_bytes(r)
-            graf = next(iter(grafs.values()), None) if grafs else None
-        if graf is not None:
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(graf.getvalue())
-                    tmp_path = tmp.name
-                pdf.image(tmp_path, x=45, y=y_actual + 2, w=120)
-                os.remove(tmp_path)
-                pdf.set_y(min(270, y_actual + 55))
-            except Exception:
-                pass
-
-    # Firma digital condicional dentro de una hoja, solo para Ricardo Daniel Olano.
-    if usuario_habilitado_firma_olano():
-        insertar_firma_olano_en_pdf(pdf, ancho=48, y=236)
-
-    try:
-        agregar_capturas_originales_fpdf_una_hoja(pdf, max_capturas=2)
-    except Exception:
-        pass
-
-    # Nota final dentro de una hoja
-    pdf.set_y(275)
-    pdf.set_font("Arial", "I", 7)
-    nota = "Informe resumido de una hoja. El informe completo mantiene trazabilidad, gráficos por dominio y detalles metodológicos."
-    pdf.multi_cell(pdf.w - pdf.l_margin - pdf.r_margin, 4, preparar_texto_pdf(nota, max_token=40), align="C")
-
-    out = pdf.output(dest="S")
-    if isinstance(out, bytearray):
-        return bytes(out)
-    if isinstance(out, bytes):
-        return out
-    return str(out).encode("latin-1", "replace")
-
-def excel_bytes_from_df(df: pd.DataFrame) -> Optional[bytes]:
-    try:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="CGI_integrado")
-        output.seek(0)
-        return output.getvalue()
-    except Exception:
-        return None
-
-
-def construir_fila_paciente_integrada(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    """Devuelve un DataFrame de UNA SOLA fila con los datos integrados del paciente.
-
-    Toma los datos clinicos (PAS/PAD ficha clinica) y las metricas hemodinamicas
-    (CINTA basal/acostada) ya consolidadas por extraer_resumen_integrado, y
-    agrega las conclusiones diagnosticas. Esta es la fila final por paciente
-    que resulta de la integracion de los uno o dos PDFs cargados.
-    """
-    if df is None or (hasattr(df, "empty") and df.empty):
-        return pd.DataFrame()
-
-    r = extraer_resumen_integrado(df) or {}
-    contexto_embarazo = contexto_embarazo or {}
-
-    fila = {
-        "Paciente": r.get("paciente"),
-        "DNI": sanitizar_dni(r.get("dni")) if "sanitizar_dni" in globals() else r.get("dni"),
-        "Edad": r.get("edad"),
-        "Fecha_nacimiento": r.get("fecha_nacimiento"),
-        "Fecha_estudio": r.get("fecha"),
-        "Obra_social": r.get("obra_social"),
-        "Metodo_referencia": r.get("metodo_referencia"),
-        "Posicion_referencia": r.get("posicion_referencia"),
-        "PAS_mmHg": limpiar_numero(r.get("pas")),
-        "PAD_mmHg": limpiar_numero(r.get("pad")),
-        "FC_lpm": limpiar_numero(r.get("fc")),
-        "IC_L_min_m2": limpiar_numero(r.get("ic")),
-        "IRV_RVS": limpiar_numero(r.get("irv")),
-        "CA": limpiar_numero(r.get("ca")),
-        "CFT": limpiar_numero(r.get("cft")),
-        "CFTnr": limpiar_numero(r.get("cftnr")),
-        "IV": limpiar_numero(r.get("iv")),
-        "IAC": limpiar_numero(r.get("iac")),
-        "CTS": limpiar_numero(r.get("cts")),
-        "EA_Capan": limpiar_numero(r.get("ea")),
-        "EES_Capan": limpiar_numero(r.get("ees")),
-        "EA_EES_AVA": limpiar_numero(r.get("ava")),
-        "DS": limpiar_numero(r.get("ds")),
-        "IDS": limpiar_numero(r.get("ids")),
-        "Z0": limpiar_numero(r.get("z0")),
-        "Perfil_hemodinamico": diagnostico_perfil_hemodinamico(r.get("ic"), r.get("irv")),
-        "Estado_volemico": diagnostico_volemia(r.get("cft"), r.get("cftnr")),
-        "Contractilidad": diagnostico_contractilidad(r.get("iv"), r.get("iac"), r.get("cts")),
-        "Acoplamiento_VA": diagnostico_acoplamiento(r.get("ea"), r.get("ees"), r.get("ava")),
-        "Tiene_registro_de_pie": bool(r.get("df_de_pie_disponible")),
-    }
-
-    if contexto_embarazo.get("embarazada"):
-        fila["Embarazo"] = "SI"
-        fila["Edad_gestacional"] = contexto_embarazo.get("edad_gestacional")
-        fila["HDP_sospecha_PE"] = "SI" if contexto_embarazo.get("hdp") else "NO"
-        fila["Crecimiento_fetal"] = contexto_embarazo.get("crecimiento_fetal")
-        fila["Doppler_uterino"] = contexto_embarazo.get("doppler_uterino")
-        fila["IMC_materno"] = contexto_embarazo.get("imc")
-    else:
-        fila["Embarazo"] = "NO"
-
-    return pd.DataFrame([fila])
-
-
-def excel_bytes_paciente_integrado(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
-    """Genera un Excel con UNA SOLA FILA por paciente, resultado de la integracion.
-
-    La hoja principal 'Paciente_integrado' contiene la fila unica con datos
-    demograficos, metricas hemodinamicas integradas y conclusiones diagnosticas.
-    Se incluye una hoja secundaria 'Datos_crudos' opcional con el detalle por
-    archivo, para auditoria.
-    """
-    try:
-        fila = construir_fila_paciente_integrada(df, contexto_embarazo)
-        if fila is None or fila.empty:
-            return None
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            fila.to_excel(writer, index=False, sheet_name="Paciente_integrado")
-            try:
-                if df is not None and not df.empty:
-                    df.to_excel(writer, index=False, sheet_name="Datos_crudos")
-            except Exception:
-                pass
-        output.seek(0)
-        return output.getvalue()
-    except Exception:
-        return None
-
-
-
-
-# =========================================================
-# OVERRIDE V13 - INTEGRACION CORREGIDA PAS/PAD + IRV
-# Regla: métricas hemodinámicas del diagnóstico = CINTA basal/acostada.
-# El registro DE PIE se reserva para ortostatismo. PAS/PAD pueden rescatarse
-# desde otro archivo si no están en la fila CINTA, porque pertenecen a la ficha clínica.
-# =========================================================
-
-COLUMNAS_NUMERICAS_HEMO_V13 = {
-    "FC", "IC", "IRV", "CA", "CFT", "CFTnr", "IV", "IAC", "CTS", "EA", "EES", "EA/EES", "DS", "IDS", "Z0"
-}
-
-RANGOS_INTEGRACION_V13 = {
-    "PAS": (60, 260),
-    "PAD": (30, 160),
-    "FC": (35, 180),
-    "IC": (0.8, 8.0),
-    # IRV/índice de resistencia vascular: evita capturar 326 u otros números ajenos.
-    "IRV": (700, 6000),
-    "CA": (0.2, 8.0),
-    "CFT": (5, 90),
-    "CFTnr": (1, 200),
-    "IV": (0, 250),
-    "IAC": (0, 80),
-    "CTS": (0.05, 100),
-    "EA": (0.1, 10),
-    "EES": (0.1, 20),
-    "EA/EES": (0.1, 5),
-    "DS": (10, 250),
-    "IDS": (5, 150),
-    "Z0": (5, 80),
-}
-
-
-def valor_plausible_integracion_v13(variable: str, valor: Any) -> bool:
-    if not es_valor_util(valor):
-        return False
-    if variable in RANGOS_INTEGRACION_V13:
-        v = limpiar_numero(valor)
-        if v is None:
-            return False
-        lo, hi = RANGOS_INTEGRACION_V13[variable]
-        return lo <= v <= hi
-    return True
-
-
-def _filas_con_reconocimiento_v13(df: pd.DataFrame) -> pd.DataFrame:
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    if dfx.empty:
-        return dfx
-    dfx["Posición_reconocida"] = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    dfx["Método_reconocido"] = [detectar_metodo_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    return dfx
-
-
-def seleccionar_df_diagnostico(df: pd.DataFrame) -> pd.DataFrame:
-    """Selección diagnóstica corregida.
-
-    Prioridad:
-    1) CINTA que no diga DE PIE.
-    2) CINTA + acostado, si está explícito.
-    3) Acostado/decúbito no-de-pie.
-    4) Cualquier fila no-de-pie.
-    5) Último recurso: primera fila.
-
-    Esto evita que el registro DE PIE reemplace al basal y evita que SPOT pise a CINTA.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    dfx = _filas_con_reconocimiento_v13(df)
-
-    cinta_no_pie = dfx[(dfx["Método_reconocido"] == "cinta") & (dfx["Posición_reconocida"] != "de_pie")]
-    if not cinta_no_pie.empty:
-        # Si hay más de una, preferir la que dice acostado/basal; si no, la primera CINTA no-de-pie.
-        cinta_ac = cinta_no_pie[cinta_no_pie["Posición_reconocida"] == "acostado"]
-        return (cinta_ac if not cinta_ac.empty else cinta_no_pie).iloc[[0]].reset_index(drop=True)
-
-    acostado = dfx[(dfx["Posición_reconocida"] == "acostado") & (dfx["Posición_reconocida"] != "de_pie")]
-    if not acostado.empty:
-        return acostado.iloc[[0]].reset_index(drop=True)
-
-    no_de_pie = dfx[dfx["Posición_reconocida"] != "de_pie"]
-    if not no_de_pie.empty:
-        return no_de_pie.iloc[[0]].reset_index(drop=True)
-
-    return dfx.iloc[[0]].reset_index(drop=True)
-
-
-def seleccionar_df_de_pie(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    dfx = _filas_con_reconocimiento_v13(df)
-    pie = dfx[dfx["Posición_reconocida"] == "de_pie"]
-    if not pie.empty:
-        return pie.iloc[[-1]].reset_index(drop=True)
-    return pd.DataFrame()
-
-
-def _buscar_en_df_v13(df: pd.DataFrame, columna: str, variable: str, desde_final: bool = True) -> Any:
-    if df is None or df.empty or columna not in df.columns:
-        return None
-    serie = df[columna].tolist()
-    if desde_final:
-        serie = serie[::-1]
-    for v in serie:
-        if variable in RANGOS_INTEGRACION_V13:
-            if valor_plausible_integracion_v13(variable, v):
-                return v
-        elif es_valor_util(v):
-            return v
-    return None
-
-
-def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-    if df is None or df.empty:
-        return {}
-
-    df_completo = estandarizar_columnas_clinicas(df)
-    df_diag = seleccionar_df_diagnostico(df_completo)
-    df_pie = seleccionar_df_de_pie(df_completo)
-    df_no_pie = _filas_con_reconocimiento_v13(df_completo)
-    if not df_no_pie.empty and "Posición_reconocida" in df_no_pie.columns:
-        df_no_pie = df_no_pie[df_no_pie["Posición_reconocida"] != "de_pie"]
-
-    row: Dict[str, Any] = {}
-    for _, fila in df_diag.iterrows():
-        for k, v in fila.to_dict().items():
-            if es_valor_util(v):
-                row[k] = v
-
-    textos_globales = []
-    for col in ["Diagnóstico", "Medicación", "Texto_PDF"]:
-        if col in df_completo.columns:
-            for v in df_completo[col].tolist():
-                if es_valor_util(v):
-                    textos_globales.append(str(v))
-    if textos_globales:
-        row["Texto_PDF_global"] = " | ".join(textos_globales)[:20000]
-
-    def buscar_contexto(col: str, variable: Optional[str] = None) -> Any:
-        variable = variable or col
-        # Demográficos y ficha clínica: rescate desde todos los archivos no-de-pie si no está en la fila diagnóstica.
-        v = _buscar_en_df_v13(df_diag, col, variable, desde_final=False)
-        if es_valor_util(v):
-            return v
-        v = _buscar_en_df_v13(df_no_pie, col, variable, desde_final=False)
-        if es_valor_util(v):
-            return v
-        v = _buscar_en_df_v13(df_completo, col, variable, desde_final=False)
-        if es_valor_util(v):
-            return v
-        return None
-
-    def buscar_hemo(col: str, variable: Optional[str] = None) -> Any:
-        variable = variable or col
-        # Hemodinámica: SOLO fila diagnóstica CINTA/basal. No rescatar desde SPOT o DE PIE.
-        return _buscar_en_df_v13(df_diag, col, variable, desde_final=False)
-
-    ea = buscar_hemo("EA")
-    ees = buscar_hemo("EES")
-    ava = buscar_hemo("EA/EES")
-    if limpiar_numero(ava) is None and limpiar_numero(ea) is not None and limpiar_numero(ees) not in [None, 0]:
-        ava = limpiar_numero(ea) / limpiar_numero(ees)
-
-    fecha_est = buscar_contexto("Fecha_Estudio") or buscar_contexto("Fecha")
-    fecha_nac = buscar_contexto("Fecha_Nacimiento")
-    edad_calc = calcular_edad_desde_fechas(fecha_nac, fecha_est)
-
-    return {
-        "paciente": buscar_contexto("Paciente"),
-        "dni": sanitizar_dni(buscar_contexto("DNI")),
-        "obra_social": buscar_contexto("Obra_Social"),
-        "edad": edad_calc or buscar_contexto("Edad"),
-        "fecha": formatear_fecha_ddmmyyyy(fecha_est),
-        "fecha_nacimiento": formatear_fecha_ddmmyyyy(fecha_nac),
-        "posicion_referencia": detectar_posicion_fila(row),
-        "metodo_referencia": detectar_metodo_fila(row),
-        "regla_posicion": describir_regla_posicion(df_completo),
-        "texto_global": row.get("Texto_PDF_global"),
-        # PAS/PAD son ficha clínica: se rescatan aunque no figuren en la fila CINTA.
-        "pas": buscar_contexto("PAS", "PAS"),
-        "pad": buscar_contexto("PAD", "PAD"),
-        # Métricas hemodinámicas: solo CINTA/basal.
-        "fc": buscar_hemo("FC", "FC"),
-        "ic": buscar_hemo("IC", "IC"),
-        "irv": buscar_hemo("IRV", "IRV"),
-        "ca": buscar_hemo("CA", "CA"),
-        "cft": buscar_hemo("CFT", "CFT"),
-        "cftnr": buscar_hemo("CFTnr", "CFTnr"),
-        "iv": buscar_hemo("IV", "IV"),
-        "iac": buscar_hemo("IAC", "IAC"),
-        "cts": buscar_hemo("CTS", "CTS"),
-        "ea": ea,
-        "ees": ees,
-        "ava": ava,
-        "ds": buscar_hemo("DS", "DS"),
-        "ids": buscar_hemo("IDS", "IDS"),
-        "z0": buscar_hemo("Z0", "Z0"),
-        "df_de_pie_disponible": not df_pie.empty,
-    }
-
-
-def filtrar_df_cinta_diagnostica(df: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve únicamente los registros con método CINTA para control de integración.
-
-    Regla solicitada:
-    - En el control de integración de PDFs se muestran SOLO las métricas correspondientes a CINTA.
-    - Si existe CINTA acostada/basal, se prioriza esa fila por archivo.
-    - Los registros SPOT no se muestran en esta tabla.
-    - Los registros DE PIE se excluyen de esta tabla y quedan reservados para ortostatismo.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame()
-    dfx = estandarizar_columnas_clinicas(df).copy()
-    dfx["Posición_reconocida"] = [detectar_posicion_fila(f.to_dict()) for _, f in dfx.iterrows()]
-    dfx["Método_reconocido"] = [detectar_metodo_fila(f.to_dict()) for _, f in dfx.iterrows()]
-
-    # Solo CINTA; de pie no entra en la tabla diagnóstica.
-    cinta = dfx[(dfx["Método_reconocido"] == "cinta") & (dfx["Posición_reconocida"] != "de_pie")].copy()
-    if cinta.empty:
-        return pd.DataFrame()
-
-    # Si hay varias filas CINTA por origen, usar primero CINTA+acostado; si no, la primera CINTA no-de-pie.
-    seleccionadas = []
-    grupos = cinta.groupby("origen", dropna=False) if "origen" in cinta.columns else [("archivo", cinta)]
-    for _, g in grupos:
-        g_ac = g[g["Posición_reconocida"] == "acostado"]
-        seleccionadas.append((g_ac.iloc[[0]] if not g_ac.empty else g.iloc[[0]]))
-    return pd.concat(seleccionadas, ignore_index=True) if seleccionadas else pd.DataFrame()
-
-
-def construir_resumen_por_archivo_cinta(df: pd.DataFrame) -> pd.DataFrame:
-    """Resumen por archivo usando solamente registros CINTA diagnósticos."""
-    df_cinta = filtrar_df_cinta_diagnostica(df)
-    if df_cinta.empty:
-        return pd.DataFrame()
-    return construir_resumen_por_archivo(df_cinta)
-
-
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    """Tabla de control de integración restringida a CINTA.
-
-    Importante: esta tabla ya no mezcla SPOT ni DE PIE. Por eso evita mostrar
-    valores incorrectos o no diagnósticos como IRV 326 si provienen de una
-    adquisición que no corresponde a CINTA basal/acostada.
-    """
-    df_cinta = filtrar_df_cinta_diagnostica(df)
-    if df_cinta.empty:
-        return pd.DataFrame([{
-            "Variable": "Sin registro CINTA",
-            "Archivo 1": "—",
-            "Archivo 2": "—",
-            "Valor CINTA integrado": "No disponible",
-            "Estado": "FALTA CINTA",
-        }])
-
-    r = extraer_resumen_integrado(df_cinta)
-    resumen_pdf = construir_resumen_por_archivo_cinta(df)
-    filas = []
-
-    # Solo métricas clínicas/hemodinámicas de CINTA. Los datos administrativos
-    # quedan en la tabla de datos estructurados y en el informe, no en este control.
-    claves = {
-        "PAS": "pas", "PAD": "pad", "FC": "fc", "DS": "ds", "IDS": "ids",
-        "IC": "ic", "IRV/RVS": "irv", "CA": "ca", "CFT": "cft", "CFTnr": "cftnr",
-        "IV": "iv", "IAC": "iac", "CTS": "cts", "EA": "ea", "EES": "ees",
-        "EA/EES": "ava", "Z0": "z0",
-    }
-
-    for variable, key in claves.items():
-        col_fuente = "IRV" if variable == "IRV/RVS" else variable
-        vals_origen = []
-        for _, fila in resumen_pdf.iterrows():
-            val = fila.get(col_fuente)
-            # Validación de plausibilidad para evitar integrar lecturas erróneas.
-            if variable == "IRV/RVS" and not valor_plausible_integracion_v13("IRV", val):
-                vals_origen.append("—")
-            else:
-                vals_origen.append(fmt(val) if limpiar_numero(val) is not None else (str(val) if es_valor_util(val) else "—"))
-
-        integrado = r.get(key)
-        if variable == "IRV/RVS" and not valor_plausible_integracion_v13("IRV", integrado):
-            integrado_txt = "No disponible"
-            estado = "FALTA"
-        else:
-            integrado_txt = fmt(integrado) if limpiar_numero(integrado) is not None else (str(integrado) if es_valor_util(integrado) else "No disponible")
-            estado = "OK" if es_valor_util(integrado) else "FALTA"
-
-        filas.append({
-            "Variable": variable,
-            "Archivo 1 (CINTA)": vals_origen[0] if len(vals_origen) > 0 else "—",
-            "Archivo 2 (CINTA)": vals_origen[1] if len(vals_origen) > 1 else "—",
-            "Valor CINTA integrado": integrado_txt,
-            "Estado": estado,
-        })
-    return pd.DataFrame(filas)
-
-
-def resumen_calidad_integracion(df: pd.DataFrame) -> Dict[str, Any]:
-    tabla = generar_tabla_integracion(df)
-    criticas = ["IC", "IRV/RVS", "FC", "CFT", "CFTnr", "IV", "IAC", "CTS", "EA", "EES", "EA/EES"]
-    faltantes = tabla[(tabla["Variable"].isin(criticas)) & (tabla["Estado"] == "FALTA")]["Variable"].tolist()
-    completas = tabla[tabla["Estado"] == "OK"]["Variable"].tolist()
-    falta_cinta = bool((tabla["Estado"] == "FALTA CINTA").any()) if "Estado" in tabla.columns else False
-    return {"tabla": tabla, "faltantes": faltantes, "completas": completas, "falta_cinta": falta_cinta}
-
-
-
-
-# =========================================================
-# OVERRIDE V15 - VALIDACION HEMODINAMICA INTELIGENTE
-# Objetivos:
-# 1) Validar que cada valor sea fisiológicamente plausible.
-# 2) Detectar incoherencias entre métricas relacionadas.
-# 3) Mantener diagnóstico con CINTA basal/acostada y DE PIE solo para ortostatismo.
-# 4) Evitar que valores aislados o mal capturados generen conclusiones automáticas.
-# =========================================================
-
-RANGOS_INTELIGENTES_V15 = {
-    "PAS": (60, 260, "mmHg"),
-    "PAD": (30, 160, "mmHg"),
-    "FC": (35, 180, "lpm"),
-    "IC": (0.8, 8.0, "L/min/m²"),
-    "IRV/RVS": (700, 6000, "dyn·s·cm⁻⁵·m²"),
-    "CA": (0.2, 8.0, "mL/mmHg"),
-    "CFT": (5, 90, "kΩ⁻¹"),
-    "CFTnr": (1, 200, "índice"),
-    "IV": (0, 250, "/1000/s"),
-    "IAC": (0, 800, "/100/s²"),
-    "CTS": (0.05, 100, "% o ratio"),
-    "EA": (0.1, 10, "mmHg/mL"),
-    "EES": (0.1, 20, "mmHg/mL"),
-    "EA/EES": (0.1, 5, "ratio"),
-    "DS": (10, 250, "mL/latido"),
-    "IDS": (5, 150, "mL/latido/m²"),
-    "Z0": (5, 80, "ohm"),
-}
-
-CLAVE_VARIABLE_V15 = {
-    "PAS": "pas", "PAD": "pad", "FC": "fc", "IC": "ic", "IRV/RVS": "irv", "CA": "ca",
-    "CFT": "cft", "CFTnr": "cftnr", "IV": "iv", "IAC": "iac", "CTS": "cts",
-    "EA": "ea", "EES": "ees", "EA/EES": "ava", "DS": "ds", "IDS": "ids", "Z0": "z0",
-}
-
-
-def _estado_rango_v15(variable: str, valor: Any) -> Tuple[str, str]:
-    v = limpiar_numero(valor)
-    if v is None:
-        return "FALTA", "No reconocido"
-    if variable not in RANGOS_INTELIGENTES_V15:
-        return "OK", "Sin rango definido"
-    lo, hi, unidad = RANGOS_INTELIGENTES_V15[variable]
-    if v < lo or v > hi:
-        return "REVISAR", f"Fuera del rango plausible ({fmt(lo)}-{fmt(hi)} {unidad})"
-    return "OK", f"Dentro del rango plausible ({fmt(lo)}-{fmt(hi)} {unidad})"
-
-
-def validar_hemodinamica_inteligente(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Valida coherencia fisiológica y semántica del estudio diagnóstico.
-
-    Usa exclusivamente el resumen integrado basado en CINTA basal/acostada. No usa el registro DE PIE
-    salvo para informar disponibilidad ortostática.
-    """
-    r = extraer_resumen_integrado(df)
-    filas = []
-    alertas: List[str] = []
-    revisiones = 0
-    faltantes = 0
-
-    # Validación métrica por métrica.
-    for variable, key in CLAVE_VARIABLE_V15.items():
-        valor = r.get(key)
-        estado, detalle = _estado_rango_v15(variable, valor)
-        if estado == "REVISAR":
-            revisiones += 1
-        elif estado == "FALTA":
-            faltantes += 1
-        filas.append({
-            "Variable": variable,
-            "Valor usado": fmt(valor) if limpiar_numero(valor) is not None else "No disponible",
-            "Estado": estado,
-            "Validación": detalle,
-        })
-
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    fc = limpiar_numero(r.get("fc"))
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    iv = limpiar_numero(r.get("iv"))
-    iac = limpiar_numero(r.get("iac"))
-    cts = limpiar_numero(r.get("cts"))
-    ea = limpiar_numero(r.get("ea"))
-    ees = limpiar_numero(r.get("ees"))
-    ava = limpiar_numero(r.get("ava"))
-    ds = limpiar_numero(r.get("ds"))
-    ids = limpiar_numero(r.get("ids"))
-
-    # Consistencias fisiológicas principales.
-    if ic is not None and irv is not None:
-        if ic > 4.0 and irv > 2000:
-            alertas.append("IC elevado con IRV/RVS elevada: patrón fisiológicamente discordante. Revisar captura de IC o resistencia vascular.")
-        if ic < 2.5 and irv < 900:
-            alertas.append("IC bajo con IRV/RVS baja: patrón discordante para HTA; revisar calidad de señal, método o posición.")
-        if ic > 4.0 and irv < 1200:
-            alertas.append("Coherencia compatible con hiperdinamia: IC elevado + IRV/RVS baja.")
-        if ic < 2.5 and irv > 1300:
-            alertas.append("Coherencia compatible con hipodinamia: IC bajo + IRV/RVS elevada.")
-        if 2.5 <= ic <= 4.0 and 900 <= irv <= 2000:
-            alertas.append("Coherencia compatible con normodinamia.")
-
-    if pas is not None and pad is not None:
-        if pas <= pad:
-            alertas.append("PAS menor o igual a PAD: valor de presión arterial inválido o mal capturado.")
-        if pas - pad < 20:
-            alertas.append("Presión de pulso <20 mmHg: revisar PAS/PAD o calidad de adquisición.")
-
-    if ea is not None and ees is not None and ees != 0 and ava is not None:
-        ava_calc = ea / ees
-        if abs(ava - ava_calc) > max(0.25, 0.25 * abs(ava_calc)):
-            alertas.append(f"EA/EES informado ({fmt(ava)}) no coincide con EA/EES calculado ({fmt(ava_calc)}). Revisar extracción de EA, EES o ratio.")
-
-    if ds is not None and ids is not None:
-        # IDS suele ser DS indexado por superficie corporal; debe ser menor o similar a DS.
-        if ids > ds * 1.15:
-            alertas.append("IDS mayor que DS en forma no esperada: revisar si DS/IDS fueron invertidos o mal capturados.")
-
-    if cft is not None and cftnr is not None:
-        if cftnr > cft * 3 and cft > 10:
-            alertas.append("CFTnr desproporcionadamente mayor que CFT: revisar unidades o si el dato corresponde realmente a CFTnr.")
-
-    if ic is not None and fc is not None:
-        if ic > 5.5 and fc < 55:
-            alertas.append("IC muy elevado con FC baja: revisar descarga sistólica/IC o calidad de señal.")
-        if ic < 2.0 and fc > 120:
-            alertas.append("IC muy bajo con FC muy alta: posible patrón crítico o error de captura; requiere revisión clínica y técnica.")
-
-    if iv is not None and iac is not None and ic is not None:
-        if (iv > 130 or iac > 450) and ic < 2.2:
-            alertas.append("Índices de contractilidad altos con IC bajo: revisar coherencia entre contractilidad y flujo efectivo.")
-
-    if cts is not None:
-        if 1 < cts < 10:
-            alertas.append("CTS en rango intermedio inusual: confirmar si el equipo lo reporta como porcentaje o como ratio PEP/LVET.")
-
-    # Calidad del método/posición.
-    metodo = str(r.get("metodo_referencia") or "").lower()
-    posicion = str(r.get("posicion_referencia") or "").lower()
-    if "cinta" not in metodo:
-        alertas.append("El diagnóstico no quedó respaldado por CINTA reconocida; interpretar con cautela.")
-    if "de_pie" in posicion or "pie" in posicion:
-        alertas.append("La fila diagnóstica parece corresponder a DE PIE; debe usarse solo para ortostatismo. Revisar selección de CINTA basal/acostada.")
-
-    # Estado global.
-    alertas_revision = [a for a in alertas if any(p in a.lower() for p in ["revisar", "discord", "inválido", "cautela", "no quedó", "de pie", "desproporcion"])]
-    if revisiones > 0 or len(alertas_revision) >= 2:
-        estado_global = "REVISAR ANTES DE INFORMAR"
-    elif faltantes >= 4 or len(alertas_revision) == 1:
-        estado_global = "MODERADAMENTE CONFIABLE"
-    else:
-        estado_global = "CONFIABLE"
-
-    # Resumen operativo.
-    if estado_global == "CONFIABLE":
-        conclusion = "Los valores integrados son coherentes para generar informe clínico automático."
-    elif estado_global == "MODERADAMENTE CONFIABLE":
-        conclusion = "El informe puede generarse, pero conviene revisar las variables marcadas antes de tomar decisiones terapéuticas."
-    else:
-        conclusion = "Se recomienda revisar el PDF original, posición, método de adquisición y variables marcadas antes de validar el informe."
-
-    return {
-        "estado_global": estado_global,
-        "conclusion": conclusion,
-        "alertas": alertas,
-        "tabla": pd.DataFrame(filas),
-        "resumen": r,
-    }
-
-
-def texto_validacion_hemodinamica_inteligente(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    v = validar_hemodinamica_inteligente(df, contexto_embarazo)
-    lineas = [
-        f"Estado global de validación: {v['estado_global']}",
-        v["conclusion"],
-        "Regla aplicada: diagnóstico con CINTA basal/acostada; DE PIE reservado para evaluación ortostática.",
-    ]
-    if v["alertas"]:
-        lineas.append("Alertas y coherencias detectadas:")
-        for a in v["alertas"]:
-            lineas.append(f"- {a}")
-    else:
-        lineas.append("Sin alertas de incoherencia hemodinámica.")
-    return "\n".join(lineas)
-
-
-# Compatibilidad de columnas para PDF y tabla UI.
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    df_cinta = filtrar_df_cinta_diagnostica(df)
-    if df_cinta.empty:
-        return pd.DataFrame([{
-            "Variable": "Sin registro CINTA",
-            "Archivo 1": "—", "Archivo 2": "—", "Valor integrado": "No disponible",
-            "Archivo 1 (CINTA)": "—", "Archivo 2 (CINTA)": "—", "Valor CINTA integrado": "No disponible",
-            "Estado": "FALTA CINTA",
-        }])
-
-    # Resumen global para ficha clínica (PAS/PAD) y resumen CINTA para métricas hemodinámicas.
-    r_global = extraer_resumen_integrado(df)
-    r_cinta = extraer_resumen_integrado(df_cinta)
-    resumen_pdf_global = construir_resumen_por_archivo(estandarizar_columnas_clinicas(df))
-    resumen_pdf_cinta = construir_resumen_por_archivo_cinta(df)
-    filas = []
-    claves = {
-        "PAS": "pas", "PAD": "pad", "FC": "fc", "DS": "ds", "IDS": "ids",
-        "IC": "ic", "IRV/RVS": "irv", "CA": "ca", "CFT": "cft", "CFTnr": "cftnr",
-        "IV": "iv", "IAC": "iac", "CTS": "cts", "EA": "ea", "EES": "ees",
-        "EA/EES": "ava", "Z0": "z0",
-    }
-    for variable, key in claves.items():
-        col_fuente = "IRV" if variable == "IRV/RVS" else variable
-        # PAS/PAD son ficha clínica y se rescatan del conjunto global; el resto solo de CINTA.
-        usar_global = variable in ["PAS", "PAD"]
-        resumen_pdf = resumen_pdf_global if usar_global else resumen_pdf_cinta
-        r = r_global if usar_global else r_cinta
-        vals_origen = []
-        for _, fila in resumen_pdf.iterrows():
-            val = fila.get(col_fuente)
-            if variable == "IRV/RVS" and not valor_plausible_integracion_v13("IRV", val):
-                vals_origen.append("—")
-            elif variable == "IC" and limpiar_numero(val) is not None and not rango_plausible("ic", limpiar_numero(val)):
-                vals_origen.append("—")
-            else:
-                vals_origen.append(fmt(val) if limpiar_numero(val) is not None else (str(val) if es_valor_util(val) else "—"))
-        integrado = r.get(key)
-        if variable == "IRV/RVS" and not valor_plausible_integracion_v13("IRV", integrado):
-            integrado_txt = "No disponible"
-            estado = "FALTA"
-        elif variable == "IC" and limpiar_numero(integrado) is not None and not rango_plausible("ic", limpiar_numero(integrado)):
-            integrado_txt = "No disponible"
-            estado = "REVISAR"
-        else:
-            integrado_txt = fmt(integrado) if limpiar_numero(integrado) is not None else (str(integrado) if es_valor_util(integrado) else "No disponible")
-            estado = "OK" if es_valor_util(integrado) else "FALTA"
-        a1 = vals_origen[0] if len(vals_origen) > 0 else "—"
-        a2 = vals_origen[1] if len(vals_origen) > 1 else "—"
-        filas.append({
-            "Variable": variable,
-            "Archivo 1": a1,
-            "Archivo 2": a2,
-            "Valor integrado": integrado_txt,
-            "Archivo 1 (CINTA)": a1 if not usar_global else "—",
-            "Archivo 2 (CINTA)": a2 if not usar_global else "—",
-            "Valor CINTA integrado": integrado_txt,
-            "Estado": estado,
-        })
-    return pd.DataFrame(filas)
-
-
-def resumen_calidad_integracion(df: pd.DataFrame) -> Dict[str, Any]:
-    tabla = generar_tabla_integracion(df)
-    criticas = ["IC", "IRV/RVS", "FC", "CFT", "CFTnr", "IV", "IAC", "CTS", "EA", "EES", "EA/EES"]
-    faltantes = tabla[(tabla["Variable"].isin(criticas)) & (tabla["Estado"] == "FALTA")]["Variable"].tolist()
-    completas = tabla[tabla["Estado"] == "OK"]["Variable"].tolist()
-    falta_cinta = bool((tabla["Estado"] == "FALTA CINTA").any()) if "Estado" in tabla.columns else False
-    validacion = validar_hemodinamica_inteligente(df)
-    return {"tabla": tabla, "faltantes": faltantes, "completas": completas, "falta_cinta": falta_cinta, "validacion": validacion}
-
-
-_generar_informe_texto_v14 = generar_informe_texto
-
-def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    base = _generar_informe_texto_v14(df, contexto_embarazo)
-    bloque = "\n\nVALIDACIÓN HEMODINÁMICA INTELIGENTE\n" + texto_validacion_hemodinamica_inteligente(df, contexto_embarazo)
-    return base + bloque
-
-
-
-
-# =========================================================
-# NIVEL PAPER CLÍNICO - SCORE REPRODUCIBLE Y TRAZABILIDAD
-# =========================================================
-
-def clasificar_fenotipo_hdp_publicable(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Clasificación operativa para investigación clínica.
-    No reemplaza diagnóstico obstétrico: estructura el fenotipo hemodinámico para reporte, tabla y análisis.
-    """
-    contexto = contexto or {}
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    eg = limpiar_numero(contexto.get("edad_gestacional"))
-    hdp = bool(contexto.get("hdp")) or (pas is not None and pas >= 140) or (pad is not None and pad >= 90)
-    crecimiento = normalizar_txt(contexto.get("crecimiento_fetal") or "")
-    doppler = normalizar_txt(contexto.get("doppler_uterino") or "")
-    imc = limpiar_numero(contexto.get("imc"))
-
-    dinamia = clasificar_dinamia_materna(r, contexto)
-    crecimiento_cat = "No informado"
-    if any(x in crecimiento for x in ["sga", "rciu", "fgr", "iugr", "restric", "pequeno", "peque"]):
-        crecimiento_cat = "SGA/RCIU/FGR"
-    elif any(x in crecimiento for x in ["aga", "adecuado"]):
-        crecimiento_cat = "AGA"
-    elif any(x in crecimiento for x in ["grande", "lga"]):
-        crecimiento_cat = "LGA"
-
-    if not contexto.get("embarazada"):
-        return {
-            "fenotipo": "No aplicable",
-            "dinamia": dinamia,
-            "eje_etiologico": "No embarazada",
-            "certeza": "No aplicable",
-            "regla": "Paciente no marcada como gestante.",
-            "crecimiento": crecimiento_cat,
-            "hdp": hdp,
-        }
-
-    regla = []
-    certeza = "Moderada"
-    eje = "Indeterminado"
-    fenotipo = "Gestante sin fenotipo HDP clasificable"
-
-    if hdp:
-        if dinamia == "Hipodinamia":
-            eje = "Placentario / vascular"
-            fenotipo = "HDP hipodinámica, probable fenotipo placentario"
-            regla.append("IC bajo o relativamente bajo con RVS/TPVR elevada.")
-            if crecimiento_cat == "SGA/RCIU/FGR":
-                fenotipo = "HDP-SGA/RCIU con patrón hipodinámico placentario"
-                certeza = "Alta"
-                regla.append("Crecimiento fetal restringido/SGA informado.")
-            elif crecimiento_cat == "AGA":
-                fenotipo = "HDP-AGA con patrón circulatorio de HIPODINAMIA: vigilar compromiso placentario"
-                regla.append("Crecimiento fetal AGA informado, pero patrón hemodinámico de resistencia elevada.")
-        elif dinamia == "Hiperdinamia":
-            eje = "Materno / metabólico-volémico"
-            fenotipo = "HDP hiperdinámica, probable fenotipo materno/metabólico"
-            regla.append("IC elevado con RVS/TPVR baja.")
-            if crecimiento_cat == "AGA":
-                fenotipo = "HDP-AGA hiperdinámica, probable fenotipo materno/metabólico"
-                certeza = "Alta"
-                regla.append("Crecimiento fetal AGA informado.")
-            if imc is not None and imc >= 30:
-                regla.append("IMC elevado, compatible con componente metabólico/volémico.")
-        else:
-            eje = "Normodinámico"
-            fenotipo = "HDP normodinámica"
-            regla.append("IC y RVS/TPVR sin desviación extrema; integrar PA, laboratorio y feto-placenta.")
-    else:
-        if dinamia == "Hipodinamia":
-            eje = "Riesgo vascular-placentario preclínico"
-            fenotipo = "Gestante hipodinámica sin HDP informado: vigilancia obstétrica"
-            regla.append("Patrón bajo flujo/alta resistencia aun sin HDP documentado.")
-        elif dinamia == "Hiperdinamia":
-            eje = "Adaptación hiperdinámica / volumen"
-            fenotipo = "Gestante hiperdinámica sin HDP informado"
-            regla.append("Patrón alto flujo/baja resistencia; contextualizar con volumen, IMC y síntomas.")
-        else:
-            eje = "Adaptación conservada"
-            fenotipo = "Gestante normodinámica sin HDP informado"
-            regla.append("Sin desviación hemodinámica mayor con los datos disponibles.")
-
-    if "alter" in doppler or "aument" in doppler or "notch" in doppler:
-        regla.append("Doppler uterino informado como alterado/aumentado: aumenta plausibilidad de fenotipo placentario.")
-        if eje.startswith("Placentario"):
-            certeza = "Alta"
-    if eg is not None:
-        regla.append(f"EG={fmt(eg,0)} semanas.")
-
-    return {
-        "fenotipo": fenotipo,
-        "dinamia": dinamia,
-        "eje_etiologico": eje,
-        "certeza": certeza,
-        "regla": " ".join(regla),
-        "crecimiento": crecimiento_cat,
-        "hdp": hdp,
-    }
-
-
-def calcular_score_preeclampsia_publicable(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Score 0-100 reproducible para investigación/triage clínico.
-    Ponderaciones explícitas para que pueda auditarse en una tabla metodológica.
-    """
-    contexto = contexto or {}
-    if not contexto.get("embarazada"):
-        return {"aplicable": False, "score": None, "categoria": "No aplicable", "componentes": [], "fenotipo": clasificar_fenotipo_hdp_publicable(r, contexto)}
-
-    ic = limpiar_numero(r.get("ic"))
-    irv = limpiar_numero(r.get("irv"))
-    pas = limpiar_numero(r.get("pas"))
-    pad = limpiar_numero(r.get("pad"))
-    fc = limpiar_numero(r.get("fc"))
-    cft = limpiar_numero(r.get("cft"))
-    cftnr = limpiar_numero(r.get("cftnr"))
-    iv = limpiar_numero(r.get("iv"))
-    iac = limpiar_numero(r.get("iac"))
-    eg = limpiar_numero(contexto.get("edad_gestacional"))
-    imc = limpiar_numero(contexto.get("imc"))
-    crecimiento = normalizar_txt(contexto.get("crecimiento_fetal") or "")
-    doppler = normalizar_txt(contexto.get("doppler_uterino") or "")
-    hdp = bool(contexto.get("hdp")) or (pas is not None and pas >= 140) or (pad is not None and pad >= 90)
-    mapv = _map_desde_pas_pad(pas, pad)
-    dinamia = clasificar_dinamia_materna(r, contexto)
-
-    componentes: List[Dict[str, Any]] = []
-    def add(nombre: str, puntos: float, maximo: float, razon: str):
-        componentes.append({"Componente": nombre, "Puntos": round(float(puntos), 2), "Máximo": maximo, "Razón": razon})
-
-    # 1. Fenotipo hipertensivo / PA: máximo 25
-    pa_pts = 0
-    pa_razon = "PA no disponible o no hipertensiva."
-    if pas is not None and pad is not None:
-        if pas >= 160 or pad >= 110:
-            pa_pts = 25; pa_razon = f"PA severa {fmt(pas,0)}/{fmt(pad,0)} mmHg."
-        elif pas >= 140 or pad >= 90:
-            pa_pts = 18; pa_razon = f"PA hipertensiva {fmt(pas,0)}/{fmt(pad,0)} mmHg."
-    elif mapv is not None and mapv >= 105:
-        pa_pts = 14; pa_razon = f"PAM elevada {fmt(mapv,0)} mmHg."
-    if hdp and pa_pts < 12:
-        pa_pts = max(pa_pts, 12); pa_razon = "HDP/HTA gestacional informada por diagnóstico textual."
-    add("PA/HDP", pa_pts, 25, pa_razon)
-
-    # 2. Hemodinamia central: máximo 30
-    hemo_pts = 0
-    hemo_razon = "IC/RVS no disponibles."
-    if ic is not None and irv is not None:
-        if dinamia == "Hipodinamia":
-            hemo_pts = 30; hemo_razon = f"Hipodinamia: IC {fmt(ic,2)} + RVS {fmt(irv,0)}."
-        elif dinamia == "Hiperdinamia":
-            hemo_pts = 16; hemo_razon = f"Hiperdinamia: IC {fmt(ic,2)} + RVS {fmt(irv,0)}; fenotipo materno/metabólico posible."
-        else:
-            hemo_pts = 8; hemo_razon = f"Normodinamia: IC {fmt(ic,2)} + RVS {fmt(irv,0)}."
-    add("Hemodinamia IC-RVS", hemo_pts, 30, hemo_razon)
-
-    # 3. Feto-placenta: máximo 20
-    fp_pts = 0
-    fp_razon = "Crecimiento/Doppler no informados."
-    if any(x in crecimiento for x in ["sga", "rciu", "fgr", "iugr", "restric", "pequeno", "peque"]):
-        fp_pts += 12; fp_razon = "SGA/RCIU/FGR informado."
-    if "alter" in doppler or "aument" in doppler or "notch" in doppler:
-        fp_pts += 8; fp_razon = (fp_razon + " Doppler uterino alterado.").strip()
-    if fp_pts == 0 and any(x in crecimiento for x in ["aga", "adecuado"]):
-        fp_razon = "Crecimiento AGA informado."
-    add("Eje feto-placentario", min(fp_pts, 20), 20, fp_razon)
-
-    # 4. Ventana gestacional: máximo 10
-    eg_pts = 0
-    eg_razon = "EG no disponible."
-    if eg is not None:
-        if 20 <= eg < 34:
-            eg_pts = 10; eg_razon = f"EG {fmt(eg,0)}: ventana de fenotipo precoz si hay HDP."
-        elif eg >= 34:
-            eg_pts = 5; eg_razon = f"EG {fmt(eg,0)}: fenotipo tardío/metabólico posible."
-        elif eg < 20:
-            eg_pts = 3; eg_razon = f"EG {fmt(eg,0)}: antes de criterio clásico de HDP; útil como basal/riesgo." 
-    add("Edad gestacional", eg_pts, 10, eg_razon)
-
-    # 5. Marcadores complementarios: máximo 15
-    comp_pts = 0
-    razones = []
-    if cft is not None and cft < 25:
-        comp_pts += 5; razones.append(f"CFT bajo {fmt(cft,2)}.")
-    if cft is not None and cft > 45:
-        comp_pts += 3; razones.append(f"CFT alto {fmt(cft,2)}: componente volémico.")
-    if cftnr is not None and cftnr > 35:
-        comp_pts += 2; razones.append(f"CFTnr alto {fmt(cftnr,2)}.")
-    if iv is not None and iv < 50:
-        comp_pts += 3; razones.append(f"IV bajo {fmt(iv,2)}.")
-    if iac is not None and iac < 90:
-        comp_pts += 3; razones.append(f"IAC/ACI bajo {fmt(iac,2)}.")
-    if imc is not None and imc >= 30:
-        comp_pts += 3; razones.append(f"IMC elevado {fmt(imc,1)}.")
-    add("Marcadores complementarios", min(comp_pts, 15), 15, " ".join(razones) if razones else "Sin marcadores complementarios alterados disponibles.")
-
-    score = sum(float(c["Puntos"]) for c in componentes)
-    score = max(0.0, min(100.0, score))
-    if score >= 70:
-        categoria = "Alto"
-    elif score >= 40:
-        categoria = "Intermedio"
-    else:
-        categoria = "Bajo/no elevado por hemodinamia"
-
-    return {
-        "aplicable": True,
-        "score": round(score, 1),
-        "categoria": categoria,
-        "componentes": componentes,
-        "fenotipo": clasificar_fenotipo_hdp_publicable(r, contexto),
-    }
-
-
-def texto_modulo_paper_clinico(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    contexto = contexto or {}
-    if not contexto.get("embarazada"):
-        return "Módulo paper clínico obstétrico no aplicable: paciente no embarazada."
-    s = calcular_score_preeclampsia_publicable(r, contexto)
-    f = s.get("fenotipo", {})
-    componentes = s.get("componentes", [])
-    comp_txt = "\n".join([f"- {c['Componente']}: {c['Puntos']}/{c['Máximo']} puntos. {c['Razón']}" for c in componentes])
-    return f"""MÓDULO PAPER CLÍNICO - HEMODINAMIA MATERNA Y HDP
-Clasificación dinámica obligatoria: {f.get('dinamia')}
-Fenotipo HDP sugerido: {f.get('fenotipo')}
-Eje fisiopatológico probable: {f.get('eje_etiologico')}
-Certeza operativa: {f.get('certeza')}
-Regla aplicada: {f.get('regla')}
-Score publicable de riesgo PE/HDP: {s.get('score')}/100
-Categoría del score: {s.get('categoria')}
-
-Componentes auditables del score:
-{comp_txt}
-
-Definiciones para reporte:
-- HDP: trastornos hipertensivos del embarazo.
-- PE: preeclampsia.
-- AGA: adecuado para edad gestacional.
-- SGA/RCIU/FGR/IUGR: pequeño para edad gestacional/restricción del crecimiento fetal.
-- Hipodinamia: patrón de bajo flujo y alta resistencia, más compatible con eje placentario/vascular.
-- Hiperdinamia: patrón de alto flujo y baja resistencia, más compatible con eje materno/metabólico-volémico.
-- Normodinamia: IC y RVS sin desviación extrema.
-
-Nota metodológica: el diagnóstico principal se calcula con CINTA basal/acostada; el estudio de pie se reserva para ortostatismo. Este score es una herramienta de estratificación hemodinámica y no reemplaza los criterios diagnósticos obstétricos ni el laboratorio."""
-
-
-def tabla_score_paper_clinico_df(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    s = calcular_score_preeclampsia_publicable(r, contexto)
-    if not s.get("aplicable"):
-        return pd.DataFrame([{"Componente": "No aplicable", "Puntos": "", "Máximo": "", "Razón": "Paciente no embarazada"}])
-    return pd.DataFrame(s.get("componentes", []))
-
-
-def dataset_paper_clinico_row(df: pd.DataFrame, contexto: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    r = extraer_resumen_integrado(df)
-    s = calcular_score_preeclampsia_publicable(r, contexto)
-    f = s.get("fenotipo", {}) if isinstance(s, dict) else {}
-    row = {
-        "paciente": r.get("paciente"),
-        "dni": r.get("dni"),
-        "fecha_estudio": r.get("fecha"),
-        "edad": r.get("edad"),
-        "embarazada": bool(contexto and contexto.get("embarazada")),
-        "edad_gestacional_semanas": contexto.get("edad_gestacional") if contexto else None,
-        "hdp_informado": bool(contexto and contexto.get("hdp")),
-        "crecimiento_fetal": contexto.get("crecimiento_fetal") if contexto else None,
-        "doppler_uterino": contexto.get("doppler_uterino") if contexto else None,
-        "imc": contexto.get("imc") if contexto else None,
-        "PAS": r.get("pas"), "PAD": r.get("pad"), "FC": r.get("fc"),
-        "IC": r.get("ic"), "RVS_IRV": r.get("irv"), "CFT": r.get("cft"), "CFTnr": r.get("cftnr"),
-        "IV": r.get("iv"), "IAC": r.get("iac"), "CTS": r.get("cts"), "EA": r.get("ea"), "EES": r.get("ees"), "EA_EES": r.get("ava"),
-        "dinamia": f.get("dinamia"),
-        "fenotipo_hdp": f.get("fenotipo"),
-        "eje_etiologico": f.get("eje_etiologico"),
-        "score_pe_hdp_0_100": s.get("score"),
-        "categoria_score": s.get("categoria"),
-        "metodo_diagnostico": r.get("metodo_referencia"),
-        "posicion_diagnostico": r.get("posicion_referencia"),
-    }
-    return pd.DataFrame([row])
-
-
-def crear_grafico_score_paper_bytes(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Optional[io.BytesIO]:
-    """Panel de gauges semicirculares para los componentes auditables del score PE/HDP."""
-    try:
-        import matplotlib.pyplot as plt
-        import math
-    except Exception:
-        return None
-    s = calcular_score_preeclampsia_publicable(r, contexto)
-    if not s.get("aplicable"):
-        return None
-    dfc = pd.DataFrame(s.get("componentes", []))
-    if dfc.empty or "Puntos" not in dfc.columns:
-        return None
-    try:
-        labels = dfc["Componente"].astype(str).tolist()
-        vals = [limpiar_numero(v) or 0 for v in dfc["Puntos"].tolist()]
-        max_p = max(max(vals), 1)
-        n = len(vals)
-        cols = min(3, n)
-        rows = math.ceil(n / cols)
-        fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 2.85 * rows))
-        axes_flat = list(getattr(axes, "flat", [axes]))
-        for ax, lab, val in zip(axes_flat, labels, vals):
-            pct = max(0, min(100, (float(val) / max_p) * 100))
-            _dibujar_acelerador_circular(ax, pct, lab[:28], f"{val:.0f} puntos", "Componente", f"Máximo componente: {max_p:.0f}")
-        for ax in axes_flat[len(vals):]:
-            ax.axis("off")
-        fig.suptitle(f"Score publicable PE/HDP: {s.get('score')}/100 - {s.get('categoria')}", fontsize=14, fontweight="bold", color="#0B4F8A")
-        plt.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
-    except Exception:
-        return None
-
-
-def generar_metodologia_paper_texto() -> str:
-    return """MÉTODO PROPUESTO PARA REPORTE CIENTÍFICO
-Diseño: análisis hemodinámico no invasivo basado en cardiografía de impedancia integrada a datos obstétricos.
-Registro diagnóstico: se prioriza CINTA basal/acostada para clasificación principal. El registro de pie se usa exclusivamente para respuesta ortostática.
-Variables principales: PAS, PAD, FC, IC/CI, RVS/IRV/TPVR, CFT/CFTnr, IV/VI, IAC/ACI, CTS, EA, EES y EA/EES.
-Fenotipos: hipodinamia, normodinamia e hiperdinamia. En gestantes con HDP se clasifica eje probable placentario/vascular vs materno/metabólico-volémico y se informa AGA o SGA/RCIU/FGR/IUGR si el dato está disponible.
-Score PE/HDP 0-100: PA/HDP 25 puntos, IC-RVS 30 puntos, eje feto-placentario 20 puntos, edad gestacional 10 puntos, marcadores complementarios 15 puntos.
-Categorías: bajo <40, intermedio 40-69, alto ≥70 puntos.
-Advertencia: score orientativo para estratificación y generación de hipótesis; debe validarse prospectivamente contra desenlaces obstétricos."""
-
-
-# Sobrescribir informe para agregar módulo paper clínico cuando corresponda.
-_generar_informe_texto_v15_pre_paper = generar_informe_texto
-
-def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    base = _generar_informe_texto_v15_pre_paper(df, contexto_embarazo)
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        r = extraer_resumen_integrado(df)
-        return base + "\n\n" + texto_modulo_paper_clinico(r, contexto_embarazo) + "\n\n" + generar_metodologia_paper_texto()
-    return base
-
-
-
-
-# =========================================================
-# OVERRIDE FINAL V16 - RESCATE DE CFTnr, EA, EES y EA/EES
-# =========================================================
-
-PATRONES_CLAVE.update({
-    # CFTnr suele figurar como CFTnr, CFT-NR, CFT n/r, TFCI, TFC index o contenido torácico indexado.
-    "cftnr": r"(?:\bcft\s*[-_/ ]?\s*(?:n\.?\s*r\.?|nr|n/r|normalizad[oa]|indexad[oa]|index|indice|índice)\b|\bcftnr\b|\btfc\s*[-_/ ]?\s*(?:i|index|indice|índice)\b|\btfci\b|\btfi\b|contenido\s+(?:de\s+)?fluidos?\s+tor[aá]cicos?\s+(?:normalizad[oa]|indexad[oa]|index|indice|índice)|thoracic\s+fluid\s+(?:content\s+)?(?:index|indexed|normalized))",
-    # CFT no debe capturar CFTnr.
-    "cft": r"(?:\bcft\b(?!\s*[-_/ ]?\s*(?:n\.?\s*r\.?|nr|n/r|normalizad[oa]|indexad[oa]|index|indice|índice))|\btfc\b(?!\s*[-_/ ]?\s*(?:i|index|indice|índice))|contenido\s+(?:de\s+)?fluidos?\s+tor[aá]cicos?(?!\s+(?:normalizad[oa]|indexad[oa]|index|indice|índice))|thoracic\s+fluid(?:\s+content)?(?!\s+(?:index|indexed|normalized)))",
-    # Elastancias y acoplamiento. Se agregan variantes con espacios, guiones, ratio, cociente y VA.
-    "ea": r"(?:\belastancia\s+arterial\b|\barterial\s+elastance\b|\be\.?\s*a\.?\b|\bea\b)",
-    "ees": r"(?:\belastancia\s+(?:de\s+)?fin\s+de\s+s[ií]stole\b|\belastancia\s+ventricular\b|\bend\s+systolic\s+elastance\b|\be\.?\s*e\.?\s*s\.?\b|\bees\b)",
-    "ava": r"(?:\bea\s*[/:\\-]\s*ees\b|\bea\s*/\s*ees\b|\be\.?\s*a\.?\s*/\s*e\.?\s*e\.?\s*s\.?\b|\bava\b|\bacoplamiento\s+ventr[ií]culo\s*[- ]?arterial\b|\bacoplamiento\s+va\b|\bventriculo\s*[- ]?arterial\b|\bventr[ií]culo\s*[- ]?arterial\b)",
-})
-
-# Refuerzo de sinónimos para columnas importadas desde Excel/CSV o PDFs ya estructurados.
-SINONIMOS_COLUMNAS["CFTnr"] = list(dict.fromkeys(SINONIMOS_COLUMNAS.get("CFTnr", []) + [
-    "cft-nr", "cft_nr", "cft n/r", "cft indexado", "cft indexada", "tfci", "tfc-i", "tfc_i",
-    "thoracic fluid content indexed", "contenido toracico indexado", "contenido torácico indexado"
-]))
-SINONIMOS_COLUMNAS["EA"] = list(dict.fromkeys(SINONIMOS_COLUMNAS.get("EA", []) + [
-    "e.a", "e a", "arterial elastance", "elastance arterial"
-]))
-SINONIMOS_COLUMNAS["EES"] = list(dict.fromkeys(SINONIMOS_COLUMNAS.get("EES", []) + [
-    "e.e.s", "e e s", "end systolic elastance", "elastancia fin sistole", "elastancia fin de sistole"
-]))
-SINONIMOS_COLUMNAS["EA/EES"] = list(dict.fromkeys(SINONIMOS_COLUMNAS.get("EA/EES", []) + [
-    "ea:e es", "ea:ees", "ea-ees", "ea ees", "ea / ees", "e a / e e s", "ratio ea ees",
-    "relacion ea ees", "relación ea ees", "cociente ea ees", "acoplamiento ventricular arterial"
-]))
-
-# Asegura que las variables críticas estén siempre en los listados centrales.
-for _v in ["cftnr", "cft", "ea", "ees", "ava"]:
-    if _v not in CLAVES_NUMERICAS:
-        CLAVES_NUMERICAS.append(_v)
-for _v in ["CFTnr", "EA", "EES", "EA/EES"]:
-    if _v not in COLUMNAS_NUMERICAS_HEMO_V13:
-        COLUMNAS_NUMERICAS_HEMO_V13.add(_v)
-
-
-def _normalizar_linea_hemo_v16(texto: Any) -> str:
-    t = str(texto or "")
-    t = t.replace("\u00a0", " ")
-    t = re.sub(r"[|;]+", "\n", t)
-    return t
-
-
-def _extraer_numero_despues_patron_v16(texto: Any, patron: str, variable: str) -> Optional[float]:
-    """Busca el primer valor plausible cercano a la etiqueta.
-    Funciona tanto si el valor está en la misma línea como si está en la línea siguiente.
-    """
-    txt = _normalizar_linea_hemo_v16(texto)
-    for m in re.finditer(patron, txt, flags=re.IGNORECASE):
-        # Ventana corta para evitar capturar números de otra variable lejana.
-        ventana = txt[m.end(): m.end() + 140]
-        # Cortar si aparece otra etiqueta hemodinámica antes del primer número.
-        corte = re.search(
-            r"\b(?:FC|HR|IC|CI|IRV|RVS|SVR|CA|CFT|CFTnr|TFC|TFCI|IV|VI|IAC|ACI|CTS|EA|EES|DS|IDS|Z0|PAS|PAD)\b",
-            ventana,
-            flags=re.IGNORECASE,
-        )
-        numeros = numeros_en_texto(ventana[:corte.start()] if corte and corte.start() > 0 else ventana)
-        plausibles = [n for n in numeros if valor_plausible_integracion_v13(variable, n)]
-        if plausibles:
-            return plausibles[0]
-    return None
-
-
-def rescatar_metricas_criticas_desde_texto_v16(r: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
-    """Rescata CFTnr, EA, EES y EA/EES desde Texto_PDF cuando el parser tabular no los reconoció.
-    No reemplaza valores ya válidos. Solo completa faltantes.
-    """
-    out = dict(r or {})
-    textos = []
-    try:
-        dfx = estandarizar_columnas_clinicas(df)
-        for col in ["Texto_PDF", "Diagnóstico", "Medicación", "Posición"]:
-            if col in dfx.columns:
-                textos.extend(str(v) for v in dfx[col].tolist() if es_valor_util(v))
-        # También incluir representación de filas por si vino desde Excel con encabezados distintos.
-        for _, fila in dfx.iterrows():
-            textos.append(" | ".join(f"{k}: {v}" for k, v in fila.to_dict().items() if es_valor_util(v)))
-    except Exception:
-        pass
-
-    texto = "\n".join(textos)
-
-    if limpiar_numero(out.get("cftnr")) is None:
-        v = _extraer_numero_despues_patron_v16(texto, PATRONES_CLAVE["cftnr"], "CFTnr")
-        if v is not None:
-            out["cftnr"] = v
-
-    if limpiar_numero(out.get("ea")) is None:
-        v = _extraer_numero_despues_patron_v16(texto, PATRONES_CLAVE["ea"], "EA")
-        if v is not None:
-            out["ea"] = v
-
-    if limpiar_numero(out.get("ees")) is None:
-        v = _extraer_numero_despues_patron_v16(texto, PATRONES_CLAVE["ees"], "EES")
-        if v is not None:
-            out["ees"] = v
-
-    if limpiar_numero(out.get("ava")) is None:
-        v = _extraer_numero_despues_patron_v16(texto, PATRONES_CLAVE["ava"], "EA/EES")
-        if v is not None:
-            out["ava"] = v
-
-    ea = limpiar_numero(out.get("ea"))
-    ees = limpiar_numero(out.get("ees"))
-    ava = limpiar_numero(out.get("ava"))
-    if ava is None and ea is not None and ees not in [None, 0]:
-        out["ava"] = ea / ees
-
-    return out
-
-
-_extraer_resumen_integrado_v15_base = extraer_resumen_integrado
-
-def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-    """Override final: resumen integrado con rescate obligatorio de variables críticas."""
-    r = _extraer_resumen_integrado_v15_base(df)
-    return rescatar_metricas_criticas_desde_texto_v16(r, df)
-
-
-_generar_tabla_integracion_v15_base = generar_tabla_integracion
-
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    """Override final: evita marcar como faltantes CFTnr, EA, EES y EA/EES si fueron rescatadas del texto."""
-    tabla = _generar_tabla_integracion_v15_base(df)
-    r = extraer_resumen_integrado(df)
-    mapa = {"CFTnr": "cftnr", "EA": "ea", "EES": "ees", "EA/EES": "ava"}
-    if tabla is not None and not tabla.empty:
-        for variable, key in mapa.items():
-            valor = r.get(key)
-            if es_valor_util(valor) and variable in tabla["Variable"].values:
-                idx = tabla.index[tabla["Variable"] == variable]
-                tabla.loc[idx, "Valor integrado"] = fmt(valor) if limpiar_numero(valor) is not None else str(valor)
-                tabla.loc[idx, "Estado"] = "OK"
-    return tabla
-
-
-
-
-# =========================================================
-# V18 - GLOSARIO + RESCATE REFORZADO EA/EES/AC CAPAN
-# =========================================================
-
-# Sinónimos adicionales habituales en Z-Logic / Capan.
-VARIABLES_CGI.setdefault("ea", []).extend([
-    "ea capan", "e.a. capan", "elastancia arterial capan", "elastancia arterial ea capan",
-    "ea (capan)", "eacapan"
-])
-VARIABLES_CGI.setdefault("ees", []).extend([
-    "ees capan", "e.e.s. capan", "elastancia fin de sistole capan", "elastancia de fin de sístole capan",
-    "elastancia ventricular capan", "ees (capan)", "eescapan"
-])
-VARIABLES_CGI.setdefault("ava", []).extend([
-    "ac capan", "a.c. capan", "acoplamiento capan", "acoplamiento ventriculo arterial capan",
-    "acoplamiento ventrículo arterial capan", "ac capan ea/ees", "ac/capan", "ac (capan)",
-    "acoplamiento ventricular arterial", "relacion ea ees", "relación ea ees", "cociente ea ees"
-])
-
-SINONIMOS_COLUMNAS.setdefault("EA", []).extend([
-    "ea capan", "e.a. capan", "elastancia arterial capan", "ea (capan)", "eacapan"
-])
-SINONIMOS_COLUMNAS.setdefault("EES", []).extend([
-    "ees capan", "e.e.s. capan", "elastancia de fin de sistole capan", "elastancia de fin de sístole capan",
-    "elastancia ventricular capan", "ees (capan)", "eescapan"
-])
-SINONIMOS_COLUMNAS.setdefault("EA/EES", []).extend([
-    "ac capan", "a.c. capan", "acoplamiento capan", "acoplamiento ventriculo arterial capan",
-    "acoplamiento ventrículo arterial capan", "ac (capan)", "relacion ea ees", "relación ea ees", "cociente ea ees"
-])
-
-PATRONES_CLAVE["ea"] = r"(?:\bea\s*(?:capan)?\b|\be\.\s*a\.\s*(?:capan)?\b|elastancia\s+arterial(?:\s+capan)?|arterial\s+elastance)"
-PATRONES_CLAVE["ees"] = r"(?:\bees\s*(?:capan)?\b|\be\.\s*e\.\s*s\.\s*(?:capan)?\b|elastancia\s+(?:de\s+)?fin\s+de\s+s[ií]stole(?:\s+capan)?|elastancia\s+ventricular(?:\s+capan)?|end\s+systolic\s+elastance)"
-PATRONES_CLAVE["ava"] = r"(?:\bac\s*(?:capan)?\b|\ba\.\s*c\.\s*(?:capan)?\b|acoplamiento\s+(?:ventr[ií]culo|ventricular)\s*[- ]?arterial(?:\s+capan)?|acoplamiento\s+capan|ea\s*/\s*ees|relaci[oó]n\s+ea\s*/?\s*ees|cociente\s+ea\s*/?\s*ees|\bava\b)"
-
-# Evita que AC Capan sea leído como CA/complacencia arterial.
-def es_linea_ac_capan_no_ca(texto: Any) -> bool:
-    t = normalizar_txt(texto)
-    return bool(re.search(r"\bac\s*capan\b|\ba\s*c\s*capan\b|acoplamiento.*capan", t, flags=re.IGNORECASE))
-
-_claves_en_linea_robusto_v17 = claves_en_linea_robusto
-
-def claves_en_linea_robusto(linea: str) -> List[str]:
-    halladas = _claves_en_linea_robusto_v17(linea)
-    if es_linea_ac_capan_no_ca(linea):
-        halladas = [h for h in halladas if h != "ca"]
-        if "ava" not in halladas:
-            halladas.append("ava")
-    # Orden preferente para elastancias antes que abreviaturas cortas.
-    pref = ["cftnr", "cft", "ih", "iac", "cts", "pas_pad", "fc", "vm", "ic", "irv", "ea", "ees", "ava", "ca", "iv", "ds", "ids", "z0"]
-    return sorted(list(dict.fromkeys(halladas)), key=lambda x: pref.index(x) if x in pref else 999)
-
-
-def _lineas_texto_v18(texto: Any) -> List[str]:
-    t = str(texto or "").replace("\u00a0", " ")
-    t = re.sub(r"[|;]+", "\n", t)
-    return [ln.strip() for ln in t.splitlines() if ln.strip()]
-
-
-def _extraer_numero_despues_patron_v18(texto: Any, patron: str, variable: str) -> Optional[float]:
-    """Extracción cercana al rótulo, optimizada para líneas tipo 'EA Capan 0,77'."""
-    etiquetas_corte = r"(?:FC|HR|IC|CI|ITC|IRV|RVS|SVR|CA|CFTnr|CFT|TFCI|TFC|IH|IV|VI|IAC|ACI|CTS|EA|EES|AC\s*Capan|AVA|DS|IDS|Z0|PAS|PAD)"
-    for ln in _lineas_texto_v18(texto):
-        if not re.search(patron, ln, flags=re.IGNORECASE):
-            continue
-        if variable == "IC" and es_linea_itc_no_ic(ln):
-            continue
-        if variable == "CA" and es_linea_ac_capan_no_ca(ln):
-            continue
-        for m in re.finditer(patron, ln, flags=re.IGNORECASE):
-            cola = ln[m.end():]
-            # Cortar ante otro rótulo solo si aparece antes del primer número.
-            primer_num = re.search(r"[-+]?[0-9]+(?:[.,][0-9]+)?", cola)
-            corte = re.search(etiquetas_corte, cola, flags=re.IGNORECASE)
-            if corte and (primer_num is None or corte.start() < primer_num.start()):
-                cola = cola[:corte.start()]
-            nums = numeros_en_texto(cola)
-            plausibles = [n for n in nums if valor_plausible_integracion_v13(variable, n)]
-            if plausibles:
-                return plausibles[0]
-    # Si el PDF dejó etiqueta y valor en líneas separadas, usar ventana corta.
-    txt = _normalizar_linea_hemo_v16(texto)
-    for m in re.finditer(patron, txt, flags=re.IGNORECASE):
-        ventana = txt[m.end(): m.end() + 100]
-        numeros = numeros_en_texto(ventana)
-        plausibles = [n for n in numeros if valor_plausible_integracion_v13(variable, n)]
-        if plausibles:
-            return plausibles[0]
-    return None
-
-# Reemplazo final del extractor usado por el rescate v16.
-_extraer_numero_despues_patron_v16 = _extraer_numero_despues_patron_v18
-
-
-def glosario_metricas_cgi_texto() -> str:
-    return """
-GLOSARIO DE MÉTRICAS CGI / Z-LOGIC
-
-PAS: presión arterial sistólica, expresada en mmHg.
-PAD: presión arterial diastólica, expresada en mmHg.
-FC: frecuencia cardíaca, expresada en latidos por minuto.
-IC / CI: índice cardíaco, expresado en L/min/m². No debe confundirse con ITC.
-ITC: índice de trabajo cardíaco. Es una variable de trabajo ventricular y no reemplaza al IC.
-IRV / RVS / SVR / TPVR: índice de resistencia vascular sistémica o periférica total, expresado habitualmente en dyn·s·cm⁻⁵.
-CA: complacencia arterial. Evalúa la capacidad arterial de amortiguar el volumen sistólico.
-CFT / TFC: contenido de fluidos torácicos.
-CFTnr / TFCI / TFI: contenido de fluidos torácicos normalizado o indexado.
-IH: índice de Heather. Marcador derivado de la contractilidad en cardiografía de impedancia.
-IV / VI: índice de velocidad. Relacionado con la fase expulsiva sistólica.
-IAC / ACI: índice de aceleración. Se usa como marcador de aceleración/contractilidad.
-CTS / STR / PEP-LVET: coeficiente de tiempos sistólicos o relación de tiempos sistólicos.
-EA / EA Capan: elastancia arterial. Refleja la carga arterial efectiva.
-EES / EES Capan: elastancia de fin de sístole o elastancia ventricular.
-EA/EES / AC Capan / AVA: acoplamiento ventrículo-arterial. Puede venir informado como AC Capan o calcularse como EA dividido EES.
-DS / SV: descarga sistólica o volumen sistólico.
-IDS / SI: índice de descarga sistólica o índice sistólico.
-Z0: impedancia basal torácica.
-""".strip()
-
-
-
-
-def limpiar_referencias_obstetricas_en_linea(texto: str) -> str:
-    """Elimina palabras/frases obstétricas sin borrar toda la línea clínica.
-    Uso obligatorio para módulo no gestacional, especialmente orientación terapéutica.
-    """
-    t = str(texto or "")
-    reemplazos = [
-        (r"\s*para\s+paciente\s+no\s+embarazad[ao]\s*", " para paciente "),
-        (r"\s*paciente\s+no\s+embarazad[ao]\s*", " paciente "),
-        (r",?\s*embarazo\s+descartado", ""),
-        (r"\bembarazad[ao]s?\b", ""),
-        (r"\bembarazo\b", ""),
-        (r"\bgestacional(?:es)?\b", ""),
-        (r"\bgestante(?:s)?\b", ""),
-        (r"\bobst[eé]tric[ao]s?\b", ""),
-        (r"\bfetal(?:es)?\b", ""),
-        (r"\bHDP\b", ""),
-        (r"\bpreeclampsia\b", ""),
-        (r"\bAGA\b", ""),
-        (r"\bSGA\b", ""),
-    ]
-    for pat, rep in reemplazos:
-        t = re.sub(pat, rep, t, flags=re.IGNORECASE)
-    t = re.sub(r"[ ]{2,}", " ", t)
-    t = re.sub(r"\s+([,.;:])", r"\1", t)
-    t = re.sub(r"([:])\s*-", r"\1", t)
-    return t.strip()
-
-def limpiar_referencias_obstetricas_si_no_embarazada(texto: str, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    """Para el módulo no embarazada elimina títulos, subtítulos y líneas con referencias obstétricas."""
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        return texto
-    patron = re.compile(r"embaraz|gesta|preecl|\bhdp\b|\bpe\b|\baga\b|\bsga\b|rciu|fgr|iugr|fetal|materna|obst[eé]tric|placent|doppler uter", re.IGNORECASE)
-    lineas_limpias = []
-    for linea in str(texto or "").splitlines():
-        linea_limpia = limpiar_referencias_obstetricas_en_linea(linea)
-        if patron.search(linea_limpia):
-            continue
-        lineas_limpias.append(linea_limpia)
-    limpio = "\n".join(lineas_limpias).strip()
-    if TITULO_MODULO_NO_EMBARAZADA not in limpio:
-        limpio = TITULO_MODULO_NO_EMBARAZADA + "\n\n" + limpio
-    return limpio
-
-_generar_informe_texto_v18_base = generar_informe_texto
-
-def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    base = _generar_informe_texto_v18_base(df, contexto_embarazo) + "\n\n" + glosario_metricas_cgi_texto()
-    return limpiar_referencias_obstetricas_si_no_embarazada(base, contexto_embarazo)
-
-
-
-
-# =========================================================
-# V19 - CORRECCIÓN DEFINITIVA IC vs ITC + CFTnr
-# =========================================================
-# Objetivo clínico:
-# 1) IC debe salir de Índice Cardíaco / Cardiac Index / CI, no de ITC.
-# 2) CFTnr debe recuperarse aunque el PDF lo escriba como CFT nr, CFT-NR, CFTnr,
-#    TFCI, TFC index o contenido de fluidos torácicos normalizado/indexado.
-# 3) Si el extractor exacto encuentra IC/CFTnr en el texto completo, se prioriza sobre
-#    el valor previamente integrado, porque evita capturas de líneas vecinas.
-
-PATRONES_CLAVE["ic"] = r"(?:\b(?:indice|índice)\s+card[ií]aco\b|\bcardiac\s+index\b|\bci\b|\bic\b)"
-PATRONES_CLAVE["cftnr"] = r"(?:\bcft\s*[-_/ ]?\s*(?:n\.?\s*r\.?|nr|n/r|normalizad[oa]|indexad[oa]|index|indice|índice)\b|\bcftnr\b|\btfc\s*[-_/ ]?\s*(?:i|index|indice|índice)\b|\btfci\b|\btfi\b|contenido\s+(?:de\s+)?fluidos?\s+tor[aá]cicos?\s+(?:normalizad[oa]|indexad[oa]|index|indice|índice)|thoracic\s+fluid\s+(?:content\s+)?(?:index|indexed|normalized))"
-
-# Refuerzo de sinónimos canónicos para columnas ya tabuladas.
-for _s in ["CFTnr", "CFT nr", "CFT-NR", "CFT_Nr", "CFT n/r", "CFT normalizado", "CFT indexado", "TFCI", "TFC index", "TFC indice", "TFI"]:
-    if _s not in SINONIMOS_COLUMNAS["CFTnr"]:
-        SINONIMOS_COLUMNAS["CFTnr"].append(_s)
-
-
-def _texto_completo_df_v19(df: pd.DataFrame) -> str:
-    textos = []
-    try:
-        dfx = estandarizar_columnas_clinicas(df)
-        # Solo columnas de texto crudo del PDF — NO incluir filas estructuradas
-        # con valores numéricos ya extraídos (evita leer IC: 2.72 del dict de fila).
-        for col in ["Texto_PDF", "Diagnóstico", "Medicación", "Posición", "origen", "Paciente"]:
-            if col in dfx.columns:
-                textos.extend(str(v) for v in dfx[col].tolist() if es_valor_util(v))
-    except Exception:
-        pass
-    return "\n".join(textos)
-
-
-def _linea_contiene_etiqueta_ic_real_v19(linea: Any) -> bool:
-    t = normalizar_txt(linea)
-    if es_linea_itc_no_ic(t):
-        return False
-    # Evita IC como fragmento dentro de palabras. Se aceptan etiquetas completas o abreviatura aislada.
-    return bool(re.search(r"\b(?:indice|índice)\s+cardiaco\b|\bcardiac\s+index\b|(?<![a-z0-9])(?:ic|ci)(?![a-z0-9])", t, flags=re.IGNORECASE))
-
-
-def _extraer_valor_cercano_v19(texto: Any, patron: str, variable: str, bloquear: Optional[Any] = None) -> Optional[float]:
-    """Extrae un valor cercano al rótulo sin saltar a otra métrica.
-    Es más conservador que los extractores previos: trabaja línea por línea y solo usa
-    una ventana corta si la etiqueta y el valor quedaron separados por salto de línea.
-    """
-    txt = str(texto or "").replace("\u00a0", " ")
-    txt = re.sub(r"[|;]+", "\n", txt)
-    lineas = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-    etiquetas_corte = r"(?:PAS|PAD|FC|HR|IC|CI|ITC|IRV|RVS|SVR|TPVR|CA|CFTnr|CFT\s*nr|CFT|TFCI|TFC|IH|IV|VI|IAC|ACI|CTS|EA|EES|AC\s*Capan|AVA|DS|IDS|Z0)"
-
-    for i, ln in enumerate(lineas):
-        if bloquear and bloquear(ln):
-            continue
-        if variable == "IC" and not _linea_contiene_etiqueta_ic_real_v19(ln):
-            continue
-        if not re.search(patron, ln, flags=re.IGNORECASE):
-            continue
-        for m in re.finditer(patron, ln, flags=re.IGNORECASE):
-            cola = ln[m.end():]
-            primer_num = re.search(r"[-+]?[0-9]+(?:[.,][0-9]+)?", cola)
-            corte = re.search(etiquetas_corte, cola, flags=re.IGNORECASE)
-            if corte and (primer_num is None or corte.start() < primer_num.start()):
-                cola = cola[:corte.start()]
-            nums = numeros_en_texto(cola)
-            plausibles = [n for n in nums if valor_plausible_integracion_v13(variable, n)]
-            if plausibles:
-                return plausibles[0]
-
-        # Caso etiqueta en una línea y valor en la línea siguiente.
-        # Filtrar líneas bloqueadas (ej. dz/dt) de la ventana para no contaminar IC.
-        lineas_ventana = [
-            l for l in lineas[i+1:i+3]
-            if not (bloquear and bloquear(l))
-        ]
-        ventana = " ".join(lineas_ventana)
-        if ventana:
-            corte = re.search(etiquetas_corte, ventana, flags=re.IGNORECASE)
-            segmento = ventana[:corte.start()] if corte else ventana
-            nums = numeros_en_texto(segmento)
-            plausibles = [n for n in nums if valor_plausible_integracion_v13(variable, n)]
-            if plausibles:
-                return plausibles[0]
-    return None
-
-
-def rescatar_ic_cftnr_exactos_v19(r: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
-    out = dict(r or {})
-    texto = _texto_completo_df_v19(df)
-
-    # IC exacto: se prioriza SIEMPRE si se encuentra, porque corrige capturas de ITC.
-    ic_exacto = _extraer_valor_cercano_v19(texto, PATRONES_CLAVE["ic"], "IC", bloquear=es_linea_itc_no_ic)
-    if ic_exacto is not None:
-        out["ic"] = ic_exacto
-
-    # CFTnr exacto: se prioriza si se encuentra. No permitir que CFT simple lo reemplace.
-    cftnr_exacto = _extraer_valor_cercano_v19(texto, PATRONES_CLAVE["cftnr"], "CFTnr")
-    if cftnr_exacto is not None:
-        out["cftnr"] = cftnr_exacto
-
-    # Si EA/EES no vino, mantener cálculo automático.
-    ea = limpiar_numero(out.get("ea"))
-    ees = limpiar_numero(out.get("ees"))
-    ava = limpiar_numero(out.get("ava"))
-    if ava is None and ea is not None and ees not in [None, 0]:
-        out["ava"] = ea / ees
-
-    return out
-
-
-_extraer_resumen_integrado_v18_base = extraer_resumen_integrado
-
-def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-    r = _extraer_resumen_integrado_v18_base(df)
-    return rescatar_ic_cftnr_exactos_v19(r, df)
-
-
-_generar_tabla_integracion_v18_base = generar_tabla_integracion
-
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    tabla = _generar_tabla_integracion_v18_base(df)
-    r = extraer_resumen_integrado(df)
-    if tabla is not None and not tabla.empty:
-        mapa = {"IC": "ic", "CFTnr": "cftnr", "EA": "ea", "EES": "ees", "EA/EES": "ava"}
-        for variable, key in mapa.items():
-            if variable in tabla["Variable"].values and es_valor_util(r.get(key)):
-                idx = tabla.index[tabla["Variable"] == variable]
-                tabla.loc[idx, "Valor integrado"] = fmt(r.get(key)) if limpiar_numero(r.get(key)) is not None else str(r.get(key))
-                tabla.loc[idx, "Estado"] = "OK"
-    return tabla
-
-
-
-
-# =========================================================
-# V20 - CORRECCIÓN DEFINITIVA EA/EES = EA Capan / EES Capan
-# =========================================================
-# Regla clínica obligatoria:
-# - EA/EES, AVA o AC Capan se tratan como MÉTRICA DERIVADA.
-# - Nunca se acepta el valor importado directamente del PDF/tabla como fuente final.
-# - El valor final se calcula siempre con EA Capan / EES Capan.
-# - Si falta EA o EES, EA/EES queda como No disponible y se informa el motivo.
-
-def calcular_ea_ees_derivado(ea: Any, ees: Any) -> Optional[float]:
-    """Calcula el acoplamiento ventrículo-arterial como EA Capan / EES Capan."""
-    eav = limpiar_numero(ea)
-    eesv = limpiar_numero(ees)
-    if eav is None or eesv in [None, 0]:
-        return None
-    return eav / eesv
-
-
-def validar_ea_ees_derivado(ea: Any, ees: Any) -> Tuple[str, str]:
-    """Devuelve estado y detalle de validación del EA/EES derivado."""
-    eav = limpiar_numero(ea)
-    eesv = limpiar_numero(ees)
-    ava_calc = calcular_ea_ees_derivado(ea, ees)
-    if eav is None and eesv is None:
-        return "FALTA", "No se reconocieron EA Capan ni EES Capan. No se puede calcular EA/EES."
-    if eav is None:
-        return "FALTA", "Falta EA Capan. EA/EES no se informa porque debe calcularse como EA Capan/EES Capan."
-    if eesv is None:
-        return "FALTA", "Falta EES Capan. EA/EES no se informa porque debe calcularse como EA Capan/EES Capan."
-    if eesv == 0:
-        return "REVISAR", "EES Capan es 0. No se puede dividir por cero."
-    if ava_calc is None:
-        return "FALTA", "EA/EES no calculable."
-    if ava_calc < 0.1 or ava_calc > 5.0:
-        return "REVISAR", f"EA/EES calculado = {fmt(ava_calc)}. Fuera del rango plausible 0,10-5,00; revisar EA Capan y EES Capan."
-    return "OK", f"Calculado automáticamente como EA Capan/EES Capan = {fmt(eav)}/{fmt(eesv)} = {fmt(ava_calc)}."
-
-
-def forzar_ea_ees_derivado_en_resumen(r: Dict[str, Any]) -> Dict[str, Any]:
-    """Sobrescribe siempre r['ava'] con EA/EES derivado desde EA y EES."""
-    out = dict(r or {})
-    out["ava_importado_ignorado"] = out.get("ava")
-    out["ava"] = calcular_ea_ees_derivado(out.get("ea"), out.get("ees"))
-    estado, detalle = validar_ea_ees_derivado(out.get("ea"), out.get("ees"))
-    out["ava_estado"] = estado
-    out["ava_detalle"] = detalle
-    return out
-
-
-_extraer_resumen_integrado_v19_base_eaees = extraer_resumen_integrado
-
-def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-    """Override final V20: EA/EES siempre derivado de EA Capan/EES Capan."""
-    r = _extraer_resumen_integrado_v19_base_eaees(df)
-    r = forzar_ea_ees_derivado_en_resumen(r)
-    # V21: todas las métricas hemodinámicas diagnósticas provienen de ACOSTADO/CINTA.
-    r = resumen_acostado_cinta_para_patron(df, r)
-    return r
-
-
-_diagnostico_acoplamiento_pre_v20 = diagnostico_acoplamiento
-
-def diagnostico_acoplamiento(ea: Any, ees: Any, ava: Any = None) -> str:
-    """Diagnóstico del acoplamiento usando exclusivamente EA Capan/EES Capan.
-    El parámetro ava se conserva por compatibilidad, pero se ignora deliberadamente.
-    """
-    eav = limpiar_numero(ea)
-    eesv = limpiar_numero(ees)
-    avav = calcular_ea_ees_derivado(ea, ees)
-    if avav is None:
-        estado, detalle = validar_ea_ees_derivado(ea, ees)
-        return f"Acoplamiento ventrículo-arterial no clasificable. {detalle}"
-
-    base = f"Relación EA/EES calculada automáticamente como EA Capan/EES Capan: {fmt(eav)} / {fmt(eesv)} = {fmt(avav)}. "
-    if 0 <= avav <= 1.0:
-        return base + "Acoplamiento ventrículo-arterial óptimo."
-    if 1.0 < avav <= 1.3:
-        return base + "Acoplamiento ventrículo-arterial en rango de precaución, compatible con incremento relativo de carga arterial o menor reserva ventricular."
-    if avav > 1.3:
-        return base + "Desacoplamiento ventrículo-arterial, con mayor estrés hemodinámico según el contexto clínico."
-    return base + "Valor fuera de rango fisiológico esperado; revisar datos fuente."
-
-
-_generar_tabla_integracion_v19_base_eaees = generar_tabla_integracion
-
-def generar_tabla_integracion(df: pd.DataFrame) -> pd.DataFrame:
-    """Override final V20: la fila EA/EES muestra siempre EA Capan/EES Capan derivado."""
-    tabla = _generar_tabla_integracion_v19_base_eaees(df)
-    r = extraer_resumen_integrado(df)
-    if tabla is not None and not tabla.empty and "Variable" in tabla.columns:
-        if "EA/EES" in tabla["Variable"].values:
-            idx = tabla.index[tabla["Variable"] == "EA/EES"]
-            valor = r.get("ava")
-            estado = r.get("ava_estado") or ("OK" if es_valor_util(valor) else "FALTA")
-            detalle = r.get("ava_detalle") or "EA/EES calculado como EA Capan/EES Capan."
-            tabla.loc[idx, "Valor integrado"] = fmt(valor) if limpiar_numero(valor) is not None else "No disponible"
-            tabla.loc[idx, "Estado"] = estado
-            # Agregar columna de trazabilidad sin romper la app si antes no existía.
-            if "Cálculo / validación" not in tabla.columns:
-                tabla["Cálculo / validación"] = ""
-            tabla.loc[idx, "Cálculo / validación"] = detalle
-    return tabla
-
-
-_generar_tabla_validacion_hemodinamica_v15_base_eaees = globals().get("generar_tabla_validacion_hemodinamica")
-if _generar_tabla_validacion_hemodinamica_v15_base_eaees is not None:
-    def generar_tabla_validacion_hemodinamica(df: pd.DataFrame) -> pd.DataFrame:
-        """Override final V20: validación EA/EES derivada y trazable."""
-        tabla = _generar_tabla_validacion_hemodinamica_v15_base_eaees(df)
-        r = extraer_resumen_integrado(df)
-        if tabla is not None and not tabla.empty and "Variable" in tabla.columns:
-            if "EA/EES" in tabla["Variable"].values:
-                idx = tabla.index[tabla["Variable"] == "EA/EES"]
-                valor = r.get("ava")
-                tabla.loc[idx, "Valor usado"] = fmt(valor) if limpiar_numero(valor) is not None else "No disponible"
-                tabla.loc[idx, "Estado"] = r.get("ava_estado", "FALTA")
-                tabla.loc[idx, "Validación"] = r.get("ava_detalle", "EA/EES debe calcularse como EA Capan/EES Capan.")
-        return tabla
-
-
-
-# =========================================================
-# V21 - COHERENCIA FINAL DEL PATRÓN HEMODINÁMICO
-# =========================================================
-# Regla clínica obligatoria:
-# - El patrón hemodinámico diagnóstico se informa siempre desde ACOSTADO/CINTA.
-# - DE PIE se informa exclusivamente como respuesta ortostática.
-# - No se usa "patrón definido" como patrón circulatorio.
-# - El patrón circulatorio solo puede ser HIPODINAMIA, NORMODINAMIA o HIPERDINAMIA.
-
-def patron_circulatorio_simple_acostado_cinta(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    clase = clasificacion_dinamica_obligatoria(r or {}, contexto or {}).upper()
-    if "HIPO" in clase:
-        return "HIPODINAMIA"
-    if "HIPER" in clase:
-        return "HIPERDINAMIA"
-    return "NORMODINAMIA"
-
-
-def diagnostico_perfil_hemodinamico_acostado_cinta(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    patron = patron_circulatorio_simple_acostado_cinta(r, contexto)
-    ic = fmt((r or {}).get("ic"), 2, " L/min/m²")
-    rvs = fmt((r or {}).get("irv"), 0, " dyn·s·cm⁻⁵")
-    if patron == "HIPERDINAMIA":
-        significado = "predominio de alto flujo y/o baja resistencia vascular."
-    elif patron == "HIPODINAMIA":
-        significado = "predominio de bajo flujo y/o resistencia vascular elevada."
-    else:
-        significado = "IC e IRV/RVS dentro del rango esperado."
-    return f"**Patrón hemodinámico de referencia ACOSTADO/CINTA: {patron}.** Base: IC {ic}; IRV/RVS {rvs}. Significado: {significado}"
-
-
-_texto_clasificacion_dinamica_pre_v21 = texto_clasificacion_dinamica
-
-def texto_clasificacion_dinamica(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    """Salida final coherente: patrón basal/acostado, sin mezclar con de pie."""
-    contexto = contexto or {}
-    patron = patron_circulatorio_simple_acostado_cinta(r, contexto)
-    ic = fmt((r or {}).get("ic"), 2, " L/min/m²")
-    rvs = fmt((r or {}).get("irv"), 0, " dyn·s·cm⁻⁵")
-    pas = limpiar_numero((r or {}).get("pas"))
-    pad = limpiar_numero((r or {}).get("pad"))
-    fc = limpiar_numero((r or {}).get("fc"))
-    map_hr_txt = "No disponible"
-    if pas is not None and pad is not None and fc not in [None, 0]:
-        pam = pad + (pas - pad) / 3.0
-        map_hr_txt = fmt(pam / fc, 2)
-    if contexto.get("embarazada"):
-        return f"**Patrón circulatorio ACOSTADO/CINTA: {patron}.** Base: IC {ic}; IRV/RVS {rvs}; PAM/FC {map_hr_txt}. Si IC e IRV/RVS están en rango normal, el patrón es NORMODINAMIA. El registro de pie se interpreta solo como respuesta ortostática."
-    return f"**Patrón circulatorio ACOSTADO/CINTA: {patron}.** Base: IC {ic}; IRV/RVS {rvs}. El registro de pie se interpreta solo como respuesta ortostática."
-
-
-_diagnostico_acoplamiento_pre_v21 = diagnostico_acoplamiento
-
-def diagnostico_acoplamiento(ea: Any, ees: Any, ava: Any = None) -> str:
-    """Evita llamar patrón al rendimiento CV/VA y elimina el término subóptimo."""
-    eav = limpiar_numero(ea)
-    eesv = limpiar_numero(ees)
-    avav = calcular_ea_ees_derivado(ea, ees)
-    if avav is None:
-        estado, detalle = validar_ea_ees_derivado(ea, ees)
-        return f"Acoplamiento ventrículo-arterial no clasificable. {detalle}"
-    base = f"Relación EA/EES calculada automáticamente como EA Capan/EES Capan: {fmt(eav)} / {fmt(eesv)} = {fmt(avav)}. "
-    if 0 <= avav <= 1.0:
-        return base + "Acoplamiento ventrículo-arterial óptimo."
-    if 1.0 < avav <= 1.3:
-        return base + "Acoplamiento ventrículo-arterial en zona de precaución clínica, compatible con incremento relativo de carga arterial o menor reserva ventricular."
-    if avav > 1.3:
-        return base + "Desacoplamiento ventrículo-arterial, con mayor estrés hemodinámico según el contexto clínico."
-    return base + "Valor fuera de rango fisiológico esperado; revisar datos fuente."
-
-
-_evaluar_dominios_hemodinamicos_pre_v21 = evaluar_dominios_hemodinamicos
-
-def evaluar_dominios_hemodinamicos(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> Dict[str, Dict[str, Any]]:
-    """Dominios coherentes: la función circulatoria usa solo el patrón ACOSTADO/CINTA."""
-    dominios = _evaluar_dominios_hemodinamicos_pre_v21(r, df)
-    if "Función circulatoria" in dominios:
-        score = dominios["Función circulatoria"].get("score")
-        dominios["Función circulatoria"]["estado"] = patron_circulatorio_simple_acostado_cinta(r, None)
-        dominios["Función circulatoria"]["detalle"] = diagnostico_perfil_hemodinamico_acostado_cinta(r, None)
-        dominios["Función circulatoria"]["score"] = score
-    # Evitar que otros dominios se lean como patrones hemodinámicos.
-    for nombre in ["Contractilidad", "Volemia", "Rendimiento CV / VA"]:
-        if nombre in dominios and str(dominios[nombre].get("estado", "")).lower().find("precaucion") >= 0:
-            dominios[nombre]["estado"] = "Precaución clínica"
-    return dominios
-
-
-_perfil_hemodinamico_integrado_pre_v21 = perfil_hemodinamico_integrado
-
-def perfil_hemodinamico_integrado(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> str:
-    """Conclusión integrada sin mezcla de patrones.
-
-    El único patrón hemodinámico principal es el de ACOSTADO/CINTA.
-    Volemia, contractilidad, acoplamiento y ortostatismo se informan como dominios complementarios.
-    """
-    patron_ref = diagnostico_perfil_hemodinamico_acostado_cinta(r, None)
-    volemia = diagnostico_volemia((r or {}).get("cft"), (r or {}).get("cftnr"))
-    contractilidad = diagnostico_contractilidad((r or {}).get("iv"), (r or {}).get("iac"), (r or {}).get("cts"))
-    acoplamiento = diagnostico_acoplamiento((r or {}).get("ea"), (r or {}).get("ees"), (r or {}).get("ava"))
-    texto_posicion = ""
-    if df is not None:
-        texto_posicion = " " + re.sub(r"\s+", " ", texto_patron_hemodinamico_acostado_y_de_pie(df, None)).strip()
-    ortostatico = evaluar_dominio_ortostatico(df) if df is not None else None
-    texto_orto = f" Respuesta ortostática: {ortostatico.get('detalle', '')}" if ortostatico is not None else ""
-    return (
-        f"{patron_ref} "
-        f"Volemia: {volemia} "
-        f"Contractilidad: {contractilidad} "
-        f"Acoplamiento CV/VA: {acoplamiento}"
-        f"{texto_posicion}"
-        f"{texto_orto}"
-    )
-
-
-_texto_patron_hemodinamico_acostado_y_de_pie_pre_v21 = texto_patron_hemodinamico_acostado_y_de_pie
-
-def texto_patron_hemodinamico_acostado_y_de_pie(df: pd.DataFrame, contexto: Optional[Dict[str, Any]] = None) -> str:
-    """Diferencia estrictamente patrón basal y respuesta ortostática."""
-    contexto = contexto or {}
-    r_basal, r_pie = obtener_resumenes_ortostaticos(df)
-
-    def linea_basal(r_local: Dict[str, Any]) -> str:
-        if not r_local:
-            return "- **Patrón hemodinámico ACOSTADO/CINTA:** no disponible por falta de registro basal reconocible."
-        patron = patron_circulatorio_simple_acostado_cinta(r_local, contexto)
-        metodo = str(r_local.get("metodo") or "no reconocido").upper()
-        posicion = str(r_local.get("posicion") or "no reconocida").replace("_", " ").upper()
-        return (
-            f"- **Patrón hemodinámico ACOSTADO/CINTA: {patron}.** "
-            f"IC {fmt(r_local.get('ic'), 2, ' L/min/m²')}; "
-            f"IRV/RVS {fmt(r_local.get('irv'), 0, ' dyn·s·cm⁻⁵')}; "
-            f"método {metodo}; posición {posicion}. **Referencia diagnóstica principal.**"
-        )
-
-    def linea_pie(r_local: Dict[str, Any]) -> str:
-        if not r_local:
-            return "- **Registro DE PIE:** no disponible o no reconocido; no se modifica el patrón basal."
-        patron = patron_circulatorio_simple_acostado_cinta(r_local, contexto)
-        return (
-            f"- **Registro DE PIE: respuesta ortostática con comportamiento {patron}.** "
-            f"IC {fmt(r_local.get('ic'), 2, ' L/min/m²')}; "
-            f"IRV/RVS {fmt(r_local.get('irv'), 0, ' dyn·s·cm⁻⁵')}. "
-            f"Este registro describe adaptación postural y **no reemplaza** al patrón ACOSTADO/CINTA."
-        )
-
-    return "\n".join([
-        "**Patrón hemodinámico principal: siempre ACOSTADO/CINTA.** El registro DE PIE se informa solo como comportamiento ortostático.",
-        linea_basal(r_basal),
-        linea_pie(r_pie),
-    ])
-
-
-
-# =========================================================
-# V22 - INFORME DE DOMINIOS INTEGRADOS RESUMIDO Y DIDÁCTICO
-# =========================================================
-# Reglas obligatorias:
-# - El patrón hemodinámico principal se informa SIEMPRE desde ACOSTADO/CINTA.
-# - El registro DE PIE describe respuesta ortostática y no reemplaza el patrón basal.
-# - No se utilizan las expresiones "patrón definido", "patrón definido" ni "patrón definido".
-# - El gráfico de cuadrantes hemodinámicos IC vs IRV/RVS se integra al informe médico.
-
-PATRONES_PROHIBIDOS_RE = re.compile(
-    r"perfil\s+mixto\s+o\s+de\s+transici[oó]n|patr[oó]n\s+mixto|perfil\s+mixto|patr[oó]n\s+de\s+transici[oó]n|perfil\s+de\s+transici[oó]n|patr[oó]n\s+sub[oó]ptimo|ambigu[oa]s?|ambig[uü]edad(?:es)?|incomplet[oa]s?",
-    re.IGNORECASE,
-)
-
-def limpiar_patrones_prohibidos(texto: Any) -> str:
-    """Normaliza el lenguaje del informe para mantenerlo claro, breve y definitivo."""
-    t = str(texto or "")
-    t = PATRONES_PROHIBIDOS_RE.sub("patrón circulatorio ACOSTADO/CINTA definido", t)
-    reemplazos = {
-        r"datos\s+incomplet[oa]s?": "datos insuficientes para definir el resultado",
-        r"no\s+clasificable": "datos insuficientes para definir",
-        r"perfil\s+hemodin[aá]mico\s+integrado\s+no\s+clasificable": "perfil hemodinámico integrado con datos insuficientes para definir resultado",
-        r"patr[oó]n\s+sub[oó]ptimo": "patrón definido",
-        r"patr[oó]n\s+mixto": "patrón definido",
-        r"perfil\s+mixto": "patrón definido",
-        r"patr[oó]n\s+de\s+transici[oó]n": "patrón definido",
-        r"perfil\s+de\s+transici[oó]n": "patrón definido",
-        r"ambigu[oa]s?": "claro",
-        r"ambig[uü]edad(?:es)?": "definición clara",
-    }
-    for pat, rep in reemplazos.items():
-        t = re.sub(pat, rep, t, flags=re.IGNORECASE)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
-
-
-def resumen_acostado_cinta_para_patron(df: Optional[pd.DataFrame], r_default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Devuelve el registro ACOSTADO/CINTA para usarlo como única referencia diagnóstica."""
-    r_default = dict(r_default or {})
-    try:
-        if df is not None and not df.empty:
-            r_basal, _r_pie = obtener_resumenes_ortostaticos(df)
-            if r_basal:
-                r_out = dict(r_default)
-                for k, v in r_basal.items():
-                    if es_valor_util(v):
-                        r_out[k] = v
-                return r_out
-    except Exception:
-        pass
-    return r_default
-
-
-def estado_volemia_simple(cft: Any, cftnr: Any) -> str:
-    txt = diagnostico_volemia(cft, cftnr).upper()
-    if "HIPERVOLEMIA" in txt:
-        return "HIPERVOLEMIA"
-    if "HIPOVOLEMIA" in txt:
-        return "HIPOVOLEMIA"
-    if "NORMOVOLEMIA" in txt:
-        return "NORMOVOLEMIA"
-    return "VOLEMIA NO CLASIFICABLE"
-
-
-def estado_contractilidad_simple(iv: Any, iac: Any, cts: Any) -> str:
-    txt = diagnostico_contractilidad(iv, iac, cts).upper()
-    if "AUMENTADA" in txt:
-        return "CONTRACTILIDAD AUMENTADA"
-    if "DISMINUIDA" in txt or "REDUC" in txt:
-        return "CONTRACTILIDAD DISMINUIDA"
-    if "NO CLASIFICABLE" in txt or "INCOMPLET" in txt:
-        return "CONTRACTILIDAD NO CLASIFICABLE"
-    return "CONTRACTILIDAD CONSERVADA"
-
-
-def estado_acoplamiento_simple(ea: Any, ees: Any, ava: Any = None) -> str:
-    avav = calcular_ea_ees_derivado(ea, ees)
-    if avav is None:
-        avav = limpiar_numero(ava)
-    if avav is None:
-        return "ACOPLAMIENTO NO CLASIFICABLE"
-    if 0 <= avav <= 1.0:
-        return "ACOPLAMIENTO ÓPTIMO"
-    if 1.0 < avav <= 1.3:
-        return "ACOPLAMIENTO EN PRECAUCIÓN CLÍNICA"
-    if avav > 1.3:
-        return "DESACOPLAMIENTO VENTRÍCULO-ARTERIAL"
-    return "ACOPLAMIENTO NO CLASIFICABLE"
-
-
-def estado_ortostatico_simple(df: Optional[pd.DataFrame]) -> str:
-    try:
-        if df is None or len(df) < 2:
-            return "ORTOSTATISMO NO EVALUABLE"
-        d = calcular_delta_ortostatico(df)
-        if not d or "No se pudieron" in str(d.get("detalle", "")):
-            return "ORTOSTATISMO NO EVALUABLE"
-        return str(definir_patron_ortostatico(d)).upper()
-    except Exception:
-        return "ORTOSTATISMO NO EVALUABLE"
-
-
-def tabla_dominios_integrados_sin_ambiguedad(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> List[List[str]]:
-    rb = resumen_acostado_cinta_para_patron(df, r)
-    patron = patron_circulatorio_simple_acostado_cinta(rb, None)
-    volemia_estado = estado_volemia_simple(rb.get("cft"), rb.get("cftnr"))
-    contract_estado = estado_contractilidad_simple(rb.get("iv") or r.get("iv"), rb.get("iac") or r.get("iac"), rb.get("cts") or r.get("cts"))
-    acop_estado = estado_acoplamiento_simple(rb.get("ea") or r.get("ea"), rb.get("ees") or r.get("ees"), rb.get("ava") or r.get("ava"))
-    orto_estado = estado_ortostatico_simple(df)
-    rows = [
-        ["Dominio", "Resultado", "Interpretación resumida"],
-        [
-            "Patrón hemodinámico de referencia",
-            patron,
-            f"Resultado calculado solo con ACOSTADO/CINTA. IC {fmt(rb.get('ic'), 2, ' L/min/m²')} e IRV/RVS {fmt(rb.get('irv'), 0, ' dyn·s·cm⁻⁵')}. Es el eje diagnóstico principal.",
-        ],
-        [
-            "Volemia",
-            volemia_estado,
-            f"Clasificación volémica por CFT/CFTnr basal. CFT {fmt(rb.get('cft'), 2)}; CFTnr {fmt(rb.get('cftnr'), 2)}.",
-        ],
-        [
-            "Contractilidad",
-            contract_estado,
-            f"Lectura complementaria por IV, IAC y CTS. IV {fmt((rb.get('iv') or r.get('iv')), 2)}; IAC {fmt((rb.get('iac') or r.get('iac')), 2)}; CTS {fmt((rb.get('cts') or r.get('cts')), 2)}.",
-        ],
-        [
-            "Acoplamiento ventrículo-arterial",
-            acop_estado,
-            f"Dominio complementario por EA/EES. EA {fmt((rb.get('ea') or r.get('ea')), 2)}; EES {fmt((rb.get('ees') or r.get('ees')), 2)}; EA/EES {fmt((rb.get('ava') or r.get('ava')), 2)}.",
-        ],
-        [
-            "Comportamiento ortostático",
-            orto_estado,
-            "Describe la respuesta al ponerse de pie. No modifica ni reemplaza el patrón hemodinámico ACOSTADO/CINTA.",
-        ],
-    ]
-    return [[limpiar_patrones_prohibidos(c) for c in row] for row in rows]
-
-
-def informe_dominios_integrados_texto(r: Dict[str, Any], df: Optional[pd.DataFrame] = None, html: bool = True) -> str:
-    """Informe integrado breve, didáctico y con un único patrón basal ACOSTADO/CINTA."""
-    rows = tabla_dominios_integrados_sin_ambiguedad(r, df)[1:]
-    patron = rows[0][1]
-    volemia = rows[1][1]
-    contractilidad = rows[2][1]
-    acoplamiento = rows[3][1]
-    orto = rows[4][1]
-
-    lineas = [
-        f"**Patrón hemodinámico basal ACOSTADO/CINTA:** {patron}. {rows[0][2]}",
-        f"**Volemia:** {volemia}. {rows[1][2]}",
-        f"**Contractilidad:** {contractilidad}. {rows[2][2]}",
-        f"**Acoplamiento ventrículo-arterial:** {acoplamiento}. {rows[3][2]}",
-        f"**Respuesta ortostática:** {orto}. El registro DE PIE describe adaptación postural y no cambia el diagnóstico basal.",
-        f"**Conclusión resumida:** el eje diagnóstico es {patron}; volemia {volemia}; contractilidad {contractilidad}; acoplamiento {acoplamiento}; respuesta ortostática {orto}.",
-    ]
-    txt = "<br>".join(lineas) if html else "\n".join(lineas)
-    return limpiar_patrones_prohibidos(txt)
-
-
-def _paper_dominios_integrados_table(r: Dict[str, Any], df: Optional[pd.DataFrame], ancho_total: float):
-    return _paper_table(
-        tabla_dominios_integrados_sin_ambiguedad(r, df),
-        col_widths=[ancho_total*0.26, ancho_total*0.24, ancho_total*0.50],
-        header=True,
-        compact=False,
-    )
-
-
-_perfil_hemodinamico_integrado_pre_v22 = perfil_hemodinamico_integrado
-
-def perfil_hemodinamico_integrado(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> str:
-    """Versión final: dominios integrados, sin mezcla de patrones ni términos claros."""
-    return informe_dominios_integrados_texto(r or {}, df, html=True)
-
-
-_generar_informe_texto_pre_v22 = generar_informe_texto
-
-_generar_informe_texto_pre_resumido = generar_informe_texto
-
-def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-    """Informe resumido: max 10 renglones con patrones de dominio, sin métricas individuales."""
-    contexto_embarazo = contexto_embarazo or {}
-    r = extraer_resumen_integrado(df)
-    r_local = resumen_acostado_cinta_para_patron(df, r)
-    es_emb = bool(contexto_embarazo.get("embarazada"))
-
-    lineas: List[str] = []
-
-    # Encabezado paciente (1 línea)
-    paciente = r.get("paciente") or "No especificado"
-    fecha = r.get("fecha") or "No disponible"
-    eg = contexto_embarazo.get("edad_gestacional")
-    eg_txt = f" | EG: {fmt(eg,0)} semanas" if eg else ""
-    lineas.append(f"Paciente: {paciente} | Fecha estudio: {fecha}{eg_txt}")
-
-    # Patrón hemodinámico principal (1 línea)
-    patron = clasificacion_dinamica_obligatoria(r_local, contexto_embarazo)
-    lineas.append(f"Patrón hemodinámico (ACOSTADO/CINTA): {patron}")
-
-    if es_emb:
-        # Módulo embarazo: clasificación gestacional
-        c_gest = clasificacion_hemodinamica_materna_gestacional(r_local, contexto_embarazo)
-        lineas.append(f"Clasificación gestacional: {c_gest.get('diagnostico','N/D')}")
-        hdp = bool(contexto_embarazo.get("hdp"))
-        lineas.append(f"HDP/HTA obstétrica: {'sí' if hdp else 'no/no informado'} | Crecimiento fetal: {contexto_embarazo.get('crecimiento_fetal') or 'no informado'} | Doppler: {contexto_embarazo.get('doppler_uterino') or 'no informado'}")
-        res_pe = calcular_riesgo_preeclampsia(r_local, contexto_embarazo)
-        lineas.append(f"Score riesgo PE: {res_pe.get('puntaje','N/D')}/10 — {res_pe.get('categoria','N/D')}")
-        lineas.append(f"Conducta: {res_pe.get('conducta','Ver módulo embarazo.')}")
-    else:
-        # Módulo clínico: dominios sin métricas
-        volemia = diagnostico_volemia(r_local.get("cft"), r_local.get("cftnr"))
-        contractilidad = diagnostico_contractilidad(r_local.get("iv"), r_local.get("iac"), r_local.get("cts"))
-        acopl = diagnostico_acoplamiento(r_local.get("ea"), r_local.get("ees"), r_local.get("ava"))
-        lineas.append(f"Volemia: {volemia.split('.')[0]}")
-        lineas.append(f"Contractilidad: {contractilidad.split('.')[0]}")
-        lineas.append(f"Acoplamiento VA: {acopl.split('.')[0]}")
-        ort = interpretar_ortostatismo(df)
-        if ort and "No " not in ort[:6]:
-            lineas.append(f"Ortostatismo: {ort.split('.')[0]}")
-        # Sugerencia terapéutica sintetizada
-        st_txt = sugerencia_tratamiento_no_embarazada(r_local, df)
-        fenotipos_line = next((l for l in st_txt.splitlines() if "Fenotipo terapéutico" in l), "")
-        if fenotipos_line:
-            lineas.append(fenotipos_line.strip())
-
-    # Advertencia final (1 línea)
-    lineas.append("Advertencia: informe orientativo. Integrar con clínica, laboratorio y criterio médico individual.")
-
-    return "\n".join(lineas[:10])
-
-
-
-
-# =========================================================
-# V23 - EMBARAZO / RIESGO DE PREECLAMPSIA
-# Regla obligatoria: la referencia hemodinámica obstétrica es ACOSTADO/CINTA.
-# El registro DE PIE se informa solo como respuesta ortostática y no modifica
-# el fenotipo materno ni el score de riesgo PE/HDP.
-# =========================================================
-
-def _referencia_obstetrica_acostado_cinta_txt(r: Optional[Dict[str, Any]] = None) -> str:
-    r = r or {}
-    metodo = str(r.get("metodo_referencia") or r.get("metodo") or "CINTA").upper()
-    posicion = str(r.get("posicion_referencia") or r.get("posicion") or "ACOSTADO").upper()
-    if "CINTA" not in metodo:
-        metodo = "CINTA/BASAL" if metodo in ["", "NO DISPONIBLE", "NONE"] else metodo
-    if "PIE" in posicion:
-        posicion = "ACOSTADO/BASAL"
-    return f"ACOSTADO/CINTA como referencia diagnóstica basal (posición: {posicion}; método: {metodo})"
-
-
-def _agregar_aviso_referencia_obstetrica(texto: str, r: Optional[Dict[str, Any]] = None) -> str:
-    aviso = (
-        "Referencia hemodinámica obstétrica: "
-        + _referencia_obstetrica_acostado_cinta_txt(r)
-        + ". Los valores usados para hemodinamia materna y riesgo de preeclampsia son IC, IRV/RVS, PA, FC, CFT/CFTnr y CA de ACOSTADO/CINTA. "
-        + "La medición DE PIE se reserva para comportamiento ortostático y no reemplaza el fenotipo basal."
-    )
-    t = str(texto or "")
-    if "Referencia hemodinámica obstétrica:" in t:
-        return limpiar_patrones_prohibidos(t)
-    return limpiar_patrones_prohibidos(aviso + "\n" + t)
-
-
-_interpretar_hemodinamica_embarazo_pre_v23 = interpretar_hemodinamica_embarazo
-
-def interpretar_hemodinamica_embarazo(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    """Módulo embarazo: usa y declara ACOSTADO/CINTA como referencia basal."""
-    r_ref = dict(r or {})
-    texto = _interpretar_hemodinamica_embarazo_pre_v23(r_ref, contexto)
-    return _agregar_aviso_referencia_obstetrica(texto, r_ref)
-
-
-_calcular_riesgo_preeclampsia_pre_v23 = calcular_riesgo_preeclampsia
-
-def calcular_riesgo_preeclampsia(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Score PE: los componentes hemodinámicos se interpretan desde ACOSTADO/CINTA."""
-    r_ref = dict(r or {})
-    res = _calcular_riesgo_preeclampsia_pre_v23(r_ref, contexto)
-    try:
-        if res.get("aplicable"):
-            factores = list(res.get("factores", []))
-            nota = "Referencia hemodinámica del score: ACOSTADO/CINTA basal; el registro DE PIE no modifica el puntaje y queda para ortostatismo."
-            if nota not in factores:
-                factores.insert(0, nota)
-            res["factores"] = factores
-    except Exception:
-        pass
-    return res
-
-
-_texto_riesgo_preeclampsia_pre_v23 = texto_riesgo_preeclampsia
-
-def texto_riesgo_preeclampsia(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    texto = _texto_riesgo_preeclampsia_pre_v23(dict(r or {}), contexto)
-    return _agregar_aviso_referencia_obstetrica(texto, r)
-
-
-_crear_grafico_riesgo_preeclampsia_bytes_pre_v23 = crear_grafico_riesgo_preeclampsia_bytes
-
-def crear_grafico_riesgo_preeclampsia_bytes(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Optional[io.BytesIO]:
-    """Gauge PE calculado con la referencia ACOSTADO/CINTA que recibe el módulo."""
-    return _crear_grafico_riesgo_preeclampsia_bytes_pre_v23(dict(r or {}), contexto)
-
-
-_clasificar_fenotipo_hdp_publicable_pre_v23 = clasificar_fenotipo_hdp_publicable
-
-def clasificar_fenotipo_hdp_publicable(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    out = _clasificar_fenotipo_hdp_publicable_pre_v23(dict(r or {}), contexto)
-    try:
-        regla = str(out.get("regla") or "")
-        nota = "Referencia hemodinámica: ACOSTADO/CINTA basal."
-        if nota not in regla:
-            out["regla"] = (nota + " " + regla).strip()
-    except Exception:
-        pass
-    return out
-
-
-_calcular_score_preeclampsia_publicable_pre_v23 = calcular_score_preeclampsia_publicable
-
-def calcular_score_preeclampsia_publicable(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    out = _calcular_score_preeclampsia_publicable_pre_v23(dict(r or {}), contexto)
-    try:
-        if out.get("aplicable") and isinstance(out.get("componentes"), list):
-            comps = list(out["componentes"])
-            comps.insert(0, {
-                "Componente": "Referencia hemodinámica",
-                "Puntos": 0,
-                "Máximo": 0,
-                "Razón": "ACOSTADO/CINTA basal; el registro DE PIE se usa solo para respuesta ortostática.",
-            })
-            out["componentes"] = comps
-    except Exception:
-        pass
-    return out
-
-
-_texto_clasificacion_dinamica_pre_v23 = texto_clasificacion_dinamica
-
-def texto_clasificacion_dinamica(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    texto = _texto_clasificacion_dinamica_pre_v23(dict(r or {}), contexto)
-    if contexto and contexto.get("embarazada"):
-        texto += " Referencia obstétrica: ACOSTADO/CINTA basal; DE PIE solo para ortostatismo."
-    return limpiar_patrones_prohibidos(texto)
-
-
-
-
-# =========================================================
-# V24 - HEMODINAMIA MATERNA GESTACIONAL
-# Clasificación por trimestre: el patrón materno en embarazo se compara con
-# la fisiología esperada del embarazo, no con rangos generales no gestacionales.
-# El punto diagnóstico usa exclusivamente ACOSTADO/CINTA.
-# =========================================================
-
-def trimestre_gestacional_desde_contexto(contexto: Optional[Dict[str, Any]] = None) -> str:
-    eg = limpiar_numero((contexto or {}).get("edad_gestacional"))
-    if eg is None:
-        return "No especificado"
-    if eg < 14:
-        return "T1"
-    if eg < 28:
-        return "T2"
-    return "T3"
-
-
-def referencia_hemodinamica_materna_por_trimestre(contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Rangos operativos para la app basados en la adaptación hemodinámica gestacional.
-
-    La finalidad es clínica-orientativa: en embarazo avanzado se espera mayor IC/GC
-    y menor RVS que en una adulta no embarazada. Por eso un IC aparentemente normal
-    en rango general puede ser bajo relativo para T2/T3 si se acompaña de RVS elevada.
-    """
-    tri = trimestre_gestacional_desde_contexto(contexto)
-    refs = {
-        "T1": {"ic_low": 3.2, "ic_high": 5.5, "rvs_low": 850, "rvs_high": 1450, "label": "primer trimestre"},
-        "T2": {"ic_low": 3.5, "ic_high": 6.0, "rvs_low": 750, "rvs_high": 1300, "label": "segundo trimestre"},
-        "T3": {"ic_low": 3.6, "ic_high": 6.0, "rvs_low": 750, "rvs_high": 1300, "label": "tercer trimestre"},
-        "No especificado": {"ic_low": 3.5, "ic_high": 6.0, "rvs_low": 750, "rvs_high": 1350, "label": "embarazo, trimestre no especificado"},
-    }
-    out = refs.get(tri, refs["No especificado"]).copy()
-    out["trimestre"] = tri
-    return out
-
-
-def clasificacion_hemodinamica_materna_gestacional(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    contexto = contexto or {}
-    ref = referencia_hemodinamica_materna_por_trimestre(contexto)
-    ic = limpiar_numero((r or {}).get("ic"))
-    rvs = limpiar_numero((r or {}).get("irv"))
-    eg = limpiar_numero(contexto.get("edad_gestacional"))
-
-    if ic is None or rvs is None:
-        return {
-            "patron_principal": "NO CLASIFICABLE",
-            "subtipo": "datos insuficientes",
-            "diagnostico": "NO CLASIFICABLE",
-            "interpretacion": "No se dispone simultáneamente de IC e IRV/RVS ACOSTADO/CINTA para clasificar la hemodinamia materna.",
-            "referencia": ref,
-            "ic": ic,
-            "rvs": rvs,
-        }
-
-    low_flow = ic < ref["ic_low"]
-    high_flow = ic > ref["ic_high"]
-    high_rvs = rvs > ref["rvs_high"]
-    low_rvs = rvs < ref["rvs_low"]
-
-    if low_flow and high_rvs:
-        principal = "HIPODINAMIA"
-        subtipo = "VASOCONSTRICTORA"
-        dx = "HIPODINAMIA VASOCONSTRICTORA"
-        interp = "Bajo flujo relativo para la edad gestacional asociado a resistencia vascular sistémica elevada. Se aparta del patrón fisiológico esperado del embarazo, que debería combinar mayor flujo y menor resistencia."
-    elif low_flow:
-        principal = "HIPODINAMIA"
-        subtipo = "POR BAJO FLUJO"
-        dx = "HIPODINAMIA POR BAJO FLUJO"
-        interp = "Índice cardíaco bajo relativo para la edad gestacional, sin vasoconstricción sistémica marcada. Integrar con volemia, frecuencia cardíaca, contractilidad y tratamiento."
-    elif high_flow and low_rvs:
-        principal = "HIPERDINAMIA"
-        subtipo = "VASODILATADA / FISIOLÓGICA DEL EMBARAZO"
-        dx = "HIPERDINAMIA VASODILATADA"
-        interp = "Alto flujo con resistencia baja, compatible con la adaptación hemodinámica fisiológica del embarazo si la presión arterial y el contexto obstétrico son favorables."
-    elif high_flow and high_rvs:
-        principal = "HIPERDINAMIA"
-        subtipo = "CON POSCARGA ELEVADA"
-        dx = "HIPERDINAMIA CON POSCARGA ELEVADA"
-        interp = "Índice cardíaco elevado con resistencia vascular también elevada; sugiere carga hemodinámica aumentada y requiere correlación con PA, volemia y tratamiento."
-    elif high_rvs:
-        principal = "NORMODINAMIA"
-        subtipo = "CON VASOCONSTRICCIÓN"
-        dx = "NORMODINAMIA CON VASOCONSTRICCIÓN"
-        interp = "Flujo en rango gestacional operativo con resistencia vascular elevada; puede representar fenotipo vasoconstrictor inicial o compensado."
-    elif low_rvs:
-        principal = "NORMODINAMIA"
-        subtipo = "VASODILATADA"
-        dx = "NORMODINAMIA VASODILATADA"
-        interp = "Flujo en rango gestacional con resistencia baja, compatible con adaptación vasodilatada si la perfusión y la PA son adecuadas."
-    else:
-        principal = "NORMODINAMIA"
-        subtipo = "GESTACIONAL"
-        dx = "NORMODINAMIA GESTACIONAL"
-        interp = "IC e IRV/RVS se ubican dentro del rango operativo esperado para la edad gestacional considerada."
-
-    return {
-        "patron_principal": principal,
-        "subtipo": subtipo,
-        "diagnostico": dx,
-        "interpretacion": interp,
-        "referencia": ref,
-        "ic": ic,
-        "rvs": rvs,
-        "edad_gestacional": eg,
-    }
-
-
-# Reemplaza la clasificación dinámica SOLO cuando el contexto es embarazo.
-_clasificacion_dinamica_obligatoria_pre_v24 = clasificacion_dinamica_obligatoria
-
-def clasificacion_dinamica_obligatoria(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    if contexto and contexto.get("embarazada"):
-        return clasificacion_hemodinamica_materna_gestacional(r, contexto).get("patron_principal", "NORMODINAMIA")
-    return _clasificacion_dinamica_obligatoria_pre_v24(r, contexto)
-
-
-def clasificar_dinamia_materna(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-
-def parent_dynamics_class(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-
-def maternal_dynamics_class(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    return clasificacion_dinamica_obligatoria(r, contexto)
-
-
-_texto_clasificacion_dinamica_pre_v24 = texto_clasificacion_dinamica
-
-def texto_clasificacion_dinamica(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    if contexto and contexto.get("embarazada"):
-        c = clasificacion_hemodinamica_materna_gestacional(r, contexto)
-        ref = c["referencia"]
-        return (
-            f"Clasificación dinámica materna ACOSTADO/CINTA: {c['diagnostico']}. "
-            f"Base: IC {fmt(c.get('ic'),2,' L/min/m²')}; IRV/RVS {fmt(c.get('rvs'),0,' dyn·s·cm⁻⁵')}. "
-            f"Referencia gestacional: {ref['label']} ({'EG ' + fmt(c.get('edad_gestacional'),0) + ' semanas' if c.get('edad_gestacional') is not None else 'EG no especificada'}); "
-            f"rango operativo esperado IC {fmt(ref['ic_low'],1)}-{fmt(ref['ic_high'],1)} L/min/m² y RVS {fmt(ref['rvs_low'],0)}-{fmt(ref['rvs_high'],0)} dyn·s·cm⁻⁵. "
-            "DE PIE se interpreta solo como respuesta ortostática."
-        )
-    return _texto_clasificacion_dinamica_pre_v24(r, contexto)
-
-
-_interpretar_hemodinamica_embarazo_pre_v24 = interpretar_hemodinamica_embarazo
-
-def interpretar_hemodinamica_embarazo(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> str:
-    contexto = contexto or {}
-    if not contexto.get("embarazada", False):
-        return "No aplicable: paciente no marcada como embarazada."
-    c = clasificacion_hemodinamica_materna_gestacional(r, contexto)
-    ref = c["referencia"]
-    hdp = bool(contexto.get("hdp", False))
-    crecimiento = str(contexto.get("crecimiento_fetal") or "No informado")
-    doppler = str(contexto.get("doppler_uterino") or "No informado")
-    cft = limpiar_numero((r or {}).get("cft"))
-    cftnr = limpiar_numero((r or {}).get("cftnr"))
-    iv = limpiar_numero((r or {}).get("iv"))
-    iac = limpiar_numero((r or {}).get("iac"))
-
-    lineas = []
-    lineas.append("Interpretación hemodinámica materna en embarazo")
-    lineas.append("- Referencia diagnóstica: ACOSTADO/CINTA basal. El registro DE PIE se reserva para ortostatismo.")
-    if c.get("edad_gestacional") is not None:
-        lineas.append(f"- Edad gestacional: {fmt(c.get('edad_gestacional'),0)} semanas; referencia usada: {ref['label']}.")
-    else:
-        lineas.append(f"- Edad gestacional no especificada; referencia usada: {ref['label']}.")
-    lineas.append(f"- Patrón circulatorio materno ACOSTADO/CINTA: {c['diagnostico']}.")
-    lineas.append(f"- Base real del estudio: IC {fmt(c.get('ic'),2,' L/min/m²')}; IRV/RVS {fmt(c.get('rvs'),0,' dyn·s·cm⁻⁵')}.")
-    lineas.append(f"- Comparación con edad gestacional: para {ref['label']} se espera IC {fmt(ref['ic_low'],1)}-{fmt(ref['ic_high'],1)} L/min/m² y RVS {fmt(ref['rvs_low'],0)}-{fmt(ref['rvs_high'],0)} dyn·s·cm⁻⁵.")
-    if c.get("ic") is not None and c.get("rvs") is not None:
-        comp_ic_txt = "bajo para la edad gestacional" if c.get("ic") < ref["ic_low"] else ("alto para la edad gestacional" if c.get("ic") > ref["ic_high"] else "en rango para la edad gestacional")
-        comp_rvs_txt = "elevada para la edad gestacional" if c.get("rvs") > ref["rvs_high"] else ("baja para la edad gestacional" if c.get("rvs") < ref["rvs_low"] else "en rango para la edad gestacional")
-        lineas.append(f"- Diagnóstico gráfico por edad gestacional: IC {comp_ic_txt}; IRV/RVS {comp_rvs_txt}.")
-    lineas.append(f"- Interpretación resumida: {c['interpretacion']}")
-    lineas.append(f"- HDP/HTA obstétrica informada: {'sí' if hdp else 'no/no informado'}. Crecimiento fetal: {crecimiento}. Doppler uterino: {doppler}.")
-
-    if c["diagnostico"] == "HIPODINAMIA VASOCONSTRICTORA" and hdp:
-        lineas.append("- Fenotipo materno sugerido: HDP con bajo flujo relativo y alta resistencia vascular, orientador de fenotipo vascular-placentario. Completar con crecimiento fetal, Doppler uterino, proteinuria/laboratorio y evolución clínica.")
-    elif "VASOCONSTRIC" in c["diagnostico"] and hdp:
-        lineas.append("- Fenotipo materno sugerido: HDP con componente vasoconstrictor; vigilar progresión a compromiso placentario si aparecen Doppler alterado o restricción de crecimiento.")
-    elif c["patron_principal"] == "HIPERDINAMIA" and hdp:
-        lineas.append("- Fenotipo materno sugerido: patrón hiperdinámico; integrar con obesidad, volemia, tratamiento y fenotipo AGA/metabólico.")
-    else:
-        lineas.append("- Fenotipo materno sugerido: interpretar según patrón gestacional basal y datos obstétricos complementarios.")
-
-    if cft is not None or cftnr is not None:
-        lineas.append("- Volemia/fluidos torácicos: " + diagnostico_volemia(cft, cftnr))
-    if iv is not None or iac is not None:
-        partes = []
-        if iv is not None:
-            partes.append(f"IV {fmt(iv,2)}")
-        if iac is not None:
-            partes.append(f"IAC/ACI {fmt(iac,2)}")
-        lineas.append("- Función aórtica/onda sistólica: " + "; ".join(partes) + ". Integrar con PA, rigidez arterial y contexto HDP.")
-
-    lineas.append("- Conducta sugerida: integrar con presión arterial seriada, proteinuria/laboratorio, Doppler uterino, biometría fetal, medicación actual y obstetricia de alto riesgo. Esta interpretación no reemplaza criterios diagnósticos obstétricos.")
-    return limpiar_patrones_prohibidos("\n".join(lineas))
-
-
-def crear_grafico_hemodinamia_materna_gestacional_bytes(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Optional[io.BytesIO]:
-    """Gráfico diagnóstico IC vs RVS con referencia gestacional y punto real ACOSTADO/CINTA."""
-    c = clasificacion_hemodinamica_materna_gestacional(r, contexto)
-    ic = limpiar_numero(c.get("ic"))
-    rvs = limpiar_numero(c.get("rvs"))
-    if ic is None or rvs is None:
-        return None
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-        import io as _io
-    except Exception:
-        return None
-
-    ref = c["referencia"]
-    tri = ref.get("trimestre", trimestre_gestacional_desde_contexto(contexto))
-    eg_val = limpiar_numero(c.get("edad_gestacional"))
-    eg_label = f"EG {fmt(eg_val,0)} semanas" if eg_val is not None else "EG no especificada"
-    tri_label = ref.get("label", "referencia gestacional")
-    x_min = max(500, min(650, ref["rvs_low"] - 250, rvs - 450))
-    x_max = max(2200, ref["rvs_high"] + 650, rvs + 450)
-    y_min = max(1.5, min(2.0, ref["ic_low"] - 1.2, ic - 1.0))
-    y_max = max(6.5, ref["ic_high"] + 0.8, ic + 1.0)
-
-    fig, ax = plt.subplots(figsize=(15.0, 7.5), dpi=150)
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
-
-    # Zonas diagnósticas.
-    ax.axvspan(x_min, ref["rvs_low"], color="#D8F3DC", alpha=0.85)
-    ax.axvspan(ref["rvs_low"], ref["rvs_high"], color="#E8F1FA", alpha=0.9)
-    ax.axvspan(ref["rvs_high"], x_max, color="#FDE2E4", alpha=0.85)
-    ax.axhspan(y_min, ref["ic_low"], color="#FFF4CC", alpha=0.6)
-    ax.axhspan(ref["ic_high"], y_max, color="#EBD8FF", alpha=0.45)
-
-    # Rectángulo de normalidad gestacional esperada.
-    rect = Rectangle((ref["rvs_low"], ref["ic_low"]), ref["rvs_high"]-ref["rvs_low"], ref["ic_high"]-ref["ic_low"],
-                     fill=False, edgecolor="#0B4F8A", linewidth=2.2, linestyle="--")
-    ax.add_patch(rect)
-
-    # Líneas de corte.
-    ax.axvline(ref["rvs_low"], color="#64748B", lw=1.4, ls="--")
-    ax.axvline(ref["rvs_high"], color="#64748B", lw=1.4, ls="--")
-    ax.axhline(ref["ic_low"], color="#64748B", lw=1.4, ls="--")
-    ax.axhline(ref["ic_high"], color="#64748B", lw=1.4, ls="--")
-
-    # Etiquetas de zonas — centradas en cada cuadrante para evitar superposición.
-    _xc_izq  = (x_min + ref["rvs_low"]) / 2
-    _xc_med  = (ref["rvs_low"] + ref["rvs_high"]) / 2
-    _xc_der  = (ref["rvs_high"] + x_max) / 2
-    _yc_top  = (ref["ic_high"] + y_max) / 2
-    _yc_mid  = (ref["ic_low"] + ref["ic_high"]) / 2
-    _yc_bot  = (y_min + ref["ic_low"]) / 2
-    ax.text(_xc_izq, _yc_top, "Hiperdinamia\nvasodilatada",   fontsize=11, fontweight="bold", color="#14532D", ha="center", va="center")
-    ax.text(_xc_der, _yc_top, "Hiperdinamia\nposcarga alta",  fontsize=11, fontweight="bold", color="#7F1D1D", ha="center", va="center")
-    ax.text(_xc_izq, _yc_bot, "Hipodinamia\nbajo flujo",      fontsize=11, fontweight="bold", color="#78350F", ha="center", va="center")
-    ax.text(_xc_der, _yc_bot, "Hipodinamia\nvasoconstrictora",fontsize=11, fontweight="bold", color="#7F1D1D", ha="center", va="center")
-    ax.text(_xc_med, _yc_mid, "Rango\nesperado\ngestacional", fontsize=11, fontweight="bold", color="#0B4F8A", ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.3", fc="#E8F1FA", ec="#0B4F8A", alpha=0.7, lw=1.2))
-
-    ax.scatter([rvs], [ic], s=200, color="#111827", edgecolor="white", linewidth=2.2, zorder=5)
-    ax.annotate(
-        f"ACOSTADO/CINTA\nIC {fmt(ic,2)} | RVS {fmt(rvs,0)}\n{c['diagnostico']}",
-        xy=(rvs, ic), xytext=(32, 28), textcoords="offset points",
-        bbox=dict(boxstyle="round,pad=0.45", fc="white", ec="#0B4F8A", lw=1.6, alpha=0.97),
-        arrowprops=dict(arrowstyle="->", color="#0B4F8A", lw=1.5),
-        fontsize=10.5, fontweight="bold", color="#0F172A"
-    )
-
-    ax.set_title(f"Hemodinamia materna según edad gestacional: {eg_label} ({tri_label})", fontsize=14, fontweight="bold", color="#0B3D6E", pad=14)
-    ax.set_xlabel("Resistencia vascular sistémica - IRV/RVS (dyn·s·cm⁻⁵)", fontsize=12, fontweight="bold", labelpad=10)
-    ax.set_ylabel("Índice cardíaco - IC (L/min/m²)", fontsize=12, fontweight="bold", labelpad=10)
-    ax.grid(True, alpha=0.22)
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.text(0.01, -0.11, f"Lectura: el punto ACOSTADO/CINTA se compara contra la referencia de {tri_label} ({eg_label}). DE PIE queda reservado para respuesta ortostática. Diagnóstico: {c['diagnostico']}.", transform=ax.transAxes, fontsize=9.5, color="#334155")
-    fig.tight_layout(pad=1.8)
-    buf = _io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-def crear_grafico_hemodinamia_edad_gestacional_diagnostico_bytes(
-    r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None
-) -> Optional[io.BytesIO]:
-    """
-    Grafico IC y RVS vs edad gestacional con curvas de referencia fisiologica,
-    punto real del paciente y panel de conclusiones clinicas remarcadas.
-    """
-    contexto = contexto or {}
-    if not contexto.get("embarazada"):
-        return None
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import io as _io
-    except Exception:
-        return None
-
-    ic_val = limpiar_numero((r or {}).get("ic"))
-    rvs_val = limpiar_numero((r or {}).get("irv"))
-    eg_val = limpiar_numero(contexto.get("edad_gestacional"))
-
-    if ic_val is None and rvs_val is None:
-        return None
-
-    semanas = np.array([6, 10, 14, 18, 22, 26, 30, 34, 38, 42], dtype=float)
-    ic_ref_centro = np.array([3.4, 3.6, 3.8, 4.2, 4.6, 4.9, 5.0, 4.9, 4.7, 4.5])
-    ic_ref_low    = np.array([3.2, 3.2, 3.2, 3.5, 3.8, 4.0, 4.0, 3.8, 3.6, 3.6])
-    ic_ref_high   = np.array([5.5, 5.5, 5.5, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0])
-    rvs_ref_centro = np.array([1200, 1100, 1050, 950, 900, 870, 870, 890, 920, 950])
-    rvs_ref_low    = np.array([850,  850,  850,  750, 750, 750, 750, 750, 750, 750])
-    rvs_ref_high   = np.array([1450, 1450, 1450, 1300, 1300, 1300, 1300, 1300, 1300, 1300])
-
-    c = clasificacion_hemodinamica_materna_gestacional(r, contexto)
-    dx = c.get("diagnostico", "NO CLASIFICABLE")
-    patron = c.get("patron_principal", "")
-    subtipo = c.get("subtipo", "")
-
-    color_punto = {
-        "NORMODINAMIA": "#2563EB",
-        "HIPERDINAMIA": "#16A34A",
-        "HIPODINAMIA":  "#DC2626",
-        "NO CLASIFICABLE": "#6B7280",
-    }.get(patron, "#111827")
-
-    hdp = bool(contexto.get("hdp", False))
-    crecimiento = str(contexto.get("crecimiento_fetal") or "No informado")
-    doppler = str(contexto.get("doppler_uterino") or "No informado")
-    tri_label = c.get("referencia", {}).get("label", "trimestre no especificado")
-    eg_label = f"EG {fmt(eg_val, 0)} sem" if eg_val is not None else "EG no especificada"
-
-    conclusiones: list = []
-    if patron == "HIPODINAMIA" and "VASOCONSTRICTORA" in subtipo:
-        simbolo_riesgo = "ROJO"
-        conclusiones.append("PATRON DE ALTO RIESGO: bajo flujo + resistencia elevada. Fenotipo compatible con disfuncion placentaria (Ferrazzi). Requiere evaluacion obstetrica urgente.")
-    elif patron == "HIPODINAMIA":
-        simbolo_riesgo = "AMARILLO"
-        conclusiones.append("PATRON DE PRECAUCION: indice cardiaco bajo para la edad gestacional. Descartar hipovolemia, depresion miocardica o suboptima adaptacion gestacional.")
-    elif patron == "NORMODINAMIA" and "VASOCONSTRICCION" in subtipo.upper():
-        simbolo_riesgo = "AMARILLO"
-        conclusiones.append("NORMODINAMIA CON VASOCONSTRICCION: flujo conservado pero resistencia elevada. Vigilar evolucion a fenotipo hipodindamico.")
-    elif patron == "HIPERDINAMIA" and "POSCARGA" in subtipo.upper():
-        simbolo_riesgo = "AMARILLO"
-        conclusiones.append("HIPERDINAMIA CON POSCARGA ELEVADA: coexistencia de alto flujo y resistencia aumentada sugiere estres hemodinamico.")
-    elif patron == "HIPERDINAMIA":
-        simbolo_riesgo = "VERDE"
-        conclusiones.append("PATRON FISIOLOGICO DEL EMBARAZO: alto flujo con resistencia baja, compatible con adaptacion hemodinamica gestacional normal.")
-    elif patron == "NORMODINAMIA":
-        simbolo_riesgo = "VERDE"
-        conclusiones.append("NORMODINAMIA GESTACIONAL: IC y RVS dentro del rango esperado para el trimestre. Continuar seguimiento obstetrico habitual.")
-    else:
-        simbolo_riesgo = "GRIS"
-        conclusiones.append("Datos insuficientes para clasificacion gestacional completa. Completar IC e IRV/RVS.")
-
-    if hdp:
-        conclusiones.append("HTA/HDP PRESENTE: integrar el patron hemodinamico con proteinuria, laboratorio, Doppler uterino y biometria fetal.")
-    if any(x in crecimiento.upper() for x in ["SGA", "RCIU", "FGR", "IUGR"]):
-        conclusiones.append(f"RESTRICCION DE CRECIMIENTO FETAL ({crecimiento}): coexistencia con hipodinamia/vasoconstriccion refuerza fenotipo placentario de alto riesgo.")
-    if any(x in doppler.lower() for x in ["alter", "aument", "notch", "incisura", "patolog"]):
-        conclusiones.append("DOPPLER UTERINO ALTERADO: hallazgo de alto peso para disfuncion placentaria.")
-    if ic_val is not None and rvs_val is not None:
-        conclusiones.append(f"PUNTO REAL: IC={fmt(ic_val,2)} L/min/m2 | RVS={fmt(rvs_val,0)} dyn.s.cm-5 en {eg_label} ({tri_label}).")
-    conclusiones.append("IMPORTANTE: grafico orientativo. No reemplaza la evaluacion obstetrica ni el criterio clinico individual.")
-
-    panel_color = {"ROJO":"#FEE2E2","AMARILLO":"#FEF9C3","VERDE":"#DCFCE7","GRIS":"#F1F5F9"}.get(simbolo_riesgo,"#F1F5F9")
-    border_color = {"ROJO":"#DC2626","AMARILLO":"#CA8A04","VERDE":"#16A34A","GRIS":"#94A3B8"}.get(simbolo_riesgo,"#94A3B8")
-    semaforo_txt = {"ROJO":"[RIESGO ALTO]","AMARILLO":"[PRECAUCION]","VERDE":"[NORMAL]","GRIS":"[SIN DATOS]"}.get(simbolo_riesgo,"")
-
-    fig, ax1 = plt.subplots(figsize=(12.5, 10.0), dpi=160)
-    fig.patch.set_facecolor("white")
-    ax1.set_facecolor("#F8FAFC")
-    ax2 = ax1.twinx()
-
-    ax1.fill_between(semanas, ic_ref_low, ic_ref_high, alpha=0.18, color="#2563EB")
-    ax2.fill_between(semanas, rvs_ref_low, rvs_ref_high, alpha=0.13, color="#DC2626")
-    ax1.plot(semanas, ic_ref_centro, color="#2563EB", lw=2.2, ls="--", label="IC ref. gestacional")
-    ax2.plot(semanas, rvs_ref_centro, color="#DC2626", lw=2.2, ls="--", label="RVS ref. gestacional")
-
-    for sw, lbl in [(14, "T1|T2"), (28, "T2|T3")]:
-        ax1.axvline(sw, color="#94A3B8", lw=1.5, ls=":", zorder=2)
-        ax1.text(sw + 0.3, 6.85, lbl, fontsize=9.5, color="#475569", va="top")
-
-    ax1.axvspan(4, 14, color="#EFF6FF", alpha=0.35, zorder=0)
-    ax1.axvspan(14, 28, color="#F0FDF4", alpha=0.35, zorder=0)
-    ax1.axvspan(28, 42, color="#FFF7ED", alpha=0.35, zorder=0)
-    ax1.text(9, 1.9, "1er Trimestre", fontsize=9.5, color="#1E40AF", ha="center", alpha=0.75)
-    ax1.text(21, 1.9, "2do Trimestre", fontsize=9.5, color="#166534", ha="center", alpha=0.75)
-    ax1.text(35, 1.9, "3er Trimestre", fontsize=9.5, color="#9A3412", ha="center", alpha=0.75)
-
-    if ic_val is not None and eg_val is not None:
-        ax1.scatter([eg_val], [ic_val], s=240, color=color_punto, edgecolor="white", linewidth=2.5, zorder=9,
-                    label=f"IC paciente: {fmt(ic_val,2)} L/min/m2")
-        ax1.annotate(f"IC: {fmt(ic_val,2)}", xy=(eg_val, ic_val), xytext=(14, 22), textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=color_punto, lw=1.8, alpha=0.96),
-            arrowprops=dict(arrowstyle="->", color=color_punto, lw=1.5),
-            fontsize=10.5, fontweight="bold", color=color_punto)
-
-    if rvs_val is not None and eg_val is not None:
-        ax2.scatter([eg_val], [rvs_val], s=240, color="#B45309", marker="D", edgecolor="white", linewidth=2.5, zorder=9,
-                    label=f"RVS paciente: {fmt(rvs_val,0)}")
-        ax2.annotate(f"RVS: {fmt(rvs_val,0)}", xy=(eg_val, rvs_val), xytext=(14, -28), textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#B45309", lw=1.8, alpha=0.96),
-            arrowprops=dict(arrowstyle="->", color="#B45309", lw=1.5),
-            fontsize=10.5, fontweight="bold", color="#B45309")
-
-    ax1.set_xlim(4, 42)
-    ax1.set_ylim(1.5, 7.2)
-    ax2.set_ylim(400, 2100)
-    ax1.set_xlabel("Edad gestacional (semanas)", fontsize=12, fontweight="bold", color="#0F172A")
-    ax1.set_ylabel("Indice cardiaco - IC (L/min/m2)", fontsize=12, fontweight="bold", color="#2563EB")
-    ax2.set_ylabel("Resistencia vascular sistemica - RVS (dyn.s.cm-5)", fontsize=12, fontweight="bold", color="#DC2626")
-    ax1.tick_params(axis="y", labelcolor="#2563EB")
-    ax2.tick_params(axis="y", labelcolor="#DC2626")
-    ax1.set_xticks(list(range(6, 43, 4)))
-    ax1.grid(True, alpha=0.2)
-
-    ax1.set_title(
-        f"Hemodinamica materna vs edad gestacional  |  {eg_label}  |  {semaforo_txt}  {dx}",
-        fontsize=13, fontweight="bold", color="#0B3D6E", pad=12
-    )
-
-    lines1, labs1 = ax1.get_legend_handles_labels()
-    lines2, labs2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labs1 + labs2, loc="upper right", fontsize=9, framealpha=0.92)
-
-    fig.subplots_adjust(bottom=0.34, top=0.93)
-    panel_ax = fig.add_axes([0.04, 0.01, 0.92, 0.30])
-    panel_ax.set_facecolor(panel_color)
-    for spine in panel_ax.spines.values():
-        spine.set_edgecolor(border_color)
-        spine.set_linewidth(2.5)
-    panel_ax.set_xticks([])
-    panel_ax.set_yticks([])
-
-    cabecera = f"  {semaforo_txt}  CONCLUSIONES CLINICAS IMPORTANTES  -  MODULO HEMODINAMIA EN EMBARAZO"
-    panel_ax.text(0.01, 0.94, cabecera, transform=panel_ax.transAxes,
-                  fontsize=11, fontweight="bold", color=border_color, va="top")
-
-    y_txt = 0.74
-    for i, con in enumerate(conclusiones):
-        marker = ">" if i < len(conclusiones) - 1 else "i"
-        peso = "bold" if i == 0 else "normal"
-        color_txt = border_color if i == 0 else "#1E293B"
-        panel_ax.text(0.012, y_txt, f"  {marker}  {con}",
-                      transform=panel_ax.transAxes, fontsize=9.2,
-                      fontweight=peso, color=color_txt, va="top")
-        y_txt -= 0.155
-        if y_txt < 0.01:
-            break
-
-    buf = _io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-_calcular_riesgo_preeclampsia_pre_v24 = calcular_riesgo_preeclampsia
-
-def calcular_riesgo_preeclampsia(r: Dict[str, Any], contexto: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    res = _calcular_riesgo_preeclampsia_pre_v24(r, contexto)
-    try:
-        if contexto and contexto.get("embarazada") and res.get("aplicable"):
-            c = clasificacion_hemodinamica_materna_gestacional(r, contexto)
-            factores = list(res.get("factores", []))
-            nota = f"Clasificación gestacional ACOSTADO/CINTA: {c['diagnostico']} con IC {fmt(c.get('ic'),2)} e IRV/RVS {fmt(c.get('rvs'),0)}."
-            if nota not in factores:
-                factores.insert(1 if factores else 0, nota)
-            res["factores"] = factores
-            res["fenotipo"] = c["diagnostico"]
-    except Exception:
-        pass
-    return res
-
-
-# =========================================================
-# USUARIOS, CLAVES E HISTORIAL ACUMULADO
-# =========================================================
-
-APP_DATA_DIR = Path(__file__).resolve().parent / "app_cgi_data"
-USUARIOS_JSON = APP_DATA_DIR / "usuarios_app_cgi.json"
-HISTORIAL_XLSX = APP_DATA_DIR / "historial_informes_app_cgi.xlsx"
-USUARIO_ASSETS_DIR = APP_DATA_DIR / "usuarios_assets"
-HISTORIAL_USUARIOS_DIR = APP_DATA_DIR / "historial_usuarios"
-
-
-
-def _asegurar_directorio_app() -> None:
-    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        USUARIO_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        HISTORIAL_USUARIOS_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-
-def _normalizar_usuario(usuario: Any) -> str:
-    """Normalización idéntica entre registro y login para evitar desajustes."""
-    return normalizar_txt(str(usuario or "")).replace(" ", "_").strip()
-
-
-def _normalizar_clave(clave: Any) -> str:
-    """Limpia espacios externos pero conserva el contenido."""
-    return str(clave if clave is not None else "").strip()
-
-
-def _hash_clave(clave: str, salt: Optional[str] = None) -> Dict[str, str]:
-    """Hash local de clave. No guarda claves en texto plano.
-
-    El salt se persiste y se reutiliza en cada autenticación para que el hash
-    sea reproducible. Si el salt almacenado fuera inválido se genera uno nuevo.
-    """
-    import hashlib
-    import secrets
-    if not isinstance(salt, str) or not salt:
-        salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        str(clave).encode("utf-8"),
-        salt.encode("utf-8"),
-        120000,
-    ).hex()
-    return {"salt": salt, "hash": digest}
-
-
-def cargar_usuarios_app() -> Dict[str, Any]:
-    _asegurar_directorio_app()
-    if not USUARIOS_JSON.exists():
-        return {}
-    try:
-        import json
-        with open(USUARIOS_JSON, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            # Compatibilidad con versiones que guardaban una lista de usuarios.
-            data = {
-                _normalizar_usuario(x.get("usuario") or x.get("user") or x.get("email") or x.get("nombre", "")): x
-                for x in data if isinstance(x, dict)
-            }
-        if not isinstance(data, dict):
-            return {}
-        normalizados: Dict[str, Any] = {}
-        cambio = False
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
-            key_norm = _normalizar_usuario(v.get("usuario") or k)
-            info = _migrar_registro_usuario_legacy(key_norm, v) if "_migrar_registro_usuario_legacy" in globals() else dict(v)
-            info["usuario"] = key_norm
-            normalizados[key_norm] = info
-            if key_norm != k or info != v:
-                cambio = True
-        if cambio:
-            try:
-                guardar_usuarios_app(normalizados)
-            except Exception:
-                pass
-        return normalizados
-    except Exception:
-        return {}
-
-def guardar_usuarios_app(usuarios: Dict[str, Any]) -> None:
-    _asegurar_directorio_app()
-    import json
-    with open(USUARIOS_JSON, "w", encoding="utf-8") as f:
-        json.dump(usuarios, f, ensure_ascii=False, indent=2)
-
-
-
-def _slug_archivo_usuario(usuario: Any) -> str:
-    slug = _normalizar_usuario(usuario)
-    slug = re.sub(r"[^a-z0-9_\-]+", "_", slug).strip("_")
-    return slug or "usuario"
-
-
-def _ruta_asset_usuario(usuario: Any, tipo: str, extension: str = ".png") -> Path:
-    _asegurar_directorio_app()
-    safe_user = _slug_archivo_usuario(usuario)
-    safe_tipo = "firma" if tipo == "firma" else "sello"
-    return USUARIO_ASSETS_DIR / f"{safe_user}_{safe_tipo}{extension.lower()}"
-
-
-def _extension_imagen(nombre: Any) -> str:
-    ext = Path(str(nombre or "")).suffix.lower()
-    if ext in [".png", ".jpg", ".jpeg", ".webp"]:
-        return ext
-    return ".png"
-
-
-def guardar_imagen_usuario_app(usuario_info: Dict[str, Any], uploaded_file: Any, tipo: str) -> Tuple[bool, str]:
-    """Guarda firma o sello por usuario y persiste la ruta en usuarios_app_cgi.json."""
-    if uploaded_file is None:
-        return False, "No se seleccionó ningún archivo."
-    usuario = str(usuario_info.get("usuario") or "").strip()
-    if not usuario:
-        return False, "Usuario no identificado."
-    ext = _extension_imagen(getattr(uploaded_file, "name", ""))
-    ruta = _ruta_asset_usuario(usuario, tipo, ext)
-    try:
-        contenido = uploaded_file.getvalue()
-        if not contenido:
-            return False, "El archivo está vacío."
-        ruta.write_bytes(contenido)
-        usuarios = cargar_usuarios_app()
-        real_key = _buscar_usuario_flexible(usuarios, _normalizar_usuario(usuario)) or usuario
-        if real_key not in usuarios:
-            usuarios[real_key] = dict(usuario_info)
-        campo = "firma_path" if tipo == "firma" else "sello_path"
-        usuarios[real_key][campo] = str(ruta)
-        usuarios[real_key][f"{tipo}_archivo"] = getattr(uploaded_file, "name", "")
-        usuarios[real_key][f"{tipo}_actualizado"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        guardar_usuarios_app(usuarios)
-        usuario_info[campo] = str(ruta)
-        usuario_info[f"{tipo}_archivo"] = getattr(uploaded_file, "name", "")
-        usuario_info[f"{tipo}_actualizado"] = usuarios[real_key][f"{tipo}_actualizado"]
-        st.session_state["usuario_actual"] = usuario_info
-        return True, f"{tipo.capitalize()} guardado correctamente para este usuario."
-    except Exception as e:
-        return False, f"No se pudo guardar {tipo}: {e}"
-
-
-def eliminar_imagen_usuario_app(usuario_info: Dict[str, Any], tipo: str) -> Tuple[bool, str]:
-    usuario = str(usuario_info.get("usuario") or "").strip()
-    campo = "firma_path" if tipo == "firma" else "sello_path"
-    ruta = usuario_info.get(campo)
-    try:
-        if ruta and Path(str(ruta)).exists():
-            Path(str(ruta)).unlink()
-    except Exception:
-        pass
-    usuarios = cargar_usuarios_app()
-    real_key = _buscar_usuario_flexible(usuarios, _normalizar_usuario(usuario))
-    if real_key and real_key in usuarios:
-        usuarios[real_key].pop(campo, None)
-        usuarios[real_key].pop(f"{tipo}_archivo", None)
-        usuarios[real_key].pop(f"{tipo}_actualizado", None)
-        guardar_usuarios_app(usuarios)
-    usuario_info.pop(campo, None)
-    usuario_info.pop(f"{tipo}_archivo", None)
-    usuario_info.pop(f"{tipo}_actualizado", None)
-    st.session_state["usuario_actual"] = usuario_info
-    return True, f"{tipo.capitalize()} eliminado para este usuario."
-
-
-def path_asset_usuario(usuario_info: Optional[Dict[str, Any]], tipo: str) -> Optional[str]:
-    """Devuelve firma/sello del usuario actual si existe en disco."""
-    info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    campo = "firma_path" if tipo == "firma" else "sello_path"
-    ruta = info.get(campo)
-    if ruta and Path(str(ruta)).exists():
-        return str(ruta)
-    # Si el usuario fue cargado en sesión antes de actualizar JSON, refrescar desde disco.
-    usuarios = cargar_usuarios_app()
-    real_key = _buscar_usuario_flexible(usuarios, _normalizar_usuario(info.get("usuario", "")))
-    if real_key:
-        ruta = (usuarios.get(real_key) or {}).get(campo)
-        if ruta and Path(str(ruta)).exists():
-            return str(ruta)
-    return None
-
-
-def texto_firma_usuario(usuario_info: Optional[Dict[str, Any]] = None) -> str:
-    info = usuario_info or st.session_state.get("usuario_actual", {}) or {}
-    nombre = str(info.get("nombre") or info.get("usuario") or "").strip()
-    matricula = str(info.get("matricula") or "").strip()
-    if nombre and matricula:
-        return f"Firma y sello digital autorizados - {nombre} - Matrícula {matricula}"
-    if nombre:
-        return f"Firma y sello digital autorizados - {nombre}"
-    return "Firma y sello digital autorizados"
-
-
-def _migrar_registro_usuario_legacy(usuario_key: str, info: Dict[str, Any]) -> Dict[str, Any]:
-    """Normaliza registros viejos para que no fallen al volver a ingresar."""
-    info = dict(info or {})
-    info.setdefault("usuario", _normalizar_usuario(info.get("usuario") or usuario_key))
-    info.setdefault("nombre", info.get("usuario", usuario_key))
-    info.setdefault("matricula", "")
-    info.setdefault("rol", "admin" if str(info.get("rol", "")).lower() == "admin" else "usuario")
-    return info
-
-def registrar_usuario_app(usuario: str, clave: str, nombre: str = "", matricula: str = "") -> Tuple[bool, str]:
-    usuario = _normalizar_usuario(usuario)
-    clave = _normalizar_clave(clave)
-    if not usuario or len(usuario) < 3:
-        return False, "El usuario debe tener al menos 3 caracteres."
-    if not clave or len(clave) < 4:
-        return False, "La clave debe tener al menos 4 caracteres."
-    usuarios = cargar_usuarios_app()
-    if usuario in usuarios:
-        return False, "Ese usuario ya existe. Ingrese con su clave o use 'Restablecer clave'."
-    hp = _hash_clave(clave)
-    usuarios[usuario] = {
-        "usuario": usuario,
-        "nombre": (nombre or "").strip() or usuario,
-        "matricula": (matricula or "").strip(),
-        "salt": hp["salt"],
-        "hash": hp["hash"],
-        "rol": "admin" if len(usuarios) == 0 else "usuario",
-        "fecha_alta": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    guardar_usuarios_app(usuarios)
-    return True, "Usuario registrado correctamente. Ya puede ingresar."
-
-
-def _buscar_usuario_flexible(usuarios: Dict[str, Any], usuario_norm: str) -> Optional[str]:
-    """Busca el usuario tolerando variaciones de mayúsculas, acentos o espacios."""
-    if not usuario_norm:
-        return None
-    if usuario_norm in usuarios:
-        return usuario_norm
-    for k in list(usuarios.keys()):
-        if _normalizar_usuario(k) == usuario_norm:
-            return k
-    return None
-
-
-def _comparar_clave_legacy(info: Dict[str, Any], clave_norm: str, clave_original: str) -> bool:
-    """Compatibilidad con registros anteriores: clave, password, contraseña o hash simple."""
-    import hashlib
-    posibles_texto = [
-        info.get("clave"),
-        info.get("password"),
-        info.get("contrasena"),
-        info.get("contraseña"),
-    ]
-    for val in posibles_texto:
-        if val is not None and str(val).strip() == clave_norm:
-            return True
-    posibles_hash = [
-        info.get("clave_hash"),
-        info.get("password_hash"),
-        info.get("hash_sha256"),
-        info.get("sha256"),
-    ]
-    sha = hashlib.sha256(clave_norm.encode("utf-8")).hexdigest()
-    sha_original = hashlib.sha256(str(clave_original).encode("utf-8")).hexdigest()
-    return any(str(h or "").lower() in [sha, sha_original] for h in posibles_hash)
-
-
-def _actualizar_hash_usuario_si_legacy(usuarios: Dict[str, Any], real_key: str, clave_norm: str) -> None:
-    """Migra un usuario antiguo a PBKDF2 una vez que la clave fue validada."""
-    try:
-        hp = _hash_clave(clave_norm)
-        usuarios[real_key]["salt"] = hp["salt"]
-        usuarios[real_key]["hash"] = hp["hash"]
-        usuarios[real_key].pop("clave", None)
-        usuarios[real_key].pop("password", None)
-        usuarios[real_key].pop("contrasena", None)
-        usuarios[real_key].pop("contraseña", None)
-        usuarios[real_key]["fecha_migracion_clave"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        guardar_usuarios_app(usuarios)
-    except Exception:
-        pass
-
-
-def autenticar_usuario_app(usuario: str, clave: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
-    usuario_norm = _normalizar_usuario(usuario)
-    clave_norm = _normalizar_clave(clave)
-    if not usuario_norm:
-        return False, None, "Ingrese el nombre de usuario."
-    if not clave_norm:
-        return False, None, "Ingrese la clave."
-    usuarios = cargar_usuarios_app()
-    if not usuarios:
-        return False, None, "Aún no hay usuarios registrados. Vaya a la pestaña 'Registrar usuario'."
-    real_key = _buscar_usuario_flexible(usuarios, usuario_norm)
-    if real_key is None:
-        return False, None, "Usuario no encontrado. Verifique el nombre o regístrese."
-    info = _migrar_registro_usuario_legacy(real_key, usuarios.get(real_key) or {})
-    usuarios[real_key] = info
-    salt_guardado = info.get("salt") or ""
-    hash_guardado = info.get("hash") or ""
-
-    autenticado = False
-    if salt_guardado and hash_guardado:
-        import hmac
-        hp = _hash_clave(clave_norm, salt=salt_guardado)
-        autenticado = hmac.compare_digest(str(hp.get("hash") or ""), str(hash_guardado or ""))
-        if not autenticado:
-            hp_legacy = _hash_clave(str(clave), salt=salt_guardado)
-            autenticado = hmac.compare_digest(str(hp_legacy.get("hash") or ""), str(hash_guardado or ""))
-
-    if not autenticado and _comparar_clave_legacy(info, clave_norm, str(clave)):
-        autenticado = True
-        _actualizar_hash_usuario_si_legacy(usuarios, real_key, clave_norm)
-
-    if not autenticado:
-        return False, None, "Usuario o contraseña incorrecta. Si el usuario ya existía en una versión previa, use 'Restablecer clave' una sola vez."
-
-    try:
-        usuarios = cargar_usuarios_app()
-        real_key = _buscar_usuario_flexible(usuarios, usuario_norm) or real_key
-        if real_key in usuarios:
-            usuarios[real_key]["ultimo_ingreso"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            guardar_usuarios_app(usuarios)
-        info = usuarios.get(real_key, info)
-    except Exception:
-        info = cargar_usuarios_app().get(real_key, info)
-    info["usuario"] = _normalizar_usuario(info.get("usuario") or real_key)
-    return True, info, "Ingreso correcto."
-
-def restablecer_clave_usuario_app(usuario: str, nueva_clave: str, nueva_clave2: str) -> Tuple[bool, str]:
-    """Permite a un usuario existente restablecer su clave en el equipo local."""
-    usuario_norm = _normalizar_usuario(usuario)
-    nueva = _normalizar_clave(nueva_clave)
-    nueva2 = _normalizar_clave(nueva_clave2)
-    if not usuario_norm:
-        return False, "Ingrese el nombre de usuario."
-    if nueva != nueva2:
-        return False, "Las claves nuevas no coinciden."
-    if len(nueva) < 4:
-        return False, "La clave debe tener al menos 4 caracteres."
-    usuarios = cargar_usuarios_app()
-    real_key = _buscar_usuario_flexible(usuarios, usuario_norm)
-    if real_key is None:
-        return False, "Usuario no encontrado. Registrelo primero."
-    hp = _hash_clave(nueva)
-    usuarios[real_key]["salt"] = hp["salt"]
-    usuarios[real_key]["hash"] = hp["hash"]
-    usuarios[real_key]["fecha_actualizacion_clave"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    guardar_usuarios_app(usuarios)
-    return True, "Clave actualizada. Ya puede ingresar con la nueva clave."
-
-
-def mostrar_login_registro_app() -> Optional[Dict[str, Any]]:
-    """Pantalla de acceso profesional con formulario robusto.
-
-    Usa st.form para garantizar que los inputs viajen junto con el submit en
-    una unica pasada. Incluye una pestana de 'Restablecer clave' para
-    auto-recuperacion local.
-    """
-    if st.session_state.get("usuario_actual"):
-        return st.session_state["usuario_actual"]
-
-    st.markdown(
-        """
-        <div class='login-shell'>
-            <div class='login-card'>
-                <div class='login-brand'>
-                    <div class='login-logo'>HD</div>
-                    <div>
-                        <p class='login-title'>APP CGI - Acceso seguro</p>
-                        <p class='login-sub'>Informe Hemodinamico Integrado por Cardiografia de Impedancia</p>
-                    </div>
-                </div>
-                <div class='login-divider'></div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    tab_login, tab_registro, tab_reset = st.tabs([
-        "Ingresar",
-        "Registrar usuario",
-        "Restablecer clave",
-    ])
-
-    with tab_login:
-        with st.form("form_login_acceso", clear_on_submit=False):
-            u = st.text_input(
-                "Usuario",
-                key="login_usuario",
-                placeholder="su_usuario",
-                autocomplete="username",
-            )
-            ver_clave = st.checkbox("Mostrar clave", value=False, key="login_ver_clave")
-            c = st.text_input(
-                "Clave",
-                type=("default" if ver_clave else "password"),
-                key="login_clave",
-                placeholder="*****",
-                autocomplete="current-password",
-            )
-            submit_login = st.form_submit_button("Ingresar", use_container_width=True)
-        if submit_login:
-            ok, info, msg = autenticar_usuario_app(u, c)
-            if ok and info:
-                st.session_state["usuario_actual"] = info
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-        st.caption("Si olvido su clave puede recrear el acceso desde la pestana 'Restablecer clave'.")
-
-    with tab_registro:
-        with st.form("form_registro_acceso", clear_on_submit=False):
-            colA, colB = st.columns(2)
-            with colA:
-                nombre = st.text_input("Nombre y apellido", key="reg_nombre")
-            with colB:
-                matricula = st.text_input("Matricula profesional", key="reg_matricula")
-            u2 = st.text_input(
-                "Nuevo usuario",
-                key="reg_usuario",
-                placeholder="ej: dr_olano",
-                help="Minimo 3 caracteres. Se normaliza a minusculas y sin acentos.",
-                autocomplete="username",
-            )
-            ver_clave_reg = st.checkbox("Mostrar clave", value=False, key="reg_ver_clave")
-            c2 = st.text_input(
-                "Nueva clave",
-                type=("default" if ver_clave_reg else "password"),
-                key="reg_clave",
-                help="Minimo 4 caracteres.",
-                autocomplete="new-password",
-            )
-            c3 = st.text_input(
-                "Repetir clave",
-                type=("default" if ver_clave_reg else "password"),
-                key="reg_clave2",
-                autocomplete="new-password",
-            )
-            submit_registro = st.form_submit_button("Registrar usuario", use_container_width=True)
-        if submit_registro:
-            if c2 != c3:
-                st.error("Las claves no coinciden.")
-            else:
-                ok, msg = registrar_usuario_app(u2, c2, nombre, matricula)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-
-    with tab_reset:
-        st.caption("Si tiene un usuario creado en este equipo y olvido la clave, puede definir una nueva aqui.")
-        with st.form("form_reset_acceso", clear_on_submit=False):
-            ru = st.text_input("Usuario", key="reset_usuario", autocomplete="username")
-            ver_clave_rst = st.checkbox("Mostrar clave", value=False, key="reset_ver_clave")
-            rc1 = st.text_input(
-                "Nueva clave",
-                type=("default" if ver_clave_rst else "password"),
-                key="reset_clave",
-                autocomplete="new-password",
-            )
-            rc2 = st.text_input(
-                "Repetir nueva clave",
-                type=("default" if ver_clave_rst else "password"),
-                key="reset_clave2",
-                autocomplete="new-password",
-            )
-            submit_reset = st.form_submit_button("Restablecer clave", use_container_width=True)
-        if submit_reset:
-            ok, msg = restablecer_clave_usuario_app(ru, rc1, rc2)
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
-
-    st.stop()
-
-
-def usuario_logueado_app() -> Dict[str, Any]:
-    info = mostrar_login_registro_app()
-    return info or {}
-
-
-def _hash_registro_historial(usuario: str, df: pd.DataFrame, contexto_embarazo: Dict[str, Any]) -> str:
-    import hashlib
-    try:
-        base = df.to_json(orient="split", date_format="iso", force_ascii=False)
-    except Exception:
-        base = str(df.to_dict())
-    base += "|" + str(contexto_embarazo) + "|" + str(usuario)
-    return hashlib.sha256(base.encode("utf-8", "ignore")).hexdigest()[:16]
-
-
-def construir_fila_historial_app(usuario_info: Dict[str, Any], df: pd.DataFrame, contexto_embarazo: Dict[str, Any], informe_txt: str) -> Dict[str, Any]:
-    r = extraer_resumen_integrado(df)
-    score_pub = None
-    if contexto_embarazo.get("embarazada"):
-        try:
-            score_pub = calcular_score_preeclampsia_publicable(r_panel, contexto_embarazo)
-        except Exception:
-            score_pub = None
-    fila = {
-        "fecha_generacion": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "usuario": usuario_info.get("usuario", ""),
-        "nombre_usuario": usuario_info.get("nombre", ""),
-        "matricula_usuario": usuario_info.get("matricula", ""),
-        "paciente": r.get("paciente"),
-        "dni": sanitizar_dni(r.get("dni")),
-        "edad": r.get("edad"),
-        "fecha_estudio": r.get("fecha"),
-        "modulo": TITULO_MODULO_NO_EMBARAZADA if not contexto_embarazo.get("embarazada") else "Módulo especializado",
-        "metodo_referencia": r.get("metodo_referencia"),
-        "posicion_referencia": r.get("posicion_referencia"),
-        "PAS": limpiar_numero(r.get("pas")),
-        "PAD": limpiar_numero(r.get("pad")),
-        "FC": limpiar_numero(r.get("fc")),
-        "IC": limpiar_numero(r.get("ic")),
-        "IRV_RVS": limpiar_numero(r.get("irv")),
-        "CA": limpiar_numero(r.get("ca")),
-        "CFT": limpiar_numero(r.get("cft")),
-        "CFTnr": limpiar_numero(r.get("cftnr")),
-        "IH": limpiar_numero(r.get("ih")),
-        "IV": limpiar_numero(r.get("iv")),
-        "IAC": limpiar_numero(r.get("iac")),
-        "CTS": limpiar_numero(r.get("cts")),
-        "EA_Capan": limpiar_numero(r.get("ea")),
-        "EES_Capan": limpiar_numero(r.get("ees")),
-        "EA_EES_calculado": limpiar_numero(r.get("ava")),
-        "perfil_hemodinamico": diagnostico_perfil_hemodinamico(r.get("ic"), r.get("irv")),
-        "estado_volemico": diagnostico_volemia(r.get("cft"), r.get("cftnr")),
-        "contractilidad": diagnostico_contractilidad(r.get("iv"), r.get("iac"), r.get("cts")),
-        "acoplamiento_va": diagnostico_acoplamiento(r.get("ea"), r.get("ees"), r.get("ava")),
-        "informe_texto": informe_txt,
-        "uid_registro": _hash_registro_historial(usuario_info.get("usuario", ""), df, contexto_embarazo),
-    }
-    if contexto_embarazo.get("embarazada"):
-        fila.update({
-            "embarazo": "SI",
-            "edad_gestacional": contexto_embarazo.get("edad_gestacional"),
-            "hdp_pe": "SI" if contexto_embarazo.get("hdp") else "NO",
-            "crecimiento_fetal": contexto_embarazo.get("crecimiento_fetal"),
-            "score_pe_hdp": score_pub.get("score") if isinstance(score_pub, dict) else None,
-            "categoria_pe_hdp": score_pub.get("categoria") if isinstance(score_pub, dict) else None,
-        })
-    return fila
-
-
-
-def leer_historial_app() -> pd.DataFrame:
-    """Lee el historial acumulado de informes de la APP CGI.
-
-    Función defensiva: si el archivo histórico todavía no existe, está vacío,
-    dañado o falta openpyxl, devuelve un DataFrame vacío en lugar de romper
-    la ejecución de Streamlit.
-    """
-    _asegurar_directorio_app()
-    columnas_base = [
-        "fecha_generacion", "usuario", "nombre_usuario", "matricula_usuario",
-        "paciente", "dni", "edad", "fecha_estudio", "modulo",
-        "metodo_referencia", "posicion_referencia", "PAS", "PAD", "FC",
-        "IC", "IRV_RVS", "CA", "CFT", "CFTnr", "IH", "IV", "IAC", "CTS",
-        "EA_Capan", "EES_Capan", "EA_EES_calculado",
-        "perfil_hemodinamico", "estado_volemico", "contractilidad",
-        "acoplamiento_va", "informe_texto", "uid_registro",
-    ]
-    if not HISTORIAL_XLSX.exists():
-        return pd.DataFrame(columns=columnas_base)
-    try:
-        hist = pd.read_excel(HISTORIAL_XLSX, sheet_name="Historial", engine="openpyxl")
-        if hist is None:
-            return pd.DataFrame(columns=columnas_base)
-        for c in columnas_base:
-            if c not in hist.columns:
-                hist[c] = None
-        return hist
-    except Exception:
-        # Evita NameError/ruptura de app si el archivo está corrupto o falta dependencia.
-        return pd.DataFrame(columns=columnas_base)
-
-def _ruta_historial_usuario(usuario: Any) -> Path:
-    """Ruta de respaldo por usuario autenticado.
-
-    Además del Excel global, se mantiene un Excel propio para cada usuario.
-    Esto facilita que cada profesional conserve y exporte sus estudios previos
-    con sus propias credenciales.
-    """
-    _asegurar_directorio_app()
-    return HISTORIAL_USUARIOS_DIR / f"historial_{_slug_archivo_usuario(usuario)}.xlsx"
-
-
-def leer_historial_usuario_app(usuario_info: Dict[str, Any]) -> pd.DataFrame:
-    ruta = _ruta_historial_usuario(usuario_info.get("usuario", ""))
-    if not ruta.exists():
-        # Compatibilidad: si todavía no existe el archivo individual, filtra el global.
-        return filtrar_historial_por_usuario(leer_historial_app(), usuario_info, todos=False)
-    try:
-        return pd.read_excel(ruta, sheet_name="Historial", engine="openpyxl")
-    except Exception:
-        return filtrar_historial_por_usuario(leer_historial_app(), usuario_info, todos=False)
-
-
-def guardar_historial_usuario_app(fila: Dict[str, Any]) -> bool:
-    """Guarda/actualiza el historial del usuario logueado en un archivo propio."""
-    usuario = _normalizar_usuario(fila.get("usuario", ""))
-    if not usuario:
-        return False
-    ruta = _ruta_historial_usuario(usuario)
-    nuevo = pd.DataFrame([fila])
-    try:
-        hist = pd.read_excel(ruta, sheet_name="Historial", engine="openpyxl") if ruta.exists() else pd.DataFrame()
-    except Exception:
-        hist = pd.DataFrame()
-    if not hist.empty and "uid_registro" in hist.columns and fila.get("uid_registro") in set(hist["uid_registro"].astype(str)):
-        hist = hist[hist["uid_registro"].astype(str) != str(fila.get("uid_registro"))]
-    hist = pd.concat([hist, nuevo], ignore_index=True, sort=False)
-    try:
-        with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
-            hist.to_excel(writer, index=False, sheet_name="Historial")
-        return True
-    except Exception:
-        return False
-
-
-def guardar_historial_app(fila: Dict[str, Any]) -> bool:
-    _asegurar_directorio_app()
-    fila = dict(fila or {})
-    fila["usuario"] = _normalizar_usuario(fila.get("usuario", ""))
-    nuevo = pd.DataFrame([fila])
-    hist = leer_historial_app()
-    if not hist.empty and "uid_registro" in hist.columns and fila.get("uid_registro") in set(hist["uid_registro"].astype(str)):
-        # Actualiza el registro existente en lugar de duplicar el mismo informe.
-        hist = hist[hist["uid_registro"].astype(str) != str(fila.get("uid_registro"))]
-    hist = pd.concat([hist, nuevo], ignore_index=True, sort=False)
-    ok_global = False
-    try:
-        with pd.ExcelWriter(HISTORIAL_XLSX, engine="openpyxl") as writer:
-            hist.to_excel(writer, index=False, sheet_name="Historial")
-        ok_global = True
-    except Exception:
-        ok_global = False
-    ok_usuario = guardar_historial_usuario_app(fila)
-    return bool(ok_global or ok_usuario)
-
-
-def filtrar_historial_por_usuario(hist: pd.DataFrame, usuario_info: Dict[str, Any], todos: bool = False) -> pd.DataFrame:
-    """Devuelve solo los estudios del usuario autenticado.
-
-    La comparación se normaliza igual que el login para que un mismo usuario
-    conserve su historial aunque ingrese con mayúsculas, espacios o acentos.
-    El administrador puede exportar el total cuando se activa la opción.
-    """
-    if hist is None or hist.empty:
-        return pd.DataFrame()
-    if todos and usuario_info.get("rol") == "admin":
-        return hist.copy()
-    if "usuario" not in hist.columns:
-        return pd.DataFrame()
-    usuario_norm = _normalizar_usuario(usuario_info.get("usuario", ""))
-    serie_norm = hist["usuario"].astype(str).map(_normalizar_usuario)
-    return hist[serie_norm == usuario_norm].copy()
-
-
-def excel_historial_bytes_app(hist: pd.DataFrame, df_actual: Optional[pd.DataFrame] = None) -> Optional[bytes]:
-    try:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            if hist is None or hist.empty:
-                pd.DataFrame(columns=["fecha_generacion", "usuario", "paciente", "dni", "IC", "IRV_RVS", "EA_EES_calculado"]).to_excel(writer, index=False, sheet_name="Historial")
-            else:
-                hist.to_excel(writer, index=False, sheet_name="Historial")
-            if df_actual is not None and not df_actual.empty:
-                df_actual.to_excel(writer, index=False, sheet_name="Ultimo_informe")
-        output.seek(0)
-        return output.getvalue()
-    except Exception:
-        return None
-
-
-# =========================================================
-# MOTOR PDF CLINICO NIVEL PAPER - REPORTLAB / PLATYPUS
-# Reemplaza el motor FPDF para evitar: Not enough horizontal space to render a single character
-# =========================================================
-
-def _paper_safe_text(x: Any) -> str:
-    """Texto seguro para ReportLab: conserva español, elimina caracteres problemáticos y evita tokens infinitos."""
-    import re
-    if x is None:
-        return "No disponible"
-    try:
-        if pd.isna(x):
-            return "No disponible"
-    except Exception:
-        pass
-    s = str(x)
-    reemplazos = {
-        "\u2013": "-", "\u2014": "-", "\u2212": "-", "\u00a0": " ",
-        "\u2022": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-        "dyn·s·cm??": "dyn.s.cm-5", "dyn·s·cm-5": "dyn.s.cm-5", "L/min/m²": "L/min/m2",
-        "mmHg/m²": "mmHg/m2", "1/s²": "1/s2",
-    }
-    for a, b in reemplazos.items():
-        s = s.replace(a, b)
-    s = re.sub(r"\s+", " ", s).strip()
-    partes = []
-    for tok in s.split(" "):
-        if len(tok) > 42:
-            partes.append(" ".join(tok[i:i+42] for i in range(0, len(tok), 42)))
-        else:
-            partes.append(tok)
-    return " ".join(partes) if partes else "No disponible"
-
-
-def _paper_paragraph(txt: Any, style):
-    from reportlab.platypus import Paragraph
-    from html import escape
-    return Paragraph(escape(_paper_safe_text(txt)), style)
-
-
-def _paper_fmt_val(x: Any, dec: int = 2, sufijo: str = "") -> str:
-    try:
-        return fmt(x, dec, sufijo)
-    except Exception:
-        v = limpiar_numero(x)
-        if v is None:
-            return "No disponible"
-        return f"{v:.{dec}f}{sufijo}".replace(".", ",")
-
-
-def _paper_color_estado(estado: str):
-    from reportlab.lib import colors
-    e = _paper_safe_text(estado).upper()
-    if "ALTO" in e or "ALTERADO" in e or "RIESGO" in e:
-        return colors.HexColor("#FEE2E2")
-    if "PRECA" in e or "INTERMEDIO" in e:
-        return colors.HexColor("#FEF3C7")
-    if "NORMAL" in e or "FAVORABLE" in e or "BAJO" == e:
-        return colors.HexColor("#DCFCE7")
-    return colors.whitesmoke
-
-
-def _paper_styles():
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    from reportlab.lib import colors
-    stl = getSampleStyleSheet()
-    stl.add(ParagraphStyle(
-        name="PaperTitle", parent=stl["Title"], alignment=TA_CENTER,
-        fontName="Helvetica-Bold", fontSize=13, leading=15, textColor=colors.HexColor("#0B4F8A"), spaceAfter=6
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperSubTitle", parent=stl["Normal"], alignment=TA_CENTER,
-        fontName="Helvetica", fontSize=8.5, leading=10, textColor=colors.HexColor("#374151"), spaceAfter=5
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperH", parent=stl["Heading2"], fontName="Helvetica-Bold",
-        fontSize=10.5, leading=12, textColor=colors.HexColor("#0B4F8A"), spaceBefore=5, spaceAfter=3
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperBody", parent=stl["BodyText"], fontName="Helvetica",
-        fontSize=8.4, leading=10.2, textColor=colors.HexColor("#111827"), alignment=TA_LEFT, spaceAfter=3
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperSmall", parent=stl["BodyText"], fontName="Helvetica",
-        fontSize=7.2, leading=8.6, textColor=colors.HexColor("#111827"), alignment=TA_LEFT
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperCell", parent=stl["BodyText"], fontName="Helvetica",
-        fontSize=7.2, leading=8.5, textColor=colors.HexColor("#111827"), wordWrap="CJK"
-    ))
-    stl.add(ParagraphStyle(
-        name="PaperCellBold", parent=stl["BodyText"], fontName="Helvetica-Bold",
-        fontSize=7.4, leading=8.8, textColor=colors.HexColor("#111827"), wordWrap="CJK"
-    ))
-    return stl
-
-
-def _paper_footer(canvas, doc):
-    from reportlab.lib import colors
-    canvas.saveState()
-    canvas.setStrokeColor(colors.HexColor("#CBD5E1"))
-    canvas.line(doc.leftMargin, 24, doc.pagesize[0] - doc.rightMargin, 24)
-    canvas.setFont("Helvetica", 7)
-    canvas.setFillColor(colors.HexColor("#475569"))
-    canvas.drawString(doc.leftMargin, 14, "Informe generado por APP CGI - interpretación hemodinámica integrada. No reemplaza criterio clínico.")
-    canvas.drawRightString(doc.pagesize[0] - doc.rightMargin, 14, f"Página {doc.page}")
-    canvas.restoreState()
-
-
-def _paper_table(data, col_widths=None, header=True, compact=True):
-    from reportlab.platypus import Table, TableStyle
-    from reportlab.lib import colors
-    stl = _paper_styles()
-    rows = []
-    for r0, row in enumerate(data):
-        rows.append([_paper_paragraph(c, stl["PaperCellBold"] if (header and r0 == 0) else stl["PaperCell"]) for c in row])
-    t = Table(rows, colWidths=col_widths, repeatRows=1 if header else 0, hAlign="LEFT")
-    base = [
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 3 if compact else 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3 if compact else 5),
-    ]
-    if header:
-        base += [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF2FA")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0B4F8A")),
-        ]
-    # Semaforo automático si la última columna contiene estado.
-    for rr in range(1 if header else 0, len(data)):
-        if data[rr]:
-            estado = str(data[rr][-1])
-            base.append(("BACKGROUND", (len(data[rr])-1, rr), (len(data[rr])-1, rr), _paper_color_estado(estado)))
-    t.setStyle(TableStyle(base))
-    return t
-
-
-def _paper_signature_flowable(width=95, height=42, usuario_info: Optional[Dict[str, Any]] = None):
-    """Firma digital del usuario autenticado; no distorsiona. Devuelve Flowable o None."""
-    try:
-        from reportlab.platypus import Image
-        import os
-        path = obtener_path_firma_usuario(usuario_info)
-        if path and os.path.exists(path):
-            return Image(path, width=width, height=height, kind="proportional")
-    except Exception:
-        return None
-    return None
-
-
-def _paper_seal_flowable(width=54, height=54, usuario_info: Optional[Dict[str, Any]] = None):
-    """Sello digital del usuario autenticado; no distorsiona. Devuelve Flowable o None."""
-    try:
-        from reportlab.platypus import Image
-        import os
-        path = obtener_path_sello_usuario(usuario_info)
-        if path and os.path.exists(path):
-            return Image(path, width=width, height=height, kind="proportional")
-    except Exception:
-        return None
-    return None
-
-
-def _paper_signature_table(ancho: float, usuario_info: Optional[Dict[str, Any]] = None):
-    """Bloque único de firma/sello para informes ReportLab."""
-    try:
-        from reportlab.platypus import Table, TableStyle
-        from reportlab.lib import colors
-        stl = _paper_styles()
-        firma = _paper_signature_flowable(width=100, height=45, usuario_info=usuario_info)
-        sello = _paper_seal_flowable(width=55, height=55, usuario_info=usuario_info)
-        texto = texto_firma_usuario(usuario_info) if "texto_firma_usuario" in globals() else "Firma y sello digital autorizados"
-        elementos = []
-        widths = []
-        if sello:
-            elementos.append(sello); widths.append(65)
-        if firma:
-            elementos.append(firma); widths.append(110)
-        elementos.append(_paper_paragraph(texto, stl["PaperSmall"]))
-        widths.append(max(80, ancho - sum(widths)))
-        if len(widths) == 1:
-            widths = [ancho]
-        table = Table([elementos], colWidths=widths)
-        table.setStyle(TableStyle([
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-            ("LINEABOVE", (0,0), (-1,0), 0.35, colors.HexColor("#CBD5E1")),
-            ("TOPPADDING", (0,0), (-1,-1), 6),
-        ]))
-        return table
-    except Exception:
-        return None
-
-def _paper_header_story(titulo: str, subtitulo: str):
-    from reportlab.platypus import Spacer
-    stl = _paper_styles()
-    story = [
-        _paper_paragraph(titulo, stl["PaperTitle"]),
-        _paper_paragraph(subtitulo, stl["PaperSubTitle"]),
-        Spacer(1, 4),
-    ]
-    return story
-
-
-def _paper_datos_paciente_table(r: Dict[str, Any], contexto_embarazo: Optional[Dict[str, Any]], ancho_total: float):
-    datos = [
-        ["Apellido y nombre", normalizar_nombre_paciente(r.get("paciente")) or "No disponible", "DNI", r.get("dni") or "SD"],
-        ["Edad", f"{r.get('edad') or 'No disponible'} años", "Fecha de estudio", r.get("fecha") or "No disponible"],
-        ["Obra social", r.get("obra_social") or "No disponible", "Método", "Cinta basal / acostada"],
-        ["Módulo", TITULO_MODULO_NO_EMBARAZADA, "", ""],
-    ]
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        eg = contexto_embarazo.get("edad_gestacional") or "No especificada"
-        datos[3] = ["EG", f"{eg} semanas" if eg != "No especificada" else eg, "Módulo", "Hemodinamia materna"]
-    return _paper_table(datos, col_widths=[ancho_total*0.16, ancho_total*0.34, ancho_total*0.18, ancho_total*0.32], header=False)
-
-
-def _paper_metricas_panel(r: Dict[str, Any], ancho_total: float):
-    dinamia = clasificacion_dinamica_obligatoria(r, None)
-    try:
-        md = metricas_por_dominio(r)
-    except Exception:
-        md = {}
-    rows = [["Dominio", "Dato clave", "Lectura clínica", "Semáforo"]]
-    rows += [
-        ["Presión arterial", f"{_paper_fmt_val(r.get('pas'),0)}/{_paper_fmt_val(r.get('pad'),0)} mmHg; FC {_paper_fmt_val(r.get('fc'),0)} lpm", "Presión arterial interpretada según contexto clínico y tratamiento", "Precaución"],
-        ["Flujo / resistencia", f"IC {_paper_fmt_val(r.get('ic'),2)} L/min/m2; RVS/IRV {_paper_fmt_val(r.get('irv'),0)} dyn.s.cm-5", f"{dinamia}: bajo flujo/alta resistencia si IC bajo y RVS elevada", "Alto" if "Hipodinamia" in dinamia else "Precaución"],
-        ["Volemia / fluidos", f"CFT {_paper_fmt_val(r.get('cft'),2)}; CFTnr {_paper_fmt_val(r.get('cftnr'),2)}", "Integrar con volemia clínica, función renal, edema, disnea y tratamiento", "Precaución"],
-        ["Contractilidad / onda", f"IV {_paper_fmt_val(r.get('iv'),2)}; IAC {_paper_fmt_val(r.get('iac'),2)}; CTS {_paper_fmt_val(r.get('cts'),2)}; DS {_paper_fmt_val(r.get('ds'),2)}", "Aceleración/onda sistólica con volumen sistólico a correlacionar", "Precaución"],
-        ["Acoplamiento VA", f"EA {_paper_fmt_val(r.get('ea'),2)}; EES {_paper_fmt_val(r.get('ees'),2)}; EA/EES {_paper_fmt_val(r.get('ava'),2)}", "Carga arterial relativa aumentada si EA/EES > 1", "Precaución"],
-    ]
-    return _paper_table(rows, col_widths=[ancho_total*0.18, ancho_total*0.25, ancho_total*0.39, ancho_total*0.18], header=True)
-
-
-def _paper_diagnostico_pronostico_table(r: Dict[str, Any], contexto_embarazo: Optional[Dict[str, Any]], ancho_total: float):
-    dinamia = clasificacion_dinamica_obligatoria(r, contexto_embarazo)
-    riesgo = "Riesgo hemodinámico orientativo; integrar con clínica, laboratorio, comorbilidades, daño de órgano blanco y tratamiento."
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        riesgo = "Riesgo hemodinámico alto/intermedio para HDP/PE si coexisten HTA, proteinuria, laboratorio o compromiso fetal."
-    conducta = "Control clínico, PA seriada, evaluación de daño de órgano blanco, función renal, perfil metabólico y ajuste terapéutico individualizado según criterio médico."
-    rows = [
-        ["Diagnóstico hemodinámico", "Pronóstico orientativo", "Terapéutica posible / conducta"],
-        [f"{dinamia}. Clasificación basada en IC y RVS/IRV.", riesgo, conducta],
-    ]
-    return _paper_table(rows, col_widths=[ancho_total*0.31, ancho_total*0.31, ancho_total*0.38], header=True, compact=False)
-
-
-def _paper_conclusion_ejecutiva(r: Dict[str, Any], contexto_embarazo: Optional[Dict[str, Any]]) -> str:
-    dinamia = clasificacion_dinamica_obligatoria(r, contexto_embarazo)
-    if contexto_embarazo and contexto_embarazo.get("embarazada"):
-        return (
-            f"El estudio sugiere {dinamia.lower()} materna, con bajo flujo/alta resistencia cuando IC es bajo y RVS elevada, "
-            "compatible con un eje vascular-placentario probable. El valor pronóstico es orientativo: no diagnostica ni descarta "
-            "preeclampsia por sí solo, pero identifica un perfil que justifica vigilancia intensiva e integración con proteinuria, "
-            "laboratorio materno, Doppler uterino/umbilical, crecimiento fetal y tratamiento actual."
-        )
-    volemia = diagnostico_volemia(r.get("cft"), r.get("cftnr"))
-    return (
-        f"El estudio sugiere {dinamia.lower()} en el patrón basal/acostado o CINTA, que es la referencia diagnóstica principal. "
-        f"Diagnóstico de volemia: {volemia} "
-        "El registro de pie, cuando está disponible, debe diferenciarse como respuesta ortostática. "
-        "La conducta debe individualizarse con clínica, comorbilidades y respuesta terapéutica."
-    )
-
-
-def generar_pdf_resumido_una_hoja(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> bytes:
-    """PDF ejecutivo de una hoja con motor ReportLab tipo paper. Evita por diseño los errores FPDF de ancho."""
-    try:
-        from reportlab.platypus import SimpleDocTemplate, Spacer, KeepTogether
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import cm
-        from reportlab.lib import colors
-        from reportlab.platypus import Table, TableStyle
-        import io
-    except Exception as e:
-        raise RuntimeError("Falta instalar ReportLab. Agregue 'reportlab' a requirements.txt y ejecute: pip install reportlab") from e
-
-    r = extraer_resumen_integrado(df)
-    es_embarazo = bool(contexto_embarazo and contexto_embarazo.get("embarazada"))
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=0.9*cm, leftMargin=0.9*cm, topMargin=0.8*cm, bottomMargin=0.8*cm)
-    ancho = doc.width
-    stl = _paper_styles()
-    story = []
-    titulo = "MODELO DE INFORME CGI - HEMODINAMIA MATERNA" if es_embarazo else TITULO_MODULO_NO_EMBARAZADA
-    story += _paper_header_story(titulo, "Versión ejecutiva de una hoja - diagnóstico hemodinámico, pronóstico y conducta posible")
-    story.append(_paper_datos_paciente_table(r, contexto_embarazo, ancho))
-    story.append(Spacer(1, 5))
-    story.append(_paper_paragraph("1. Panel de lectura rápida", stl["PaperH"]))
-    story.append(_paper_metricas_panel(r, ancho))
-    story.append(Spacer(1, 5))
-    story.append(_paper_paragraph("2. Diagnóstico hemodinámico integrado", stl["PaperH"]))
-    story.append(_paper_paragraph(_paper_conclusion_ejecutiva(r, contexto_embarazo), stl["PaperBody"]))
-    story.append(_paper_diagnostico_pronostico_table(r, contexto_embarazo, ancho))
-    story.append(Spacer(1, 5))
-    story.append(_paper_paragraph("3. Conclusión ejecutiva", stl["PaperH"]))
-    story.append(_paper_paragraph("- " + _paper_conclusion_ejecutiva(r, contexto_embarazo), stl["PaperBody"]))
-    agregar_capturas_originales_reportlab_story(story, ancho, max_capturas=2)
-    sig = _paper_signature_flowable(width=90, height=36)
-    if sig:
-        sign_table = Table([[sig, _paper_paragraph(texto_firma_usuario(st.session_state.get("usuario_actual", {})), stl["PaperSmall"])]], colWidths=[100, ancho-100])
-        sign_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LINEABOVE", (0,0), (-1,0), 0.35, colors.HexColor("#CBD5E1"))]))
-        story.append(Spacer(1, 4))
-        story.append(sign_table)
-    else:
-        story.append(_paper_paragraph(texto_firma_usuario(st.session_state.get("usuario_actual", {})), stl["PaperSmall"]))
-    doc.build(story, onFirstPage=_paper_footer, onLaterPages=_paper_footer)
-    return buffer.getvalue()
-
-
-def generar_pdf_integrado(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> bytes:
-    """PDF profesional tipo paper clinico.
-    Modulo clinico:  A B C D E F K + firma/sello.
-    Modulo embarazo: A B C E + grafico hemodinamia vs EG + K + firma/sello.
-    """
-    try:
-        from reportlab.platypus import SimpleDocTemplate, Spacer, PageBreak, Image, Table, TableStyle
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import cm
-        from reportlab.lib import colors
-        import io
-    except Exception as e:
-        raise RuntimeError("Falta instalar ReportLab. Agregue 'reportlab' a requirements.txt y ejecute: pip install reportlab") from e
-
-    r = extraer_resumen_integrado(df)
-    try:
-        r_ref_pdf, _r_depie_pdf = obtener_resumenes_ortostaticos(df)
-        r_panel = dict(r)
-        for _k in ["ic", "irv", "fc", "pas", "pad", "ca", "cft", "cftnr", "iv", "iac", "cts", "ea", "ees", "ava", "ds", "ids"]:
-            if limpiar_numero(r_ref_pdf.get(_k)) is not None:
-                r_panel[_k] = r_ref_pdf.get(_k)
-    except Exception:
-        r_panel = dict(r)
-    # r_cinta: referencia garantizada ACOSTADO/CINTA para módulo embarazo
-    r_cinta = resumen_acostado_cinta_para_patron(df, r)
-    es_embarazo = bool(contexto_embarazo and contexto_embarazo.get("embarazada"))
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.15*cm, leftMargin=1.15*cm, topMargin=1.0*cm, bottomMargin=1.0*cm)
-    ancho = doc.width
-    stl = _paper_styles()
-    story = []
-
-    titulo_modulo = "MODULO HEMODINAMIA EN EMBARAZO" if es_embarazo else TITULO_MODULO_NO_EMBARAZADA
-    story += _paper_header_story(
-        titulo_modulo,
-        "Diagnostico hemodinamico, pronostico y orientacion terapeutica"
-    )
-
-    # ── A. Datos del estudio y trazabilidad ──────────────────────────────────
-    story.append(_paper_paragraph("A. Datos del estudio y trazabilidad", stl["PaperH"]))
-    story.append(_paper_datos_paciente_table(r, contexto_embarazo, ancho))
-    story.append(Spacer(1, 6))
-
-    # ── B. Glosario operativo ────────────────────────────────────────────────
-    story.append(_paper_paragraph("B. Glosario operativo", stl["PaperH"]))
-    glosario = [
-        ["Sigla", "Significado clinico"],
-        ["IC/CI", "Indice cardiaco. No confundir con ITC o indice de trabajo cardiaco."],
-        ["RVS/IRV", "Resistencia vascular sistemica."],
-        ["CFT/CFTnr", "Contenido de fluidos toracicos y contenido normalizado/indexado."],
-        ["EA/EES", "Acoplamiento ventriculo-arterial calculado como EA Capan / EES Capan."],
-    ]
-    if es_embarazo:
-        glosario[1:1] = [
-            ["HDP", "Trastornos hipertensivos del embarazo: hipertension gestacional, preeclampsia y formas asociadas."],
-            ["PE", "Preeclampsia; requiere integracion con proteinuria, organo blanco y evaluacion fetal."],
-        ]
-    story.append(_paper_table(glosario, col_widths=[ancho*0.22, ancho*0.78], header=True))
-    story.append(Spacer(1, 6))
-
-    # ── C. Parámetros integrados ─────────────────────────────────────────────
-    story.append(_paper_paragraph("C. Parametros integrados", stl["PaperH"]))
-    if es_embarazo:
-        # Tabla C adaptada a hemodinamica gestacional
-        _eg_v  = limpiar_numero((contexto_embarazo or {}).get("edad_gestacional"))
-        _c_gest = clasificacion_hemodinamica_materna_gestacional(r_cinta, contexto_embarazo)
-        _ref_g  = _c_gest.get("referencia", {})
-        _tri_lbl = _ref_g.get("label", "trimestre no especificado")
-        _dx_gest = _c_gest.get("diagnostico", "No clasificable")
-        _ic_rng  = f"{_paper_fmt_val(_ref_g.get('ic_low'),1)}-{_paper_fmt_val(_ref_g.get('ic_high'),1)} L/min/m2"
-        _rvs_rng = f"{_paper_fmt_val(_ref_g.get('rvs_low'),0)}-{_paper_fmt_val(_ref_g.get('rvs_high'),0)} dyn.s.cm-5"
-        _hdp_txt = "Si" if (contexto_embarazo or {}).get("hdp") else "No/no informado"
-        param = [
-            ["Variable", "Valor del paciente", "Referencia gestacional / Interpretacion"],
-            ["EG / Trimestre", f"{_paper_fmt_val(_eg_v,0)} semanas" if _eg_v else "No informada", f"{_tri_lbl.capitalize()}"],
-            ["PAS / PAD", f"{_paper_fmt_val(r_cinta.get('pas'),0)} / {_paper_fmt_val(r_cinta.get('pad'),0)} mmHg", "Normal en embarazo: <140/90 mmHg. PA >=140/90 orienta HDP."],
-            ["FC", f"{_paper_fmt_val(r_cinta.get('fc'),0)} lpm", "Normal: 60-100 lpm. Taquicardia frecuente en T2/T3."],
-            ["IC (indice cardiaco)", f"{_paper_fmt_val(r_cinta.get('ic'),2)} L/min/m2", f"Ref. {_tri_lbl}: {_ic_rng}. IC aumenta fisiologicamente en T2/T3."],
-            ["RVS / IRV", f"{_paper_fmt_val(r_cinta.get('irv'),0)} dyn.s.cm-5", f"Ref. {_tri_lbl}: {_rvs_rng}. RVS cae en T2 por vasodilatacion gestacional."],
-            ["Clasificacion gestacional", _dx_gest, "Comparacion IC e IRV vs rango operativo del trimestre (ACOSTADO/CINTA)."],
-            ["HDP / HTA obstetrica", _hdp_txt, "HDP presente orienta fenotipo vascular-placentario si IC bajo + RVS alta."],
-            ["CFT / CFTnr", f"{_paper_fmt_val(r_cinta.get('cft'),2)} / {_paper_fmt_val(r_cinta.get('cftnr'),2)}", "Fluidos toracicos. Elevado en preeclampsia con sobrecarga de volumen."],
-            ["IV / IAC", f"{_paper_fmt_val(r_cinta.get('iv'),2)} / {_paper_fmt_val(r_cinta.get('iac'),2)}", "Funcion aortica sistolica. Valores bajos pueden acompanar disfuncion en HDP."],
-        ]
-    else:
-        param = [
-            ["Variable", "Valor", "Interpretacion"],
-            ["PAS / PAD", f"{_paper_fmt_val(r.get('pas'),0)} / {_paper_fmt_val(r.get('pad'),0)} mmHg", "Interpretar segun valores de presion arterial, contexto clinico y tratamiento."],
-            ["FC", f"{_paper_fmt_val(r.get('fc'),0)} lpm", "Integrar con medicacion, estado clinico y respuesta ortostatica."],
-            ["IC", f"{_paper_fmt_val(r.get('ic'),2)} L/min/m2", "Bajo si <2,5 L/min/m2; elevado si >4,0 L/min/m2."],
-            ["RVS/IRV", f"{_paper_fmt_val(r.get('irv'),0)} dyn.s.cm-5", "Elevada; eje de alta resistencia vascular."],
-            ["CFT / CFTnr", f"{_paper_fmt_val(r.get('cft'),2)} / {_paper_fmt_val(r.get('cftnr'),2)}", "Revisar e integrar con clinica, edema, disnea, tratamiento y funcion renal."],
-            ["IV / IAC / CTS", f"{_paper_fmt_val(r.get('iv'),2)} / {_paper_fmt_val(r.get('iac'),2)} / {_paper_fmt_val(r.get('cts'),2)}", "Evaluacion de onda sistolica y tiempos sistolicos."],
-            ["EA / EES / EA-EES", f"{_paper_fmt_val(r.get('ea'),2)} / {_paper_fmt_val(r.get('ees'),2)} / {_paper_fmt_val(r.get('ava'),2)}", "Acoplamiento VA en rango de precaucion si EA/EES >1."],
-            ["DS / IDS", f"{_paper_fmt_val(r.get('ds'),2)} / {_paper_fmt_val(r.get('ids'),2)}", "Volumen sistolico bajo si esta por debajo del rango esperado."],
-        ]
-    story.append(_paper_table(param, col_widths=[ancho*0.26, ancho*0.24, ancho*0.50], header=True))
-    story.append(Spacer(1, 6))
-
-    if not es_embarazo:
-        # ── D. Gráfico de cuadrantes hemodinámicos (solo clínico) ────────────
-        story.append(_paper_paragraph("D. Grafico de cuadrantes hemodinamicos", stl["PaperH"]))
-        story.append(_paper_paragraph(
-            "El grafico IC vs IRV/RVS muestra la situacion real del paciente. El punto ACOSTADO/CINTA es la referencia diagnostica principal; el punto DE PIE, si esta disponible, describe solo la respuesta ortostatica.",
-            stl["PaperBody"],
-        ))
-        try:
-            graf_cuadrantes = crear_grafico_fenotipado_dinamico_bytes(resumen_acostado_cinta_para_patron(df, r), df)
-            if graf_cuadrantes is not None:
-                story.append(Image(graf_cuadrantes, width=ancho, height=ancho*0.66, kind="proportional"))
-            else:
-                story.append(_paper_paragraph("No hay IC e IRV/RVS suficientes para generar el grafico de cuadrantes.", stl["PaperBody"]))
-        except Exception as e:
-            story.append(_paper_paragraph(f"No se pudo insertar el grafico de cuadrantes hemodinamicos: {e}", stl["PaperBody"]))
-        story.append(Spacer(1, 6))
-
-    # ── E. Informe de dominios integrados resumido y didáctico ───────────────
-    story.append(_paper_paragraph("E. Informe de dominios integrados resumido y didactico", stl["PaperH"]))
-    if es_embarazo:
-        story.append(_paper_paragraph(
-            "Dominios interpretados en contexto gestacional. El patron hemodinamico se compara con la referencia fisiologica del trimestre.",
-            stl["PaperBody"],
-        ))
-        _c2 = clasificacion_hemodinamica_materna_gestacional(r_cinta, contexto_embarazo)
-        _pe = calcular_riesgo_preeclampsia(r_cinta, contexto_embarazo)
-        _vol_txt = diagnostico_volemia(r_panel.get("cft"), r_panel.get("cftnr")).split(".")[0]
-        _crecimiento = str((contexto_embarazo or {}).get("crecimiento_fetal") or "No informado")
-        _doppler = str((contexto_embarazo or {}).get("doppler_uterino") or "No informado")
-        dominios_emb = [
-            ["Dominio", "Resultado", "Interpretacion gestacional"],
-            ["Patron hemodinamico gestacional (ACOSTADO/CINTA)", _c2.get("diagnostico","N/D"),
-             _c2.get("interpretacion","Ver clasificacion gestacional.")],
-            ["Volemia / fluidos toracicos", _vol_txt,
-             f"CFT {_paper_fmt_val(r_cinta.get('cft'),2)} / CFTnr {_paper_fmt_val(r_cinta.get('cftnr'),2)}. En HDP puede reflejar sobrecarga o hipovolemia relativa."],
-            ["Fenotipo materno sugerido", _c2.get("subtipo","N/D"),
-             "Basado en relacion IC/RVS vs referencia gestacional y presencia de HDP."],
-            ["Crecimiento fetal / Doppler", _crecimiento, f"Doppler uterino: {_doppler}. Integrar con biometria fetal y criterios obstetricos."],
-            ["Score riesgo PE (orientativo)", f"{_pe.get('puntaje','N/D')}/10 — {_pe.get('categoria','')}", _pe.get("conducta","Ver modulo PE.")],
-        ]
-        story.append(_paper_table(dominios_emb, col_widths=[ancho*0.26, ancho*0.24, ancho*0.50], header=True))
-    else:
-        story.append(_paper_paragraph(
-            "Los dominios se informan como resultados separados. Solo el dominio de funcion circulatoria define el patron hemodinamico de referencia ACOSTADO/CINTA.",
-            stl["PaperBody"],
-        ))
-        story.append(_paper_dominios_integrados_table(r, df, ancho))
-    story.append(Spacer(1, 6))
-
-    if not es_embarazo:
-        # ── F. Diagnóstico hemodinámico final (solo clínico) ─────────────────
-        story.append(_paper_paragraph("F. Diagnostico hemodinamico final", stl["PaperH"]))
-        story.append(_paper_paragraph(informe_dominios_integrados_texto(r, df, html=False), stl["PaperBody"]))
-        story.append(_paper_diagnostico_pronostico_table(r, contexto_embarazo, ancho))
-        story.append(Spacer(1, 6))
-        story.append(_paper_paragraph("Propuesta terapeutica ICG individualizada", stl["PaperH"]))
-        story.append(_paper_paragraph(
-            "Flujograma basado en Ferrario et al. (Ther Adv Cardiovasc Dis 2010). "
-            "Las ramas resaltadas corresponden al fenotipo hemodinamico activo del paciente. "
-            "No reemplaza criterio clinico ni guias vigentes.",
-            stl["PaperBody"],
-        ))
-        try:
-            graf_ter = crear_grafico_propuesta_terapeutica_bytes(r_panel, df)
-            if graf_ter is not None:
-                story.append(Image(graf_ter, width=ancho, height=ancho*0.68, kind="proportional"))
-            else:
-                story.append(_paper_paragraph("No hay IC, RVS o CFT suficientes para generar el grafico terapeutico.", stl["PaperBody"]))
-        except Exception as e:
-            story.append(_paper_paragraph(f"No se pudo insertar el grafico de propuesta terapeutica: {e}", stl["PaperBody"]))
-        story.append(Spacer(1, 6))
-    else:
-        # ── Módulo embarazo: gráfico hemodinamia materna vs edad gestacional ──
-        story.append(_paper_paragraph("Grafico: hemodinamia materna vs edad gestacional y situacion diagnostica", stl["PaperH"]))
-        story.append(_paper_paragraph(
-            "IC y RVS del paciente comparados con las curvas de referencia fisiologica gestacional. El panel inferior resume las conclusiones clinicas con semafor de riesgo.",
-            stl["PaperBody"],
-        ))
-        try:
-            graf_eg = crear_grafico_hemodinamia_edad_gestacional_diagnostico_bytes(r_panel, contexto_embarazo)
-            if graf_eg is not None:
-                story.append(Image(graf_eg, width=ancho, height=ancho*0.72, kind="proportional"))
-            else:
-                story.append(_paper_paragraph("No hay datos suficientes para generar el grafico de hemodinamia vs edad gestacional.", stl["PaperBody"]))
-        except Exception as e:
-            story.append(_paper_paragraph(f"No se pudo insertar el grafico de hemodinamia vs edad gestacional: {e}", stl["PaperBody"]))
-        story.append(Spacer(1, 6))
-
-    # ── K. Referencias bibliográficas + captura del informe original ─────────
-    story.append(PageBreak())
-    story.append(_paper_paragraph("K. Referencias bibliograficas utilizadas", stl["PaperH"]))
-    story.append(_paper_paragraph(
-        "Bibliografia de soporte utilizada para el marco conceptual de cardiografia de impedancia, mecanica vascular, presion arterial, monitoreo ambulatorio e interpretacion hemodinamica.",
-        stl["PaperBody"],
-    ))
-    for i, ref in enumerate(REFERENCIAS_BIBLIOGRAFICAS, start=1):
-        story.append(_paper_paragraph(f"{i}. {ref}", stl["PaperSmall"]))
-
-    capturas_originales = capturas_pdfs_originales_desde_sesion()
-    if capturas_originales:
-        story.append(Spacer(1, 8))
-        story.append(_paper_paragraph("Captura del informe original del equipo", stl["PaperH"]))
-        story.append(_paper_paragraph(
-            "Se incorpora la captura de la primera pagina del PDF original importado para mantener trazabilidad visual del estudio fuente.",
-            stl["PaperBody"],
-        ))
-        for cap in capturas_originales:
-            story.append(Spacer(1, 6))
-            story.append(_paper_paragraph(f"Archivo original: {cap.get('nombre', 'PDF original')}", stl["PaperSmall"]))
-            if cap.get("imagen") is not None:
-                story.append(Image(cap["imagen"], width=ancho, height=ancho*1.28, kind="proportional"))
-            else:
-                story.append(_paper_paragraph(
-                    "No se pudo renderizar la captura del PDF original. Para activar esta funcion en Streamlit Cloud agregue pymupdf al requirements.txt.",
-                    stl["PaperBody"],
-                ))
-
-    # ── Firma y sello ────────────────────────────────────────────────────────
-    story.append(Spacer(1, 10))
-    sig = _paper_signature_flowable(width=110, height=52, usuario_info=st.session_state.get("usuario_actual", {}))
-    if sig:
-        sign_table = Table([[sig, _paper_paragraph(texto_firma_usuario(st.session_state.get("usuario_actual", {})), stl["PaperSmall"])]], colWidths=[125, ancho-125])
-        sign_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LINEABOVE", (0,0), (-1,0), 0.35, colors.HexColor("#CBD5E1"))]))
-        story.append(sign_table)
-    else:
-        story.append(_paper_paragraph(texto_firma_usuario(st.session_state.get("usuario_actual", {})), stl["PaperSmall"]))
-
-    doc.build(story, onFirstPage=_paper_footer, onLaterPages=_paper_footer)
-    return buffer.getvalue()
-
-
-
-# =========================================================
-# CAPTURA DEL PDF ORIGINAL PARA INFORME COMPLETO
-# =========================================================
-
-def guardar_pdfs_originales_en_sesion(*archivos: Any) -> None:
-    """Guarda bytes de PDFs originales para poder insertar capturas en el informe completo.
-    No altera el cursor de lectura usado por pandas/pdfplumber.
-    """
-    originales = []
-    for archivo in archivos:
-        if archivo is None:
-            continue
-        nombre = getattr(archivo, "name", "") or "PDF_original.pdf"
-        if not str(nombre).lower().endswith(".pdf"):
-            continue
-        try:
-            contenido = archivo.getvalue()
-        except Exception:
-            try:
-                pos = archivo.tell()
-                contenido = archivo.read()
-                archivo.seek(pos)
-            except Exception:
-                contenido = b""
-        if contenido:
-            originales.append({"nombre": nombre, "bytes": contenido})
-    st.session_state["pdfs_originales_cgi"] = originales
-
-
-
-def capturar_paginas_pdf_original(pdf_bytes: bytes, paginas: Tuple[int, ...] = (0, 1), zoom: float = 1.7) -> List[Dict[str, Any]]:
-    """Renderiza páginas del PDF original como PNG.
-    Por defecto captura página 1 y página 2 del estudio original.
-    Requiere PyMuPDF: pip install pymupdf
-    """
-    capturas: List[Dict[str, Any]] = []
-    try:
-        import fitz  # PyMuPDF
-        if not pdf_bytes:
-            return capturas
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for p in paginas:
-            if 0 <= p < len(doc):
-                page = doc[p]
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = io.BytesIO(pix.tobytes("png"))
-                img.seek(0)
-                capturas.append({"pagina": p + 1, "imagen": img})
-        doc.close()
-    except Exception:
-        pass
-    return capturas
-
-
-def capturar_primera_pagina_pdf_original(pdf_bytes: bytes, zoom: float = 1.7) -> Optional[io.BytesIO]:
-    """Compatibilidad hacia atrás: devuelve la primera página como imagen."""
-    caps = capturar_paginas_pdf_original(pdf_bytes, paginas=(0,), zoom=zoom)
-    return caps[0]["imagen"] if caps else None
-
-
-def capturas_pdfs_originales_desde_sesion(max_paginas_por_pdf: int = 2) -> List[Dict[str, Any]]:
-    """Devuelve capturas de página 1 y página 2 de cada PDF original cargado."""
-    capturas = []
-    paginas = tuple(range(max_paginas_por_pdf))
-    for item in st.session_state.get("pdfs_originales_cgi", []) or []:
-        nombre = item.get("nombre", "PDF original")
-        contenido = item.get("bytes")
-        if not contenido:
-            continue
-        for cap in capturar_paginas_pdf_original(contenido, paginas=paginas):
-            capturas.append({
-                "nombre": nombre,
-                "pagina": cap.get("pagina"),
-                "imagen": cap.get("imagen"),
-            })
-    return capturas
-
-
-
-
-
-
-def agregar_capturas_originales_fpdf_una_hoja(pdf, max_capturas: int = 2) -> None:
-    """
-    Inserta captura compacta de la página 1 y página 2 del PDF original en la versión FPDF de una hoja.
-    """
-    try:
-        import tempfile, os
-        capturas = capturas_pdfs_originales_desde_sesion(max_paginas_por_pdf=2) if "capturas_pdfs_originales_desde_sesion" in globals() else []
-        if not capturas:
-            pdf.set_font("Arial", "B", 8)
-            pdf.multi_cell(0, 4, "CAPTURA PANTALLA DE MEDICIONES")
-            pdf.set_font("Arial", "", 7)
-            pdf.multi_cell(0, 3.5, "Captura no disponible. Agregue 'pymupdf' a requirements.txt.")
-            return
-
-        pdf.set_font("Arial", "B", 8)
-        pdf.multi_cell(0, 4, "CAPTURA PANTALLA DE MEDICIONES")
-
-        posiciones = [(10, 206, 88), (108, 206, 88)]
-        for cap, (x, y, w) in zip(capturas[:max_capturas], posiciones):
-            img_io = cap.get("imagen")
-            if not img_io:
-                continue
-            if hasattr(img_io, "seek"):
-                img_io.seek(0)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                tmp.write(img_io.read())
-                tmp_path = tmp.name
-            try:
-                pdf.set_font("Arial", "", 6)
-                pdf.set_xy(x, y - 4)
-                pdf.cell(w, 3, preparar_texto_pdf(f"{cap.get('nombre','PDF original')} - página {cap.get('pagina','')}", max_token=30), ln=0)
-                pdf.image(tmp_path, x=x, y=y, w=w)
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-def agregar_capturas_originales_reportlab_story(story, ancho: float, max_capturas: int = 2) -> None:
-    """
-    Inserta capturas de la página 1 y página 2 del PDF original en el PDF ejecutivo de una hoja.
-    Usa st.session_state['pdfs_originales_cgi'].
-    """
-    try:
-        from reportlab.platypus import Image as RLImage, Spacer, Table, TableStyle
-        from reportlab.lib import colors
-        stl = _paper_styles() if "_paper_styles" in globals() else None
-        capturas = capturas_pdfs_originales_desde_sesion(max_paginas_por_pdf=2) if "capturas_pdfs_originales_desde_sesion" in globals() else []
-
-        if stl:
-            story.append(Spacer(1, 3))
-            story.append(_paper_paragraph("4. CAPTURA PANTALLA DE MEDICIONES", stl["PaperH"]))
-
-        if not capturas:
-            if stl:
-                story.append(_paper_paragraph("Capturas no disponibles. Para activarlas agregue 'pymupdf' a requirements.txt y vuelva a ejecutar.", stl["PaperSmall"]))
-            return
-
-        celdas = []
-        for cap in capturas[:max_capturas]:
-            img_io = cap.get("imagen")
-            if not img_io:
-                continue
-            if hasattr(img_io, "seek"):
-                img_io.seek(0)
-            img = RLImage(img_io)
-            img._restrictSize((ancho - 10) / 2, 96)  # dos imágenes compactas lado a lado
-            titulo = f"Página {cap.get('pagina', '')}"
-            if stl:
-                celda = [ _paper_paragraph(titulo, stl["PaperSmall"]), img ]
-            else:
-                celda = [ img ]
-            celdas.append(celda)
-
-        if len(celdas) == 1:
-            story.extend(celdas[0])
-        elif len(celdas) >= 2:
-            tabla = Table([[celdas[0], celdas[1]]], colWidths=[ancho/2 - 3, ancho/2 - 3])
-            tabla.setStyle(TableStyle([
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CBD5E1")),
-                ("INNERGRID", (0,0), (-1,-1), 0.25, colors.HexColor("#E2E8F0")),
-                ("LEFTPADDING", (0,0), (-1,-1), 3),
-                ("RIGHTPADDING", (0,0), (-1,-1), 3),
-                ("TOPPADDING", (0,0), (-1,-1), 3),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-            ]))
-            story.append(tabla)
-        story.append(Spacer(1, 3))
-    except Exception:
-        pass
-
-
-# =========================================================
-# BASE DE CONOCIMIENTO - HEMODINÁMICA PULSÁTIL / EDAD VASCULAR
-# Referencia: Azizzadeh et al. Scientific Reports 2024;14:23151.
-# Agrega cálculo LMS, z-score y percentiles para cfPWV, AIx, Pf y Pb.
-# =========================================================
-
-# Referencia bibliográfica añadida a la base de conocimiento de la app.
-_ref_lead_2024 = (
-    "Azizzadeh M, Karimi A, Breyer-Kohansal R, et al. Reference equations for pulse wave velocity, "
-    "augmentation index, amplitude of forward and backward wave in a European general adult population. "
-    "Scientific Reports. 2024;14:23151. doi:10.1038/s41598-024-74162-5."
-)
-try:
-    if _ref_lead_2024 not in REFERENCIAS_BIBLIOGRAFICAS:
-        REFERENCIAS_BIBLIOGRAFICAS.append(_ref_lead_2024)
-except Exception:
-    pass
-
-# Sinónimos/campos nuevos para extracción desde PDF/Excel.
-try:
-    VARIABLES_CGI.setdefault("sexo", []).extend(["sexo", "sex", "gender", "genero", "género", "masculino", "femenino", "male", "female"])
-    VARIABLES_CGI.setdefault("cf_pwv", []).extend([
-        "cfpwv", "cf pwv", "carotid femoral pulse wave velocity", "carotid-femoral pulse wave velocity",
-        "velocidad de onda de pulso carotido femoral", "velocidad de onda de pulso carótido femoral",
-        "vop carotido femoral", "vop carótido femoral", "vop cf", "cf-vop", "pwv cf"
-    ])
-    VARIABLES_CGI.setdefault("aix", []).extend(["aix", "augmentation index", "indice de aumento", "índice de aumento", "indice de aumentacion", "índice de aumentación"])
-    VARIABLES_CGI.setdefault("pf", []).extend(["pf", "forward wave", "onda anterograda", "onda anterógrada", "onda incidente", "amplitud onda anterograda", "amplitud pf"])
-    VARIABLES_CGI.setdefault("pb", []).extend(["pb", "backward wave", "onda retrograda", "onda retrógrada", "onda reflejada", "amplitud onda retrograda", "amplitud pb"])
-except Exception:
-    pass
-
-try:
-    SINONIMOS_COLUMNAS.setdefault("Sexo", ["sexo", "sex", "gender", "genero", "género"])
-    SINONIMOS_COLUMNAS.setdefault("cfPWV", ["cfpwv", "cf pwv", "cf-pwv", "vop cf", "cf-vop", "pwv cf", "velocidad de onda de pulso carotido femoral", "velocidad de onda de pulso carótido femoral", "carotid femoral pulse wave velocity", "carotid-femoral pulse wave velocity"])
-    SINONIMOS_COLUMNAS.setdefault("AIx", ["aix", "augmentation index", "indice de aumento", "índice de aumento", "indice de aumentacion", "índice de aumentación"])
-    SINONIMOS_COLUMNAS.setdefault("Pf", ["pf", "forward wave", "onda anterograda", "onda anterógrada", "onda incidente", "amplitud pf"])
-    SINONIMOS_COLUMNAS.setdefault("Pb", ["pb", "backward wave", "onda retrograda", "onda retrógrada", "onda reflejada", "amplitud pb"])
-    for _col in ["Sexo", "cfPWV", "AIx", "Pf", "Pb"]:
-        if _col not in ORDEN_VARIABLES_INFORME:
-            ORDEN_VARIABLES_INFORME.append(_col)
-    DOMINIOS_METRICAS.setdefault("Mecánica pulsátil / edad vascular", ["cfPWV", "AIx", "Pf", "Pb"])
-except Exception:
-    pass
-
-try:
-    PATRONES_CLAVE.update({
-        "cf_pwv": r"(?:\bcf\s*[-_ ]?\s*pwv\b|\bcfpwv\b|\bpwv\s*cf\b|\bvop\s*cf\b|\bcf\s*[-_ ]?\s*vop\b|velocidad\s+(?:de\s+)?onda\s+(?:de\s+)?pulso\s+car[oó]tido\s*[- ]?\s*femoral|carotid\s*[- ]?\s*femoral\s+pulse\s+wave\s+velocity)",
-        "aix": r"(?:\ba\s*i\s*x\b|\baix\b|augmentation\s+index|[ií]ndice\s+de\s+aumento|[ií]ndice\s+de\s+aumentaci[oó]n)",
-        "pf": r"(?:\bpf\b|forward\s+wave|onda\s+anter[oó]grada|onda\s+incidente|amplitud\s+(?:de\s+)?onda\s+anter[oó]grada)",
-        "pb": r"(?:\bpb\b|backward\s+wave|onda\s+retr[oó]grada|onda\s+reflejada|amplitud\s+(?:de\s+)?onda\s+retr[oó]grada)",
+        # Fin de eyección estimado por caída pospico al 35% de PP o por mínimo de dp/dt.
+        post_peak = np.arange(peak_i, len(t0))
+        fall_idx = post_peak[excess[post_peak] < 0.35 * pp]
+        ej_duration = float(np.clip((t0[fall_idx[0]] - t0[foot_i]) if len(fall_idx) else 330, 210, 520))
+    ej_start = float(t0[foot_i])
+    ej_end = float(np.clip(ej_start + ej_duration, t_peak + 80, min(1000, ej_start + 540)))
+
+    q = np.zeros_like(t0)
+    eject = (t0 >= ej_start) & (t0 <= ej_end)
+    positive_dp = np.clip(dp, 0, None)
+    # Se agrega pequeña contribución por presión excedente durante eyección para producir pico romo fisiológico.
+    q[eject] = positive_dp[eject] + 0.012 * excess[eject]
+    q = pd.Series(q).rolling(21, center=True, min_periods=1).mean().to_numpy()
+    q = pd.Series(q).rolling(21, center=True, min_periods=1).mean().to_numpy()
+    if np.nanmax(q) > 0:
+        # Escala orientativa individual por PP y FC; la forma sigue siendo de la curva real.
+        qp = np.clip(190 + 3.0 * pp + (0 if np.isnan(fc) else 0.65 * fc), 160, 560)
+        q = q / np.nanmax(q) * qp
+
+    sep_df = pd.DataFrame({
+        "tiempo_ms": t0,
+        "presion_total_mmHg": p0,
+        "presion_modelo_pf_pb_mmHg": p_model,
+        "onda_anterograda_pf": pf,
+        "onda_retrograda_pb": pb,
+        "onda_anterograda_pf_abs": pf_abs,
+        "onda_retrograda_pb_abs": pb_abs,
+        "flujo_aortico_estimado_ml_s": q,
     })
-    for _v in ["cf_pwv", "aix", "pf", "pb"]:
-        if _v not in CLAVES_NUMERICAS:
-            CLAVES_NUMERICAS.append(_v)
-except Exception:
-    pass
 
-# Tabla 3 del paper LEAD 2024. M y S son funciones de edad; L es constante por sexo.
-# En AIx se aplica el desplazamiento +100 para mantener valores positivos antes de LMS.
-LEAD_LMS_PULSATIL = {
-    "cf_pwv": {
-        "female": {"M": lambda age: math.exp(1.705 + 0.0073 * age), "S": lambda age: math.exp(-2.140 + 0.0074 * age), "L": -0.7200, "offset": 0.0, "unidad": "m/s", "nombre": "cfPWV"},
-        "male":   {"M": lambda age: math.exp(1.769 + 0.0070 * age), "S": lambda age: math.exp(-2.046 + 0.0058 * age), "L": -0.6307, "offset": 0.0, "unidad": "m/s", "nombre": "cfPWV"},
-    },
-    "aix": {
-        "female": {"M": lambda age: math.exp(3.976 + 0.2266 * math.log(age)), "S": lambda age: math.exp(-1.273 - 0.3239 * math.log(age)), "L": 1.6943, "offset": 100.0, "unidad": "%", "nombre": "AIx"},
-        "male":   {"M": lambda age: math.exp(3.815 + 0.2485 * math.log(age)), "S": lambda age: math.exp(-1.025 - 0.3617 * math.log(age)), "L": 1.0469, "offset": 100.0, "unidad": "%", "nombre": "AIx"},
-    },
-    "pf": {
-        "female": {"M": lambda age: math.exp(2.980 + 0.00548 * age), "S": lambda age: math.exp(-1.576 + 0.0035 * age), "L": 0.3488, "offset": 0.0, "unidad": "mmHg", "nombre": "Pf"},
-        "male":   {"M": lambda age: math.exp(3.133 + 0.0030 * age), "S": lambda age: math.exp(-1.382 - 0.0003 * age), "L": 0.1310, "offset": 0.0, "unidad": "mmHg", "nombre": "Pf"},
-    },
-    "pb": {
-        "female": {"M": lambda age: math.exp(1.998 + 0.0157 * age), "S": lambda age: math.exp(-1.371 + 0.0016 * age), "L": 0.3678, "offset": 0.0, "unidad": "mmHg", "nombre": "Pb"},
-        "male":   {"M": lambda age: math.exp(2.078 + 0.01258 * age), "S": lambda age: math.exp(-1.200 - 0.0011 * age), "L": 0.1720, "offset": 0.0, "unidad": "mmHg", "nombre": "Pb"},
-    },
-}
+    # Métricas de morfología real para auditar que no se repita la misma curva.
+    syst_mask = (t0 >= ej_start) & (t0 <= ej_end)
+    diast_mask = (t0 > ej_end) & (t0 <= 1000)
 
+    # Áreas de presión-tiempo sobre PAD: útiles para morfología de la onda.
+    systolic_area = float(safe_trapezoid(excess[syst_mask], t0[syst_mask]))
+    total_area = float(safe_trapezoid(excess, t0))
 
-def normalizar_sexo_lms(valor: Any) -> Optional[str]:
-    t = normalizar_txt(valor)
-    if not t:
-        return None
-    if re.search(r"\b(f|fem|femenino|mujer|female|woman)\b", t):
-        return "female"
-    if re.search(r"\b(m|masc|masculino|varon|varón|male|man)\b", t):
-        return "male"
-    return None
+    # RVSE/SEVR operativo: relación de área diastólica/sistólica de la curva central real.
+    # Se calcula con la presión central absoluta porque representa una aproximación presión-tiempo
+    # del balance oferta/demanda subendocárdica. No se calcula desde valores aislados.
+    systolic_pti = float(safe_trapezoid(p0[syst_mask], t0[syst_mask]))
+    diastolic_pti = float(safe_trapezoid(p0[diast_mask], t0[diast_mask]))
+    rvse_calc = (diastolic_pti / systolic_pti * 100.0) if systolic_pti > 0 and np.sum(diast_mask) >= 2 else np.nan
+    rvse_pdf = to_float(row.get("rvse"))
+    rvse_delta = rvse_calc - rvse_pdf if not np.isnan(rvse_calc) and not np.isnan(rvse_pdf) else np.nan
 
+    ai_morph = float((p0[refl_i] - p0[max_dp_i]) / pp * 100.0) if pp > 0 else np.nan
 
-def percentil_desde_z(z: float) -> float:
-    return 100.0 * (0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0))))
-
-
-def calcular_z_lms_pulsatil(metrica: str, valor: Any, edad: Any, sexo: Any) -> Optional[Dict[str, Any]]:
-    """Calcula z-score y percentil LMS para cfPWV, AIx, Pf y Pb.
-
-    Fórmula: z = (((Y/M)^L)-1)/(L*S), o z = ln(Y/M)/S si L=0.
-    Para AIx se usa Y = AIx + 100, como indica el paper LEAD.
-    """
-    metrica = str(metrica).lower().replace("cfpwv", "cf_pwv").replace("cf-pwv", "cf_pwv")
-    v = limpiar_numero(valor)
-    age = limpiar_numero(edad)
-    sex = normalizar_sexo_lms(sexo)
-    if metrica not in LEAD_LMS_PULSATIL or v is None or age is None or sex is None:
-        return None
-    if not (18 <= age <= 90):
-        return None
-    pars = LEAD_LMS_PULSATIL[metrica][sex]
-    y = v + float(pars.get("offset", 0.0))
-    if y <= 0:
-        return None
-    L = float(pars["L"])
-    M = float(pars["M"](age))
-    S = float(pars["S"](age))
-    if M <= 0 or S <= 0:
-        return None
-    if abs(L) < 1e-12:
-        z = math.log(y / M) / S
-    else:
-        z = ((y / M) ** L - 1.0) / (L * S)
-    p = percentil_desde_z(z)
-    if z >= 1.2816:
-        categoria = "Elevado para edad y sexo (≥ percentil 90)"
-        semaforo = "ROJO"
-    elif z <= -1.2816:
-        categoria = "Inferior al promedio poblacional / envejecimiento vascular favorable (≤ percentil 10)"
-        semaforo = "VERDE"
-    else:
-        categoria = "Esperado para edad y sexo (percentil 10-90)"
-        semaforo = "VERDE"
-    return {
-        "metrica": pars.get("nombre", metrica), "valor": v, "edad": age, "sexo": sex,
-        "L": L, "M": M, "S": S, "z": z, "percentil": p,
-        "categoria": categoria, "semaforo": semaforo, "unidad": pars.get("unidad", ""),
+    metrics = {
+        "pf_pico": pf_peak,
+        "pb_pico": pb_peak,
+        "tfor_ms": tfor,
+        "tref_ms": tref_m,
+        "rm": rm,
+        "ri": ri,
+        "tfor_tref": t_ratio,
+        "qp_ml_s": float(np.nanmax(q)) if len(q) else np.nan,
+        "pe_ms": float(ej_end - ej_start),
+        "curve_id": curve_id,
+        "t_pico_ms": t_peak,
+        "t_pie_ms": float(t0[foot_i]),
+        "t_max_dpdt_ms": float(t0[max_dp_i]),
+        "area_sistolica": systolic_area,
+        "area_total": total_area,
+        "area_sistolica_pti": systolic_pti,
+        "area_diastolica_pti": diastolic_pti,
+        "rvse_calculado_%": rvse_calc,
+        "rvse_importado_%": rvse_pdf,
+        "rvse_delta_%": rvse_delta,
+        "ai_morfologico_%": ai_morph,
+        "t_ej_inicio_ms": ej_start,
+        "t_ej_fin_ms": ej_end,
     }
+    return sep_df, metrics
+
+def interpret_wave_separation(sep_metrics):
+    rm = sep_metrics.get("rm", np.nan)
+    ri = sep_metrics.get("ri", np.nan)
+    tref = sep_metrics.get("tref_ms", np.nan)
+    ratio = sep_metrics.get("tfor_tref", np.nan)
+    pb = sep_metrics.get("pb_pico", np.nan)
+
+    parts = []
+    if not np.isnan(rm):
+        if rm < 0.30:
+            parts.append("La magnitud de reflexión (RM) es baja, compatible con onda reflejada poco dominante y menor carga pulsátil central.")
+        elif rm < 0.45:
+            parts.append("La magnitud de reflexión (RM) es intermedia, compatible con reflexión arterial presente sin predominio marcado.")
+        else:
+            parts.append("La magnitud de reflexión (RM) es elevada, compatible con mayor contribución de la onda retrógrada a la presión sistólica central y aumento de poscarga pulsátil.")
+    if not np.isnan(ri):
+        if ri < 0.23:
+            parts.append("El índice de reflexión (RI) se encuentra en rango bajo.")
+        elif ri < 0.32:
+            parts.append("El índice de reflexión (RI) se encuentra en rango intermedio.")
+        else:
+            parts.append("El índice de reflexión (RI) se encuentra aumentado, sugiriendo mayor carga por onda reflejada.")
+    if not np.isnan(tref):
+        if tref < 320:
+            parts.append("El retorno de la onda retrógrada es precoz, patrón compatible con rigidez arterial aumentada o reflexión periférica temprana.")
+        elif tref <= 430:
+            parts.append("El tiempo de retorno de la onda reflejada es intermedio.")
+        else:
+            parts.append("El tiempo de retorno de la onda reflejada es tardío, patrón más compatible con mejor complacencia arterial central.")
+    if not np.isnan(ratio):
+        if ratio > 0.55:
+            parts.append("La relación Tfor/Tref se encuentra relativamente elevada, lo que puede expresar solapamiento temporal entre componente anterógrado y retrógrado.")
+        else:
+            parts.append("La relación Tfor/Tref no sugiere solapamiento reflejo precoz significativo.")
+    if not parts:
+        return "No fue posible estimar en forma estable la separación de ondas."
+    return " ".join(parts)
+def plot_waveform(wave_df):
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    x = pd.to_numeric(wave_df.iloc[:,0], errors="coerce")
+    y = pd.to_numeric(wave_df.iloc[:,1], errors="coerce")
+    ax.plot(x, y, color="#B71C1C", linewidth=2.6)
+    ax.fill_between(x, y.min(), y, color="#B71C1C", alpha=0.06)
+    _apply_professional_axes(ax, "Onda de presión aórtica central", "Tiempo (ms)", "Presión central (mmHg)")
+    ax.margins(x=0.01)
+    return fig_to_png(fig)
 
 
-def estimar_edad_vascular_lms(metrica: str, valor: Any, sexo: Any, edad_min: int = 18, edad_max: int = 90) -> Optional[float]:
-    metrica = str(metrica).lower().replace("cfpwv", "cf_pwv").replace("cf-pwv", "cf_pwv")
-    v = limpiar_numero(valor)
-    sex = normalizar_sexo_lms(sexo)
-    if metrica not in LEAD_LMS_PULSATIL or v is None or sex is None:
-        return None
-    pars = LEAD_LMS_PULSATIL[metrica][sex]
-    objetivo = v + float(pars.get("offset", 0.0))
-    if objetivo <= 0:
-        return None
-    mejor_edad, mejor_error = None, float("inf")
-    # Búsqueda fina cada 0,1 años contra la mediana M(edad).
-    for i in range(int((edad_max - edad_min) * 10) + 1):
-        age = edad_min + i / 10.0
+def plot_wave_separation(sep_df):
+    """Gráfico clínico integrado: presión aórtica central + Pf/Pb superpuestas."""
+    t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    p_total = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
+    pf_abs = pd.to_numeric(sep_df.get("onda_anterograda_pf_abs", sep_df["onda_anterograda_pf"]), errors="coerce").to_numpy(dtype=float)
+    pb_abs = pd.to_numeric(sep_df.get("onda_retrograda_pb_abs", sep_df["onda_retrograda_pb"]), errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(t) & np.isfinite(p_total) & np.isfinite(pf_abs) & np.isfinite(pb_abs)
+    t, p_total, pf_abs, pb_abs = t[ok], p_total[ok], pf_abs[ok], pb_abs[ok]
+    pad_base = float(np.nanmin(p_total)) if len(p_total) else 0.0
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.9))
+    ax.plot(t, p_total, color="#111111", linewidth=3.0, label="Presión aórtica central completa", zorder=5)
+    ax.plot(t, pf_abs, color="#168038", linewidth=2.35, label="Onda anterógrada Pf", zorder=4)
+    ax.plot(t, pb_abs, color="#EF6C00", linestyle="--", linewidth=2.35, label="Onda retrógrada Pb", zorder=4)
+    ax.fill_between(t, pad_base, pf_abs, alpha=0.07, color="#168038", zorder=2)
+    ax.fill_between(t, pad_base, pb_abs, alpha=0.08, color="#EF6C00", zorder=2)
+    ax.axhline(pad_base, color="#78909C", linewidth=0.9, alpha=0.8)
+    _apply_professional_axes(ax, "Separación de ondas superpuesta a la presión aórtica central", "Tiempo (ms)", "Presión / componentes sobre PAD (mmHg)")
+    ax.legend(fontsize=8, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
+    ax.margins(x=0.01)
+    return fig_to_png(fig)
+
+
+def plot_aortic_flow(sep_df):
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    t = sep_df["tiempo_ms"]
+    q = sep_df["flujo_aortico_estimado_ml_s"]
+    ax.plot(t, q, color="#6A1B9A", linewidth=2.6)
+    ax.fill_between(t, 0, q, color="#6A1B9A", alpha=0.08)
+    _apply_professional_axes(ax, "Curva estimada de flujo aórtico", "Tiempo (ms)", "Flujo aórtico estimado (mL/s)")
+    ax.set_ylim(bottom=0)
+    ax.margins(x=0.01)
+    return fig_to_png(fig)
+
+
+def plot_rvse_area(sep_df, sep_metrics):
+    """Gráfico de áreas presión-tiempo para RVSE/SEVR calculado desde la curva real."""
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    p = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
+    ej_start = float(sep_metrics.get("t_ej_inicio_ms", np.nan))
+    ej_end = float(sep_metrics.get("t_ej_fin_ms", np.nan))
+    ok = np.isfinite(t) & np.isfinite(p)
+    t, p = t[ok], p[ok]
+    ax.plot(t, p, color="#111111", linewidth=2.2, label="Presión central real")
+    if len(t) and not np.isnan(ej_start) and not np.isnan(ej_end):
+        syst = (t >= ej_start) & (t <= ej_end)
+        diast = t > ej_end
+        ax.fill_between(t[syst], 0, p[syst], color="#C62828", alpha=0.13, label="Área sistólica")
+        ax.fill_between(t[diast], 0, p[diast], color="#1565C0", alpha=0.12, label="Área diastólica")
+        ax.axvline(ej_start, color="#78909C", linewidth=0.9, linestyle=":")
+        ax.axvline(ej_end, color="#78909C", linewidth=0.9, linestyle="--")
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    title = "RVSE / SEVR por áreas presión-tiempo"
+    if not np.isnan(rvse_calc):
+        title += f" = {rvse_calc:.1f}%"
+    _apply_professional_axes(ax, title, "Tiempo (ms)", "Presión central (mmHg)")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
+    ax.margins(x=0.01)
+    return fig_to_png(fig)
+
+
+def plot_harmonics(hdf):
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    ax.bar(range(1, len(hdf)+1), hdf["energia_relativa_%"], color="#455A64")
+    ax.set_xticks(range(1, len(hdf)+1))
+    _apply_professional_axes(ax, "Análisis armónico de la onda de presión central", "Armónico", "Energía relativa (%)")
+    ax.grid(axis="y", alpha=.22)
+    return fig_to_png(fig)
+
+
+def plot_pressure_comparison(row):
+    labels = ["PAS", "PAD", "PAM", "PP"]
+    radial = [row.get("pas_radial"), row.get("pad_radial"), row.get("pam_radial"), row.get("pp_radial")]
+    central = [row.get("pas_central"), row.get("pad_central"), row.get("pam_central"), row.get("pp_central")]
+    x = np.arange(len(labels)); w = 0.34
+    fig, ax = plt.subplots(figsize=(7.6,4.2))
+    ax.bar(x-w/2, radial, w, label="Radial/Braquial", color="#607D8B")
+    ax.bar(x+w/2, central, w, label="Central", color="#1565C0")
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    _apply_professional_axes(ax, "Presiones periféricas vs centrales", "Variable", "mmHg")
+    ax.legend(fontsize=8, frameon=True, facecolor="white", edgecolor="#CFD8DC")
+    ax.grid(axis="y", alpha=.22)
+    return fig_to_png(fig)
+
+
+def plot_clinical_gauges(row, ppa):
+    metrics = {
+        "PAS central": (to_float(row.get("pas_central")), 130),
+        "PP central": (to_float(row.get("pp_central")), 50),
+        "IAu": (to_float(row.get("iau")), 25),
+        "PPA": (ppa, 1.30),
+    }
+    fig, ax = plt.subplots(figsize=(7.6,3.9))
+    names = list(metrics.keys())
+    vals = [metrics[k][0] for k in names]
+    refs = [metrics[k][1] for k in names]
+    score = []
+    for n,v,r in zip(names, vals, refs):
+        if np.isnan(v): score.append(np.nan)
+        elif n == "PPA": score.append(v/r)
+        else: score.append(v/r)
+    ax.barh(names, score, color="#546E7A")
+    ax.axvline(1, linestyle="--", linewidth=1.2, color="#B71C1C")
+    _apply_professional_axes(ax, "Semaforización clínica de parámetros centrales", "Relación valor / umbral", "")
+    ax.grid(axis="x", alpha=.22)
+    return fig_to_png(fig)
+
+
+
+def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
+    """Conclusión textual continua del bloque de presión central y métricas."""
+    pas_c = to_float(row.get("pas_central")); pad_c = to_float(row.get("pad_central")); pp_c = to_float(row.get("pp_central"))
+    pam_c = to_float(row.get("pam_central")); iau = to_float(row.get("iau")); au = to_float(row.get("au")); fc = to_float(row.get("fc"))
+
+    def fmt(v, dec=1):
         try:
-            pred = float(pars["M"](age))
-            err = abs(pred - objetivo)
-            if err < mejor_error:
-                mejor_error, mejor_edad = err, age
+            f = float(v)
+            if np.isnan(f): return "no disponible"
+            return f"{f:.{dec}f}"
         except Exception:
-            pass
-    return mejor_edad
+            return "no disponible"
+
+    pressure_flags = []
+    if not np.isnan(pas_c):
+        if pas_c >= 130:
+            pressure_flags.append("PAS central elevada por umbral operativo de 130 mmHg")
+        else:
+            pressure_flags.append("PAS central por debajo del umbral operativo de 130 mmHg")
+    if not np.isnan(pp_c):
+        if pp_c >= 50:
+            pressure_flags.append("presión de pulso central aumentada")
+        else:
+            pressure_flags.append("presión de pulso central no aumentada")
+    if not np.isnan(iau):
+        if iau >= 25:
+            pressure_flags.append("IAu elevado, compatible con mayor aumentación sistólica")
+        elif iau >= 10:
+            pressure_flags.append("IAu intermedio")
+        else:
+            pressure_flags.append("IAu bajo")
+    if not np.isnan(ppa):
+        if ppa < 1.30:
+            pressure_flags.append("amplificación de presión de pulso reducida")
+        else:
+            pressure_flags.append("amplificación de presión de pulso conservada")
+
+    return (
+        f"El análisis de presión central muestra PAS central {fmt(pas_c,0)} mmHg, PAD central {fmt(pad_c,0)} mmHg, "
+        f"PAM central {fmt(pam_c,0)} mmHg y PP central {fmt(pp_c,0)} mmHg. La categoría tensional periférica/braquial es {cat}. "
+        f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(ppa,2)}. "
+        f"Au: {fmt(au,1)} mmHg, IAu: {fmt(iau,1)}%, FC: {fmt(fc,0)} lpm. "
+        f"Conclusión operativa: {dx}. Perfil hemodinámico agregado: {risk}. "
+        f"Síntesis: {'; '.join(pressure_flags) if pressure_flags else 'sin marcadores suficientes para estratificación central completa'}."
+    )
 
 
-def extraer_metricas_pulsatiles_desde_resumen(r: Dict[str, Any]) -> Dict[str, Any]:
-    edad = r.get("edad")
-    sexo = r.get("sexo") or r.get("Sexo")
-    out: Dict[str, Any] = {}
-    for key in ["cf_pwv", "aix", "pf", "pb"]:
-        zinfo = calcular_z_lms_pulsatil(key, r.get(key), edad, sexo)
-        if zinfo:
-            out[f"{key}_z"] = round(zinfo["z"], 3)
-            out[f"{key}_percentil"] = round(zinfo["percentil"], 1)
-            out[f"{key}_categoria_lms"] = zinfo["categoria"]
-            ev = estimar_edad_vascular_lms(key, r.get(key), sexo)
-            if ev is not None:
-                out[f"{key}_edad_vascular"] = round(ev, 1)
-    return out
-
-
-def texto_metricas_pulsatiles_lms(r: Dict[str, Any]) -> str:
-    edad = r.get("edad")
-    sexo = r.get("sexo") or r.get("Sexo")
-    if limpiar_numero(edad) is None or normalizar_sexo_lms(sexo) is None:
-        return "Mecánica pulsátil LMS: para calcular z-score, percentil y edad vascular se requiere edad y sexo del paciente."
-    lineas = []
-    for key, label in [("cf_pwv", "cfPWV"), ("aix", "AIx"), ("pf", "Pf"), ("pb", "Pb")]:
-        val = r.get(key)
-        if limpiar_numero(val) is None:
-            continue
-        zinfo = calcular_z_lms_pulsatil(key, val, edad, sexo)
-        ev = estimar_edad_vascular_lms(key, val, sexo)
-        if not zinfo:
-            continue
-        ev_txt = f"; edad vascular estimada {ev:.1f} años" if ev is not None else ""
-        lineas.append(
-            f"- {label}: {fmt(val, 2, ' ' + zinfo.get('unidad',''))}; z={zinfo['z']:.2f}; "
-            f"percentil={zinfo['percentil']:.1f}; {zinfo['categoria']}{ev_txt}."
-        )
-    if not lineas:
-        return "Mecánica pulsátil LMS: no se detectaron cfPWV, AIx, Pf o Pb en los datos importados."
-    return "Mecánica pulsátil LMS según referencia LEAD 2024 (ajustada por edad y sexo):\n" + "\n".join(lineas)
-
-
-def _buscar_valor_df_canonico(df: pd.DataFrame, canon: str) -> Any:
+def interpret_harmonic_profile(hdf):
+    """Conclusión clínica simple del análisis armónico."""
     try:
-        if df is None or df.empty:
-            return None
-        dfx = estandarizar_columnas_clinicas(df)
-        dsel = seleccionar_df_diagnostico(dfx)
-        if dsel is None or dsel.empty:
-            dsel = dfx
-        if canon in dsel.columns:
-            for v in dsel[canon].tolist()[::-1]:
-                if es_valor_util(v):
-                    return v
-        if canon in dfx.columns:
-            for v in dfx[canon].tolist()[::-1]:
-                if es_valor_util(v):
-                    return v
+        df = hdf.copy()
+        if df is None or len(df) == 0:
+            return "No fue posible calcular un perfil armónico interpretable por falta de datos válidos de la onda central."
+        e = pd.to_numeric(df.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+        f = pd.to_numeric(df.get("frecuencia_hz"), errors="coerce").to_numpy(dtype=float)
+        a = pd.to_numeric(df.get("amplitud"), errors="coerce").to_numpy(dtype=float)
+        if len(e) == 0 or np.all(~np.isfinite(e)):
+            return "No fue posible estimar la distribución espectral de energía de la onda central."
+        e1 = e[0] if len(e) > 0 and np.isfinite(e[0]) else np.nan
+        e2 = e[1] if len(e) > 1 and np.isfinite(e[1]) else np.nan
+        e_high = np.nansum(e[3:]) if len(e) > 4 else np.nan
+        dom_i = int(np.nanargmax(e)) if np.any(np.isfinite(e)) else 0
+        dom_freq = f[dom_i] if len(f) > dom_i and np.isfinite(f[dom_i]) else np.nan
+        dom_amp = a[dom_i] if len(a) > dom_i and np.isfinite(a[dom_i]) else np.nan
+
+        if not np.isnan(e_high) and e_high >= 25:
+            spectral_note = "mayor contenido de alta frecuencia, hallazgo compatible con morfología más abrupta o mayor complejidad de la onda de presión"
+        elif not np.isnan(e_high) and e_high >= 12:
+            spectral_note = "contenido de alta frecuencia intermedio"
+        else:
+            spectral_note = "predominio de componentes armónicos bajos, compatible con onda más suavizada"
+
+        return (
+            f"El análisis armónico muestra una energía relativa del primer armónico de {e1:.1f}% "
+            f"y del segundo armónico de {e2:.1f}% cuando está disponible. El armónico dominante se ubica en torno a "
+            f"{dom_freq:.2f} Hz, con amplitud {dom_amp:.3f}. La suma aproximada de armónicos altos desde el cuarto componente es "
+            f"{e_high:.1f}%. Interpretación: {spectral_note}. Este bloque debe interpretarse como complemento morfológico de la onda central, "
+            f"no como sustituto de la interpretación clínica de presión central, aumentación y separación de ondas."
+        )
+    except Exception:
+        return "El perfil armónico no pudo interpretarse en forma estable, aunque se conserva el gráfico y la tabla espectral para revisión visual."
+
+
+def interpret_rvse_profile(row, sep_metrics):
+    """Interpreta RVSE/SEVR calculado desde la curva central real y lo compara con el valor importado."""
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    rvse_imp = to_float(row.get("rvse"))
+    syst_pti = sep_metrics.get("area_sistolica_pti", np.nan)
+    diast_pti = sep_metrics.get("area_diastolica_pti", np.nan)
+
+    if np.isnan(rvse_calc):
+        return "RVSE/SEVR: no calculable porque no se pudo definir en forma estable el área sistólica y diastólica de la curva central real."
+
+    if rvse_calc < 120:
+        grade = "reducido"
+        meaning = "sugiere menor reserva subendocárdica relativa o mayor demanda sistólica respecto del tiempo diastólico disponible"
+    elif rvse_calc < 150:
+        grade = "limítrofe/intermedio"
+        meaning = "sugiere balance subendocárdico intermedio, dependiente de la frecuencia cardíaca, presión diastólica central y poscarga sistólica"
+    else:
+        grade = "conservado"
+        meaning = "sugiere balance presión-tiempo diastólico/sistólico favorable en la curva analizada"
+
+    comparison = ""
+    if not np.isnan(rvse_imp) and rvse_imp > 0:
+        delta = rvse_calc - rvse_imp
+        comparison = f" El RVSE informado por el equipo es {rvse_imp:.1f}% y el RVSE recalculado por la app es {rvse_calc:.1f}% (diferencia {delta:+.1f} puntos), útil como control de consistencia de la digitalización."
+
+    return (
+        f"RVSE/SEVR calculado desde la curva central real: {rvse_calc:.1f}%. "
+        f"Área sistólica presión-tiempo: {format_optional(syst_pti, 0)} mmHg·ms; "
+        f"área diastólica presión-tiempo: {format_optional(diast_pti, 0)} mmHg·ms. "
+        f"Interpretación: RVSE {grade}, {meaning}.{comparison}"
+    )
+
+
+def build_continuous_conclusions(row, wave_df, hdf):
+    """Devuelve las cuatro conclusiones continuas solicitadas antes de los gráficos."""
+    dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+    sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
+    sep_interp = interpret_wave_separation(sep_metrics)
+
+    def fmt(v, dec=1):
+        try:
+            f = float(v)
+            if np.isnan(f): return "no disponible"
+            return f"{f:.{dec}f}"
+        except Exception:
+            return "no disponible"
+
+    rvse_interp = interpret_rvse_profile(row, sep_metrics)
+    c1 = interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk) + " " + rvse_interp
+
+    c2 = (
+        f"La separación de ondas estima un componente anterógrado Pf pico de {fmt(sep_metrics.get('pf_pico', np.nan),1)} mmHg "
+        f"y un componente retrógrado Pb pico de {fmt(sep_metrics.get('pb_pico', np.nan),1)} mmHg. "
+        f"La magnitud de reflexión RM Pb/Pf es {fmt(sep_metrics.get('rm', np.nan),2)}, el índice de reflexión RI es "
+        f"{fmt(sep_metrics.get('ri', np.nan),2)}, Tfor es {fmt(sep_metrics.get('tfor_ms', np.nan),0)} ms, "
+        f"Tref es {fmt(sep_metrics.get('tref_ms', np.nan),0)} ms y la relación Tfor/Tref es "
+        f"{fmt(sep_metrics.get('tfor_tref', np.nan),2)}. {sep_interp}"
+    )
+
+    c3 = interpret_harmonic_profile(hdf)
+
+    rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan)
+    pp_c = to_float(row.get("pp_central")); iau = to_float(row.get("iau")); pas_c = to_float(row.get("pas_central"))
+    integrated_flags = []
+    if not np.isnan(pas_c) and pas_c >= 130:
+        integrated_flags.append("presión central elevada")
+    if not np.isnan(pp_c) and pp_c >= 50:
+        integrated_flags.append("carga pulsátil central aumentada")
+    if not np.isnan(iau) and iau >= 25:
+        integrated_flags.append("aumentación sistólica elevada")
+    if not np.isnan(rm) and rm >= 0.45:
+        integrated_flags.append("reflexión de onda aumentada")
+    if not np.isnan(ri) and ri >= 0.32:
+        integrated_flags.append("mayor contribución retrógrada")
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    if not np.isnan(rvse_calc) and rvse_calc < 120:
+        integrated_flags.append("RVSE reducido por análisis de área presión-tiempo")
+    elif not np.isnan(rvse_calc) and rvse_calc >= 150:
+        integrated_flags.append("RVSE conservado")
+    if not integrated_flags:
+        integrated_flags.append("sin marcadores mayores simultáneos de sobrecarga pulsátil central en los parámetros disponibles")
+
+    _, c4, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+
+    return [
+        ("1. Análisis de presión central y métricas", c1),
+        ("2. Análisis de separación de ondas", c2),
+        ("3. Análisis de armónicos", c3),
+        ("4. Fenotipo final de presión central", c4),
+    ], sep_df, sep_metrics, sep_interp
+
+
+
+
+def classify_central_pressure_phenotype(row, sep_metrics, hdf):
+    """Define fenotipo final explícito integrando presión central, RVSE/SEVR, separación de ondas y armónicos."""
+    def fmt(v, dec=1, unit=""):
+        try:
+            f = float(v)
+            if np.isnan(f):
+                return "no disponible"
+            return f"{f:.{dec}f}{unit}"
+        except Exception:
+            return "no disponible"
+
+    def add_metric(bucket, altered, label, value, threshold_text, interpretation, points):
+        item = {
+            "label": label,
+            "value": value,
+            "threshold": threshold_text,
+            "interpretation": interpretation,
+            "points": points,
+            "altered": altered,
+        }
+        bucket.append(item)
+        return points if altered else 0
+
+    pas_c = to_float(row.get("pas_central"))
+    pad_c = to_float(row.get("pad_central"))
+    pp_c = to_float(row.get("pp_central"))
+    au = to_float(row.get("au"))
+    iau = to_float(row.get("iau"))
+    pas_r = to_float(row.get("pas_radial"))
+    pp_r = to_float(row.get("pp_radial"))
+    ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
+    amp_sbp = pas_r - pas_c if not np.isnan(pas_r) and not np.isnan(pas_c) else np.nan
+
+    rm = sep_metrics.get("rm", np.nan)
+    ri = sep_metrics.get("ri", np.nan)
+    tref = sep_metrics.get("tref_ms", np.nan)
+    pb = sep_metrics.get("pb_pico", np.nan)
+    pf = sep_metrics.get("pf_pico", np.nan)
+    rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+    t_pico = sep_metrics.get("t_pico_ms", np.nan)
+    t_max_dpdt = sep_metrics.get("t_max_dpdt_ms", np.nan)
+    area_sis = sep_metrics.get("area_sistolica_pti", sep_metrics.get("area_sistolica", np.nan))
+    area_dias = sep_metrics.get("area_diastolica_pti", np.nan)
+
+    e_high = np.nan
+    e1 = np.nan
+    e2 = np.nan
+    try:
+        e = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+        if len(e) > 0:
+            e1 = e[0]
+        if len(e) > 1:
+            e2 = e[1]
+        if len(e) > 4:
+            e_high = np.nansum(e[3:])
     except Exception:
         pass
-    return None
 
-try:
-    _referencia_metrica_pre_lms = referencia_metrica
-    def referencia_metrica(nombre: str) -> Optional[Tuple[float, float, str]]:
-        n = normalizar_txt(nombre).replace(" ", "").replace("_", "")
-        refs_lms = {
-            "cfpwv": (0.0, 10.0, "m/s"), "cf-pwv": (0.0, 10.0, "m/s"),
-            "aix": (-30.0, 40.0, "%"), "pf": (0.0, 80.0, "mmHg"), "pb": (0.0, 50.0, "mmHg"),
-        }
-        if n in refs_lms:
-            return refs_lms[n]
-        return _referencia_metrica_pre_lms(nombre)
-except Exception:
-    pass
+    pressure_metrics = []
+    wave_metrics = []
+    harmonic_metrics = []
 
-try:
-    _extraer_resumen_integrado_pre_lms = extraer_resumen_integrado
-    def extraer_resumen_integrado(df: pd.DataFrame) -> Dict[str, Any]:
-        r = _extraer_resumen_integrado_pre_lms(df)
-        if not isinstance(r, dict):
-            r = {}
-        # Datos demográficos y métricas pulsátiles.
-        sexo = _buscar_valor_df_canonico(df, "Sexo")
-        if es_valor_util(sexo):
-            r["sexo"] = sexo
-        for canon, key in [("cfPWV", "cf_pwv"), ("AIx", "aix"), ("Pf", "pf"), ("Pb", "pb")]:
-            val = _buscar_valor_df_canonico(df, canon)
-            if limpiar_numero(val) is not None:
-                r[key] = limpiar_numero(val)
-        r.update(extraer_metricas_pulsatiles_desde_resumen(r))
-        return r
-except Exception:
-    pass
+    pressure_score = 0
+    if not np.isnan(pas_c):
+        if pas_c >= 130:
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "alterada si ≥130 mmHg", "presión central sistólica elevada", 2)
+        elif pas_c >= 120:
+            pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "limítrofe 120-129 mmHg", "presión central sistólica limítrofe", 1)
+        else:
+            add_metric(pressure_metrics, False, "PAS central", fmt(pas_c, 0, " mmHg"), "normal si <120-130 mmHg según contexto", "no elevada", 0)
+    if not np.isnan(pp_c):
+        if pp_c >= 60:
+            pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "marcadamente alterada si ≥60 mmHg", "carga pulsátil central alta", 2)
+        elif pp_c >= 50:
+            pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "alterada si ≥50 mmHg", "carga pulsátil central aumentada", 1)
+        else:
+            add_metric(pressure_metrics, False, "PP central", fmt(pp_c, 0, " mmHg"), "no aumentada si <50 mmHg", "sin aumento mayor de carga pulsátil", 0)
+    if not np.isnan(iau):
+        if iau >= 35:
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alto si ≥35%", "aumentación sistólica marcada", 2)
+        elif iau >= 25:
+            pressure_score += add_metric(pressure_metrics, True, "IAu", fmt(iau, 1, "%"), "alterado si ≥25%", "aumentación sistólica elevada", 1)
+        else:
+            add_metric(pressure_metrics, False, "IAu", fmt(iau, 1, "%"), "no aumentado si <25%", "sin aumentación sistólica relevante", 0)
+    if not np.isnan(au):
+        if au > 0:
+            pressure_score += add_metric(pressure_metrics, True, "Au", fmt(au, 1, " mmHg"), "alterada si positiva y clínicamente relevante", "aumentación aórtica positiva", 1)
+        else:
+            add_metric(pressure_metrics, False, "Au", fmt(au, 1, " mmHg"), "sin aumentación positiva", "sin aumento sistólico adicional por Au", 0)
+    if not np.isnan(ppa):
+        if ppa < 1.20:
+            pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa, 2), "francamente reducida si <1.20", "pérdida de amplificación periférico-central", 2)
+        elif ppa < 1.30:
+            pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa, 2), "reducida si <1.30", "amplificación de presión de pulso reducida", 1)
+        else:
+            add_metric(pressure_metrics, False, "PPA", fmt(ppa, 2), "conservada si ≥1.30", "amplificación conservada", 0)
+    if not np.isnan(rvse_calc):
+        if rvse_calc < 120:
+            pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "reducido si <120%", "menor reserva subendocárdica relativa / peor balance oferta-demanda", 2)
+        elif rvse_calc < 150:
+            pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "intermedio 120-149%", "balance subendocárdico intermedio", 1)
+        else:
+            add_metric(pressure_metrics, False, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "conservado si ≥150%", "balance subendocárdico conservado", 0)
 
-try:
-    _metricas_por_dominio_pre_lms = metricas_por_dominio
-    def metricas_por_dominio(r: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-        out = _metricas_por_dominio_pre_lms(r)
-        puls = []
-        for key, var in [("cf_pwv", "cfPWV"), ("aix", "AIx"), ("pf", "Pf"), ("pb", "Pb")]:
-            val = r.get(key)
-            if limpiar_numero(val) is None:
-                continue
-            z = r.get(f"{key}_z")
-            pct = r.get(f"{key}_percentil")
-            cat = r.get(f"{key}_categoria_lms") or "Métrica pulsátil disponible"
-            estado = str(cat).upper()
-            color = "#EF4444" if "ELEVADO" in estado else "#10B981"
-            unidad = LEAD_LMS_PULSATIL[key]["female"].get("unidad", "")
-            puls.append({
-                "variable": var,
-                "valor": val,
-                "referencia_baja": None,
-                "referencia_alta": None,
-                "unidad": unidad,
-                "estado": f"{cat}" + (f"; z={z}; p={pct}" if z is not None and pct is not None else ""),
-                "color": color,
-                "zona": "alto" if "ELEVADO" in estado else "normal",
-                "score": None,
-            })
-        if puls:
-            out["Mecánica pulsátil / edad vascular"] = puls
+    wave_score = 0
+    if not np.isnan(rm):
+        if rm >= 0.50:
+            wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "elevada si ≥0.50", "onda retrógrada de gran magnitud relativa", 2)
+        elif rm >= 0.35:
+            wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "intermedia 0.35-0.49", "reflexión de onda intermedia", 1)
+        else:
+            add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm, 2), "baja si <0.35", "baja magnitud retrógrada", 0)
+    if not np.isnan(ri):
+        if ri >= 0.35:
+            wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "aumentado si ≥0.35", "mayor contribución relativa de Pb", 2)
+        elif ri >= 0.25:
+            wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "intermedio 0.25-0.34", "contribución retrógrada intermedia", 1)
+        else:
+            add_metric(wave_metrics, False, "RI", fmt(ri, 2), "bajo si <0.25", "menor peso retrógrado", 0)
+    if not np.isnan(tref):
+        if tref < 320:
+            wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "precoz si <320 ms", "retorno reflejo precoz compatible con mayor rigidez/reflexión temprana", 2)
+        elif tref <= 430:
+            wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "intermedio 320-430 ms", "retorno reflejo intermedio", 1)
+        else:
+            add_metric(wave_metrics, False, "Tref", fmt(tref, 0, " ms"), "tardío si >430 ms", "retorno reflejo tardío", 0)
+    if not np.isnan(pb) and not np.isnan(pf) and pf > 0:
+        add_metric(wave_metrics, pb / pf >= 0.35, "Pf/Pb pico", f"Pf {fmt(pf,1,' mmHg')} / Pb {fmt(pb,1,' mmHg')}", "Pb relevante si Pb/Pf ≥0.35", "relación directa de componentes anterógrado y retrógrado", 0)
+
+    harmonic_score = 0
+    if not np.isnan(e_high):
+        if e_high >= 25:
+            harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "alto si ≥25% desde cuarto componente", "alta complejidad espectral / onda más abrupta", 2)
+        elif e_high >= 12:
+            harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "intermedio 12-24%", "complejidad espectral intermedia", 1)
+        else:
+            add_metric(harmonic_metrics, False, "Armónicos superiores", fmt(e_high, 1, "%"), "bajo si <12%", "predominio de componentes bajos", 0)
+    if not np.isnan(e1):
+        if e1 < 35:
+            harmonic_score += add_metric(harmonic_metrics, True, "Primer armónico", fmt(e1, 1, "%"), "menor predominio si <35%", "menor dominio de onda fundamental", 1)
+        else:
+            add_metric(harmonic_metrics, False, "Primer armónico", fmt(e1, 1, "%"), "predominante si ≥35%", "onda fundamental predominante", 0)
+    if not np.isnan(e2):
+        add_metric(harmonic_metrics, False, "Segundo armónico", fmt(e2, 1, "%"), "valor descriptivo", "componente espectral complementario", 0)
+
+    total_score = pressure_score + wave_score + harmonic_score
+    high_pressure = pressure_score >= 3
+    high_wave = wave_score >= 3
+    high_harm = harmonic_score >= 2
+    rvse_reduced = (not np.isnan(rvse_calc)) and rvse_calc < 120
+
+    if high_pressure and high_wave and high_harm and rvse_reduced:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con estrés subendocárdico y complejidad armónica aumentada"
+        mechanism = "sobrecarga pulsátil central, retorno retrógrado relevante/precoz, menor balance subendocárdico y mayor complejidad espectral"
+    elif high_pressure and high_wave and rvse_reduced:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con RVSE reducido"
+        mechanism = "carga pulsátil central aumentada asociada a reflexión de onda aumentada y peor balance oferta-demanda subendocárdico"
+    elif high_pressure and high_wave and high_harm:
+        phenotype = "Fenotipo vascular central rígido-reflectivo con complejidad armónica aumentada"
+        mechanism = "carga pulsátil central aumentada, reflexión de onda aumentada y morfología espectral compleja"
+    elif high_pressure and high_wave:
+        phenotype = "Fenotipo vascular central rígido-reflectivo"
+        mechanism = "presión/carga pulsátil central elevada asociada a mayor contribución de onda retrógrada"
+    elif high_pressure and rvse_reduced:
+        phenotype = "Fenotipo vascular de carga central elevada con compromiso subendocárdico relativo"
+        mechanism = "presión o pulsatilidad central aumentada con RVSE reducido"
+    elif high_wave and rvse_reduced:
+        phenotype = "Fenotipo vascular reflectivo con compromiso subendocárdico relativo"
+        mechanism = "predominio retrógrado/retorno reflejo precoz asociado a RVSE reducido"
+    elif high_pressure and high_harm:
+        phenotype = "Fenotipo vascular de carga pulsátil central elevada con distorsión armónica"
+        mechanism = "presión/PP central elevada con mayor complejidad espectral"
+    elif high_wave:
+        phenotype = "Fenotipo vascular reflectivo predominante"
+        mechanism = "mayor peso de Pb y/o retorno reflejo más precoz, aun sin clara sobrecarga central global"
+    elif high_harm:
+        phenotype = "Fenotipo vascular armónico complejo"
+        mechanism = "mayor contenido de armónicos superiores o menor predominio del primer armónico"
+    elif high_pressure:
+        phenotype = "Fenotipo vascular de presión central elevada no reflectivo predominante"
+        mechanism = "elevación de presión/carga pulsátil central sin predominio retrógrado fuerte"
+    else:
+        phenotype = "Fenotipo vascular central conservado o de bajo impacto pulsátil"
+        mechanism = "sin combinación dominante de sobrecarga central, reflexión aumentada, RVSE reducido o complejidad armónica relevante"
+
+    altered = [m for m in pressure_metrics + wave_metrics + harmonic_metrics if m["altered"]]
+    altered_text = "; ".join([f"{m['label']} {m['value']} ({m['interpretation']})" for m in altered])
+    if not altered_text:
+        altered_text = "no se identifican métricas alteradas mayores con los puntos de corte operativos disponibles"
+
+    table = [
+        ["Dominio", "Puntaje", "Métricas alteradas / consideradas"],
+        ["Presión central, aumentación y RVSE", str(pressure_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in pressure_metrics]) if pressure_metrics else "sin datos suficientes"],
+        ["Separación de ondas Pf/Pb", str(wave_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in wave_metrics]) if wave_metrics else "sin datos suficientes"],
+        ["Armónicos", str(harmonic_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in harmonic_metrics]) if harmonic_metrics else "sin datos suficientes"],
+        ["Puntaje integrado", str(total_score), phenotype],
+    ]
+
+    text = (
+        f"Fenotipo final de presión central: {phenotype}. "
+        f"Métricas que definen el fenotipo: {altered_text}. "
+        f"La combinación de estas variables configura un patrón de {mechanism}. "
+        f"Resumen cuantitativo: PAS central {fmt(pas_c,0,' mmHg')}, PAD central {fmt(pad_c,0,' mmHg')}, "
+        f"PP central {fmt(pp_c,0,' mmHg')}, Au {fmt(au,1,' mmHg')}, IAu {fmt(iau,1,'%')}, "
+        f"PPA {fmt(ppa,2)}, amplificación PAS {fmt(amp_sbp,1,' mmHg')}, RVSE/SEVR {fmt(rvse_calc,1,'%')}, "
+        f"RM {fmt(rm,2)}, RI {fmt(ri,2)}, Tref {fmt(tref,0,' ms')}, "
+        f"Pf pico {fmt(pf,1,' mmHg')}, Pb pico {fmt(pb,1,' mmHg')}, "
+        f"primer armónico {fmt(e1,1,'%')} y armónicos superiores {fmt(e_high,1,'%')}. "
+        "Esta clasificación es operativa y debe interpretarse junto con edad, sexo, presión braquial, tratamiento, riesgo cardiovascular y lesión de órgano blanco."
+    )
+    return phenotype, text, table
+
+def build_pdf(row, wave_df, hdf, screenshot_png=None):
+    """Construye un PDF compacto, con conclusiones primero y luego grilla gráfica profesional."""
+    dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+    conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
+    final_phenotype, final_phenotype_text, final_phenotype_table = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        rightMargin=11*mm, leftMargin=11*mm,
+        topMargin=21*mm, bottomMargin=13*mm
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="SmallPAC", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=7.2, leading=8.5, textColor=colors.HexColor("#263238")
+    ))
+    styles.add(ParagraphStyle(
+        name="BodyPAC", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8.3, leading=10.1, textColor=colors.HexColor("#1F2D3D"), spaceAfter=2
+    ))
+    styles.add(ParagraphStyle(
+        name="ConclusionPAC", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8.15, leading=9.65, textColor=colors.HexColor("#1F2D3D"), spaceAfter=2
+    ))
+    styles.add(ParagraphStyle(
+        name="TitlePAC", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=14.7, leading=17.2, alignment=1, textColor=colors.HexColor("#12355B"), spaceAfter=2
+    ))
+    styles.add(ParagraphStyle(
+        name="SectionPAC", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=9.8, leading=11.5, textColor=colors.white, spaceAfter=0
+    ))
+    styles.add(ParagraphStyle(
+        name="H3PAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
+        fontSize=8.15, leading=9.4, textColor=colors.HexColor("#17365D"), spaceAfter=1
+    ))
+    styles.add(ParagraphStyle(
+        name="MiniTitlePAC", parent=styles["Heading3"], fontName="Helvetica-Bold",
+        fontSize=8.25, leading=9.4, textColor=colors.HexColor("#12355B"), spaceBefore=1, spaceAfter=0
+    ))
+
+    def _fmt(v, dec=1):
+        try:
+            f = float(v)
+            if np.isnan(f):
+                return ""
+            return f"{f:.{dec}f}"
+        except Exception:
+            return safe_text(v)
+
+    def _section(title):
+        return Table([[Paragraph(title, styles["SectionPAC"])]], colWidths=[188*mm], style=TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#17365D")),
+            ("BOX", (0,0), (-1,-1), 0.35, colors.HexColor("#17365D")),
+            ("LEFTPADDING", (0,0), (-1,-1), 5),
+            ("RIGHTPADDING", (0,0), (-1,-1), 5),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]))
+
+    def _table_style(header_color="#D9EAF7", font_size=7.2):
+        return TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor(header_color)),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.HexColor("#17365D")),
+            ("FONT", (0,0), (-1,0), "Helvetica-Bold", font_size),
+            ("FONT", (0,1), (-1,-1), "Helvetica", font_size),
+            ("GRID", (0,0), (-1,-1), 0.22, colors.HexColor("#B0BEC5")),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F7FAFC")]),
+            ("LEFTPADDING", (0,0), (-1,-1), 3),
+            ("RIGHTPADDING", (0,0), (-1,-1), 3),
+            ("TOPPADDING", (0,0), (-1,-1), 2),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+        ])
+
+    def _header_footer(canvas, doc_obj):
+        canvas.saveState()
+        width, height = A4
+        canvas.setFillColor(colors.HexColor("#12355B"))
+        canvas.rect(0, height-15*mm, width, 15*mm, stroke=0, fill=1)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Helvetica-Bold", 8.8)
+        canvas.drawString(11*mm, height-9*mm, "PAC IA | Presión Aórtica Central")
+        canvas.setFont("Helvetica", 7.2)
+        canvas.drawRightString(width-11*mm, height-9*mm, datetime.now().strftime("%d/%m/%Y"))
+        canvas.setFillColor(colors.HexColor("#607D8B"))
+        canvas.setFont("Helvetica", 6.8)
+        canvas.drawString(11*mm, 7*mm, "Informe médico integrado - diseño compacto profesional")
+        canvas.drawRightString(width-11*mm, 7*mm, f"Página {doc_obj.page}")
+        canvas.restoreState()
+
+    def _graph_cell(title, img, width=91*mm, height=50*mm):
+        return [Paragraph(title, styles["H3PAC"]), Image(img, width=width, height=height)]
+
+    story = []
+    story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL", styles["TitlePAC"]))
+    story.append(Paragraph("Informe médico integrado con conclusiones clínicas continuas y panel gráfico compacto", styles["BodyPAC"]))
+    story.append(Spacer(1, 1.7*mm))
+
+    story.append(_section("1. Datos del paciente y valores principales"))
+    datos = [
+        ["Paciente", safe_text(row.get("paciente","")), "Estudio", safe_text(row.get("estudio",""))],
+        ["Fecha", safe_text(row.get("fecha","")), "Hora", safe_text(row.get("hora",""))],
+        ["Edad", _fmt(row.get("edad",""),0), "Sexo", safe_text(row.get("sexo",""))],
+        ["Peso", _fmt(row.get("peso",""),1), "Altura", _fmt(row.get("altura",""),1)],
+        ["IMC", _fmt(row.get("imc",""),1), "Medicación", safe_text(row.get("medicacion",""))],
+    ]
+    vals = [["Variable", "Radial/Braquial", "Central", "Unidad"],
+            ["PAS", _fmt(row.get("pas_radial")), _fmt(row.get("pas_central")), "mmHg"],
+            ["PAD", _fmt(row.get("pad_radial")), _fmt(row.get("pad_central")), "mmHg"],
+            ["PAM", _fmt(row.get("pam_radial")), _fmt(row.get("pam_central")), "mmHg"],
+            ["PP", _fmt(row.get("pp_radial")), _fmt(row.get("pp_central")), "mmHg"],
+            ["FC", _fmt(row.get("fc"),0), "", "lpm"],
+            ["Au", "", _fmt(row.get("au")), "mmHg"],
+            ["IAu", "", _fmt(row.get("iau")), "%"],
+            ["RVSE equipo", "", _fmt(row.get("rvse")), "%"],
+            ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
+            ["PE", "", _fmt(row.get("pe")), "%"],
+            ["APC", "", _fmt(row.get("apc")), "relación"]]
+    # Tablas apiladas en ancho completo para evitar superposición de columnas.
+    # La versión anterior colocaba patient_table y values_table lado a lado:
+    # 140 mm + 83 mm dentro de un contenedor de 188 mm, produciendo solapamiento.
+    def _wrap_table_cells(table_rows, style_name="SmallPAC"):
+        wrapped = []
+        for row_cells in table_rows:
+            wrapped.append([Paragraph(safe_text(c), styles[style_name]) for c in row_cells])
+        return wrapped
+
+    patient_table = Table(
+        _wrap_table_cells(datos),
+        colWidths=[25*mm, 70*mm, 25*mm, 68*mm],
+        style=_table_style("#EAF2F8", 7.0)
+    )
+    values_table = Table(
+        _wrap_table_cells(vals),
+        colWidths=[36*mm, 50*mm, 50*mm, 52*mm],
+        style=_table_style("#D9EAF7", 7.0)
+    )
+    story.append(patient_table)
+    story.append(Spacer(1, 1.1*mm))
+    story.append(values_table)
+    story.append(Spacer(1, 1.8*mm))
+
+    story.append(_section("2. Conclusiones clínicas continuas"))
+    conclusion_rows = []
+    for title, body in conclusion_blocks:
+        conclusion_rows.append([Paragraph(title, styles["MiniTitlePAC"])])
+        conclusion_rows.append([Paragraph(body, styles["ConclusionPAC"])])
+    story.append(Table(conclusion_rows, colWidths=[188*mm], style=TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
+        ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
+        ("INNERGRID", (0,0), (-1,-1), 0.12, colors.HexColor("#ECEFF1")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 5),
+        ("RIGHTPADDING", (0,0), (-1,-1), 5),
+        ("TOPPADDING", (0,0), (-1,-1), 2.4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
+    ])))
+
+    # Sin salto forzado: ReportLab decide el pase de página y evita blancos grandes.
+    story.append(Spacer(1, 2.5*mm))
+    story.append(_section("3. Gráficos del informe"))
+    story.append(Spacer(1, 1.5*mm))
+    story.append(KeepTogether([
+        Paragraph("Presión aórtica central con ondas Pf/Pb superpuestas", styles["H3PAC"]),
+        Image(plot_wave_separation(sep_df), width=188*mm, height=88*mm)
+    ]))
+    story.append(Spacer(1, 1.5*mm))
+
+    img_w = 91*mm
+    img_h = 47*mm
+    graph_table = Table([
+        [_graph_cell("Presiones periféricas vs centrales", plot_pressure_comparison(row), img_w, img_h),
+         _graph_cell("Onda de presión aórtica central", plot_waveform(wave_df), img_w, img_h)],
+        [_graph_cell("Flujo aórtico estimado", plot_aortic_flow(sep_df), img_w, img_h),
+         _graph_cell("Análisis armónico", plot_harmonics(hdf), img_w, img_h)],
+        [_graph_cell("Semaforización clínica", plot_clinical_gauges(row, ppa), img_w, img_h),
+         _graph_cell("RVSE / SEVR por áreas presión-tiempo", plot_rvse_area(sep_df, sep_metrics), img_w, img_h)],
+    ], colWidths=[94*mm, 94*mm], rowHeights=[59*mm, 59*mm, 59*mm], style=TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
+        ("INNERGRID", (0,0), (-1,-1), 0.15, colors.HexColor("#ECEFF1")),
+        ("LEFTPADDING", (0,0), (-1,-1), 3),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 2),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ]))
+    story.append(graph_table)
+
+    story.append(Spacer(1, 2.5*mm))
+    story.append(_section("4. Tabla de análisis armónico y fenotipo final"))
+    harm_table = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]]
+    for i, r in hdf.iterrows():
+        harm_table.append([str(i+1), f"{r.get('frecuencia_hz',0):.2f}", f"{r.get('amplitud',0):.3f}", f"{r.get('energia_relativa_%',0):.1f}"])
+    phenotype_rows = [[Paragraph(str(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in final_phenotype_table]
+    story.append(Table([
+        [Table(harm_table, colWidths=[18*mm, 25*mm, 24*mm, 28*mm], style=_table_style("#EAF2F8", 6.6)),
+         Table(phenotype_rows, colWidths=[31*mm, 14*mm, 42*mm], style=_table_style("#D9EAF7", 6.4))]
+    ], colWidths=[98*mm, 90*mm], style=TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 3),
+        ("TOPPADDING", (0,0), (-1,-1), 2),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ])))
+    story.append(Spacer(1, 1.5*mm))
+    story.append(Paragraph(
+        "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. Pf y Pb se muestran sobre la línea diastólica basal para comparar directamente su contribución con la presión aórtica central completa. El fenotipo final integra presión/carga pulsátil central, magnitud y temporalidad de onda retrógrada, y complejidad armónica.",
+        styles["SmallPAC"]
+    ))
+
+    if screenshot_png:
+        story.append(PageBreak())
+        story.append(_section("5. Captura pantalla de mediciones"))
+        story.append(Spacer(1, 2*mm))
+        story.append(Image(io.BytesIO(screenshot_png), width=182*mm, height=215*mm))
+
+    story.append(Spacer(1, 3*mm))
+    story.append(_section("6. Referencias bibliográficas"))
+    refs = [
+        ("Agabiti-Rosei E, et al. Central blood pressure measurements and "
+         "antihypertensive therapy. Hypertension. 2007."),
+        ("Zocalo Y, Bia D. Presion aortica central y parametros clinicos "
+         "derivados de la onda del pulso. 2014."),
+        ("SAHA. Manual de Mecanica Vascular. Grupo de Trabajo de Mecanica "
+         "Vascular. 2024."),
+        ("Westerhof BE, et al. Quantification of wave reflection in the human "
+         "aorta from pressure alone. Hypertension. 2006."),
+        ("Herbert A, et al. Establishing reference values for central blood "
+         "pressure and amplification. Eur Heart J. 2014."),
+        ("Huang QF, et al. Outcome-driven threshold for pulse pressure "
+         "amplification. Hypertension Research. 2024."),
+    ]
+    ref_table = [[Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"])] for i, ref_txt in enumerate(refs, 1)]
+    story.append(Table(ref_table, colWidths=[188*mm], style=TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FAFAFA")),
+        ("BOX", (0,0), (-1,-1), 0.25, colors.HexColor("#CFD8DC")),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 1.6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 1.6),
+    ])))
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+
+def save_history(row):
+    """Guarda el registro actual en historial Excel de forma robusta.
+
+    Esta función se mantiene separada del generador de PDF para evitar
+    errores NameError cuando el usuario presiona "Guardar en historial".
+    """
+    try:
+        clean_row = {}
+        for k, v in dict(row).items():
+            if isinstance(v, (np.generic,)):
+                v = v.item()
+            if isinstance(v, float) and np.isnan(v):
+                v = ""
+            clean_row[k] = v
+
+        new = pd.DataFrame([clean_row])
+        if HISTORIAL_FILE.exists():
+            try:
+                old = pd.read_excel(HISTORIAL_FILE)
+                out = pd.concat([old, new], ignore_index=True)
+            except Exception:
+                out = new
+        else:
+            out = new
+
+        out.to_excel(HISTORIAL_FILE, index=False)
         return out
-except Exception:
-    pass
-
-try:
-    _generar_informe_texto_pre_lms = generar_informe_texto
-    def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-        base = _generar_informe_texto_pre_lms(df, contexto_embarazo)
-        r = extraer_resumen_integrado(df)
-        bloque_lms = texto_metricas_pulsatiles_lms(r)
-        if "Mecánica pulsátil LMS" in str(base):
-            return base
-        return str(base).rstrip() + "\n\n11. Base de conocimiento agregada: mecánica pulsátil, z-score y edad vascular\n" + bloque_lms
-except Exception:
-    pass
-
-# =========================================================
-# INTERFAZ
-# =========================================================
-
-usuario_actual = usuario_logueado_app()
+    except Exception as e:
+        st.error(f"No se pudo guardar el historial Excel: {e}")
+        return pd.DataFrame([row])
 
 
-st.markdown(
-    f"""
-    <div class='card'>
-        <h1>❤️ APP CGI - Informe Hemodinámico Integrado</h1>
-        <p><b>{AUTOR_APP}</b></p>
-        <p class='muted'>Importe uno o dos archivos PDF, Excel o CSV. La app extrae variables CGI, integra los datos y genera un informe médico PDF.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.title(APP_TITLE)
+st.caption("Importación tipo MODELO PAC, informe PDF integrado, captura de segunda hoja, historial Excel y análisis armónico.")
 
 with st.sidebar:
-    st.success(f"Usuario: {usuario_actual.get('nombre', usuario_actual.get('usuario', ''))}")
-    if usuario_actual.get("matricula"):
-        st.caption(f"Matrícula: {usuario_actual.get('matricula')}")
-    with st.expander("Firma y sello digital del usuario", expanded=False):
-        st.caption("La firma y el sello cargados aquí solo se insertan en los PDF generados por este usuario.")
-        firma_preview = obtener_path_firma_usuario(usuario_actual)
-        sello_preview = obtener_path_sello_usuario(usuario_actual)
-        if firma_preview:
-            st.image(firma_preview, caption="Firma activa", use_container_width=True)
-        if sello_preview:
-            st.image(sello_preview, caption="Sello activo", use_container_width=True)
-        firma_upload = st.file_uploader("Cargar firma digital", type=["png", "jpg", "jpeg", "webp"], key="upload_firma_usuario")
-        if st.button("Guardar firma", key="btn_guardar_firma_usuario"):
-            ok, msg = guardar_imagen_usuario_app(usuario_actual, firma_upload, "firma")
-            st.success(msg) if ok else st.error(msg)
-        sello_upload = st.file_uploader("Cargar sello digital", type=["png", "jpg", "jpeg", "webp"], key="upload_sello_usuario")
-        if st.button("Guardar sello", key="btn_guardar_sello_usuario"):
-            ok, msg = guardar_imagen_usuario_app(usuario_actual, sello_upload, "sello")
-            st.success(msg) if ok else st.error(msg)
-        col_del1, col_del2 = st.columns(2)
-        with col_del1:
-            if st.button("Quitar firma", key="btn_quitar_firma_usuario"):
-                ok, msg = eliminar_imagen_usuario_app(usuario_actual, "firma")
-                st.success(msg) if ok else st.error(msg)
-        with col_del2:
-            if st.button("Quitar sello", key="btn_quitar_sello_usuario"):
-                ok, msg = eliminar_imagen_usuario_app(usuario_actual, "sello")
-                st.success(msg) if ok else st.error(msg)
-    if st.button("Cerrar sesión"):
-        st.session_state.pop("usuario_actual", None)
-        st.rerun()
-    st.divider()
-    st.header("Carga de estudios")
-    archivo1 = st.file_uploader("Subir primer archivo CGI", type=["csv", "xlsx", "xls", "pdf"], key="archivo1")
-    archivo2 = st.file_uploader("Subir segundo archivo CGI opcional", type=["csv", "xlsx", "xls", "pdf"], key="archivo2")
-    guardar_pdfs_originales_en_sesion(archivo1, archivo2)
-    st.info("Para PDF instalar: pdfplumber y pypdf. Para gráficos: matplotlib. Para Excel: openpyxl.")
+    st.header("1) Importar estudio")
+    pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
+    wave_file = st.file_uploader("Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+    st.info("Modo datos reales: si no se carga CSV/TXT, la app digitaliza automáticamente la curva desde la imagen del PDF. No se aceptan curvas sintéticas ni genéricas.")
 
-    st.divider()
-    st.header(TITULO_MODULO_NO_EMBARAZADA)
-    paciente_embarazada = False
-    hdp_embarazo = False
-    edad_gestacional = ""
-    crecimiento_fetal = "No informado"
-    imc_embarazo = ""
-    doppler_uterino = "No informado"
-    with st.expander("Activar módulo clínico especializado", expanded=False):
-        paciente_embarazada = st.checkbox("Caso gestante", value=False)
-        if paciente_embarazada:
-            hdp_embarazo = st.checkbox("Trastorno hipertensivo del embarazo / sospecha de preeclampsia", value=False)
-            edad_gestacional = st.text_input("Edad gestacional", value="", help="Puede ingresar 30, S30, S 30, SG30, EG30 o 30 semanas.")
-            crecimiento_fetal = st.selectbox(
-                "Crecimiento fetal",
-                ["No informado", "AGA / adecuado para edad gestacional", "SGA / RCIU / FGR / IUGR", "Grande para edad gestacional"],
-                index=0,
-            )
-            imc_embarazo = st.text_input("IMC materno (opcional)", value="")
-            doppler_uterino = st.selectbox(
-                "Doppler uterino",
-                ["No informado", "Normal", "Índice de pulsatilidad aumentado", "Notching / alterado"],
-                index=0,
-            )
-
-if archivo1 is None:
-    st.warning("Subir al menos un archivo para generar el informe integrado.")
-    st.stop()
-
-try:
-    df1 = leer_archivo(archivo1)
-    df2 = leer_archivo(archivo2) if archivo2 is not None else None
-    df_final = integrar_datos(df1, df2)
-except Exception as e:
-    st.error(f"No se pudo leer o integrar el archivo: {e}")
-    st.stop()
-
-if df_final.empty:
-    st.error("No se obtuvieron datos válidos del archivo.")
-    st.stop()
-
-st.subheader("Datos integrados estructurados")
-st.dataframe(df_final, use_container_width=True)
-
-# =========================================================
-# CONTROL VISUAL DE CAMBIOS ORTOSTÁTICOS CORREGIDO
-# =========================================================
-st.subheader("Control de cambios ortostáticos")
-try:
-    delta_orto = calcular_delta_ortostatico(df_final)
-    st.write(delta_orto.get("detalle", "No se pudieron calcular deltas ortostáticos."))
-
-    st.dataframe(
-        pd.DataFrame([
-            {
-                "Posición": "Basal / acostado",
-                "Método": delta_orto.get("basal", {}).get("metodo"),
-                "IC": delta_orto.get("basal", {}).get("ic"),
-                "IRV/RVS": delta_orto.get("basal", {}).get("irv"),
-                "FC": delta_orto.get("basal", {}).get("fc"),
-                "PAS": delta_orto.get("basal", {}).get("pas"),
-                "PAD": delta_orto.get("basal", {}).get("pad"),
-            },
-            {
-                "Posición": "De pie",
-                "Método": delta_orto.get("de_pie", {}).get("metodo"),
-                "IC": delta_orto.get("de_pie", {}).get("ic"),
-                "IRV/RVS": delta_orto.get("de_pie", {}).get("irv"),
-                "FC": delta_orto.get("de_pie", {}).get("fc"),
-                "PAS": delta_orto.get("de_pie", {}).get("pas"),
-                "PAD": delta_orto.get("de_pie", {}).get("pad"),
-            },
-            {
-                "Posición": "Delta de pie - basal",
-                "Método": "",
-                "IC": delta_orto.get("delta_ic"),
-                "IRV/RVS": delta_orto.get("delta_irv"),
-                "FC": delta_orto.get("delta_fc"),
-                "PAS": delta_orto.get("delta_pas"),
-                "PAD": delta_orto.get("delta_pad"),
-            },
-        ]),
-        use_container_width=True,
-    )
-except Exception as e:
-    st.warning(f"No se pudo mostrar el control ortostático: {e}")
-
-with st.expander("📘 Glosario de métricas hemodinámicas", expanded=False):
-    st.text(glosario_metricas_cgi_texto())
-
-calidad_integracion = resumen_calidad_integracion(df_final)
-st.subheader("Control de integración de PDFs - solo CINTA")
-st.caption("Esta tabla muestra únicamente métricas obtenidas con CINTA basal/acostada. SPOT y DE PIE no se mezclan aquí; DE PIE queda reservado para ortostatismo.")
-st.dataframe(calidad_integracion["tabla"], use_container_width=True)
-if calidad_integracion.get("falta_cinta"):
-    st.warning("No se detectó ningún registro CINTA basal/acostado para el control de integración. Revisar los PDFs importados.")
-elif calidad_integracion["faltantes"]:
-    st.warning("Variables críticas faltantes o no reconocidas: " + ", ".join(calidad_integracion["faltantes"]))
+base = {}
+screenshot = None
+pdf_bytes = None
+curve_debug_png = None
+curve_source = ""
+curve_meta = {}
+if pdf_file:
+    pdf_bytes = pdf_file.read()
+    text = extract_pdf_text(pdf_bytes)
+    base = parse_model_pac_from_pdf(pdf_bytes, text)
+    screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
 else:
-    st.success("Integración CINTA completa: no se detectaron faltantes críticos en las variables principales.")
+    base = parse_model_pac("")
 
-validacion_hemo = calidad_integracion.get("validacion") or validar_hemodinamica_inteligente(df_final)
-st.subheader("Validación hemodinámica inteligente")
-estado_val = validacion_hemo.get("estado_global", "No disponible")
-if estado_val == "CONFIABLE":
-    st.success(estado_val + ": " + validacion_hemo.get("conclusion", ""))
-elif estado_val == "MODERADAMENTE CONFIABLE":
-    st.warning(estado_val + ": " + validacion_hemo.get("conclusion", ""))
-else:
-    st.error(estado_val + ": " + validacion_hemo.get("conclusion", ""))
-st.dataframe(validacion_hemo.get("tabla", pd.DataFrame()), use_container_width=True)
-if validacion_hemo.get("alertas"):
-    with st.expander("Alertas y coherencias detectadas"):
-        for alerta in validacion_hemo.get("alertas", []):
-            st.write("- " + alerta)
+st.subheader("Datos extraídos / edición manual")
+cols = st.columns(4)
+fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
+row = {}
+for i, f in enumerate(fields):
+    with cols[i%4]:
+        val = base.get(f, "")
+        if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
+            row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
+        else:
+            row[f] = st.number_input(f, value=0.0 if pd.isna(val) else float(val), step=1.0, format="%.2f")
 
-_tmp = extraer_resumen_integrado(df_final)
-claves_faltantes = []
-for etiqueta, clave in [("IC", "ic"), ("IRV/RVS", "irv"), ("FC", "fc"), ("CFT", "cft")]:
-    if limpiar_numero(_tmp.get(clave)) is None:
-        claves_faltantes.append(etiqueta)
-if claves_faltantes:
-    st.warning(
-        "No se pudieron reconocer automáticamente estas variables: "
-        + ", ".join(claves_faltantes)
-        + ". Revisar el PDF fuente o cargar Excel/CSV si el formato del PDF es poco estructurado."
-    )
-
-r = extraer_resumen_integrado(df_final)
-paciente_detectado = normalizar_nombre_paciente(r.get("paciente")) or ""
-if es_paciente_pdf_invalido(paciente_detectado):
-    paciente_detectado = ""
-paciente_manual = st.text_input("Apellido y nombre del paciente", value=paciente_detectado, help="Ingrese manualmente APELLIDO Y NOMBRE. Este dato figurará en el PDF y en el nombre del archivo. No se usa HC ni datos técnicos del ECG.")
-if normalizar_nombre_paciente(paciente_manual):
-    df_final["Paciente"] = normalizar_nombre_paciente(paciente_manual)
-    r = extraer_resumen_integrado(df_final)
-elif str(paciente_manual).strip():
-    st.warning("El campo Apellido y nombre contiene un dato técnico o inválido. Ingrese el apellido y nombre real del paciente.")
-
-obra_social_detectada = normalizar_obra_social(r.get("obra_social")) or ""
-obra_social_manual = st.text_input("Obra social", value=obra_social_detectada, help="Ingrese la obra social/prepaga real. No se aceptan líneas técnicas como ECG, calibración, mm/seg u ohm.")
-if normalizar_obra_social(obra_social_manual):
-    df_final["Obra_Social"] = normalizar_obra_social(obra_social_manual)
-    r = extraer_resumen_integrado(df_final)
-elif str(obra_social_manual).strip():
-    st.warning("El campo Obra social contiene un dato técnico o inválido. Ingrese la cobertura médica real o deje el campo vacío.")
-st.subheader(TITULO_MODULO_NO_EMBARAZADA)
-
-# Detección automática desde diagnóstico/texto del PDF.
-# Ejemplo: "HTA EMB S20" = embarazada + probable HTA + semana 20.
-embarazo_detectado = detectar_contexto_embarazo_desde_texto(texto_total_dataframe(df_final))
-if embarazo_detectado.get("embarazada") and not paciente_embarazada:
-    st.success(
-        "Módulo embarazo activado automáticamente por texto del PDF: "
-        + ("HTA/HDP detectada. " if embarazo_detectado.get("hdp") else "")
-        + (f"Semana gestacional detectada: {embarazo_detectado.get('edad_gestacional')}." if embarazo_detectado.get("edad_gestacional") else "")
-    )
-
-edad_gestacional_manual = extraer_edad_gestacional_desde_texto(edad_gestacional) if str(edad_gestacional).strip() else None
-edad_gestacional_final = edad_gestacional_manual if edad_gestacional_manual is not None else embarazo_detectado.get("edad_gestacional")
-crecimiento_fetal_final = crecimiento_fetal
-if crecimiento_fetal == "No informado" and embarazo_detectado.get("crecimiento_fetal") != "No informado":
-    crecimiento_fetal_final = embarazo_detectado.get("crecimiento_fetal")
-
-doppler_uterino_final = doppler_uterino
-if doppler_uterino == "No informado" and embarazo_detectado.get("doppler_uterino") != "No informado":
-    doppler_uterino_final = embarazo_detectado.get("doppler_uterino")
-
-contexto_embarazo = construir_contexto_embarazo(
-    embarazada=bool(paciente_embarazada or embarazo_detectado.get("embarazada")),
-    edad_gestacional=edad_gestacional_final,
-    hdp=bool(hdp_embarazo or embarazo_detectado.get("hdp")),
-    crecimiento_fetal=crecimiento_fetal_final,
-    imc=imc_embarazo,
-    doppler_uterino=doppler_uterino_final,
-    diagnostico_textual=embarazo_detectado.get("diagnostico_textual"),
-)
-
-# Panel principal: usar SIEMPRE valores ACOSTADO/CINTA como referencia diagnóstica.
-# El registro DE PIE se reserva para la respuesta ortostática y no debe reemplazar estos valores.
-r_acostado_cinta_panel, r_depie_panel = obtener_resumenes_ortostaticos(df_final)
-r_panel = dict(r)
-for _k in ["ic", "irv", "fc", "pas", "pad", "ca", "cft", "cftnr"]:
-    if limpiar_numero(r_acostado_cinta_panel.get(_k)) is not None:
-        r_panel[_k] = r_acostado_cinta_panel.get(_k)
-r_panel["posicion_referencia"] = r_acostado_cinta_panel.get("posicion") or r.get("posicion_referencia")
-r_panel["metodo_referencia"] = r_acostado_cinta_panel.get("metodo") or r.get("metodo_referencia")
-
-if not contexto_embarazo.get("embarazada"):
-    st.caption("Valores mostrados en las tarjetas: ACOSTADO/CINTA, patrón basal de referencia diagnóstica. El registro DE PIE se informa por separado como respuesta ortostática.")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(f"<div class='metric-card'><b>IC - ACOSTADO/CINTA</b><br>{fmt(r_panel.get('ic'))}<br><span class='muted'>{clasificar_ic(r_panel.get('ic'))}</span></div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"<div class='metric-card'><b>IRV / RVS - ACOSTADO/CINTA</b><br>{fmt(r_panel.get('irv'),0)}<br><span class='muted'>{clasificar_irv(r_panel.get('irv'))}</span></div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"<div class='metric-card'><b>CFT / CFTnr - ACOSTADO/CINTA</b><br>{fmt(r_panel.get('cft'))} / {fmt(r_panel.get('cftnr'))}<br><span class='muted'>{diagnostico_volemia(r_panel.get('cft'), r_panel.get('cftnr')).split('.')[0]}</span></div>", unsafe_allow_html=True)
-    with c4:
-        st.markdown(f"<div class='metric-card'><b>CA - ACOSTADO/CINTA</b><br>{fmt(r_panel.get('ca'))}<br><span class='muted'>Complacencia arterial basal</span></div>", unsafe_allow_html=True)
-
-
-_es_embarazo_ui = bool(contexto_embarazo.get("embarazada"))
-
-if not _es_embarazo_ui:
-    # ── MÓDULO CLÍNICO ────────────────────────────────────────────────────────
-    graf_fenotipo_ui = crear_grafico_fenotipado_dinamico_bytes(r_panel, df_final)
-    if graf_fenotipo_ui is not None:
-        st.subheader("Fenotipado clínico automatizado")
-        st.image(
-            graf_fenotipo_ui,
-            caption="Gráfico dinámico IC vs IRV/RVS: ubicación real del paciente y desplazamiento ortostático basal → de pie.",
-            use_container_width=True,
-        )
-    st.subheader("Interpretación automática")
-    st.markdown(f"<div class='card'><b>Perfil hemodinámico:</b><br>{diagnostico_perfil_hemodinamico(r_panel.get('ic'), r_panel.get('irv'))}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Estado volémico:</b><br>{diagnostico_volemia(r_panel.get('cft'), r_panel.get('cftnr'))}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Contractilidad:</b><br>{diagnostico_contractilidad(r.get('iv'), r.get('iac'), r.get('cts'))}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Acoplamiento ventrículo-arterial:</b><br>{diagnostico_acoplamiento(r.get('ea'), r.get('ees'), r.get('ava'))}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Análisis ortostático automático:</b><br>{interpretar_ortostatismo(df_final)}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Informe de dominios integrados resumido y didáctico:</b><br>{perfil_hemodinamico_integrado(r_panel, df_final)}</div>", unsafe_allow_html=True)
-    st.subheader("Aceleradores circulares por dominio y métricas")
-    st.caption("Cada acelerador está semaforizado: verde = normal/favorable, amarillo = precaución/intermedio, rojo = alterado.")
-    for dominio, graf in crear_graficos_dominios_individuales_bytes(r_panel).items():
-        st.image(graf, caption=f"{dominio}: gauges semicirculares del dominio", use_container_width=True)
-    st.subheader("Propuesta terapéutica ICG individualizada")
-    st.caption("Flujograma basado en Ferrario et al. — Ther Adv Cardiovasc Dis 2010. Las ramas activas del paciente aparecen resaltadas en azul; la terapia sugerida en ámbar.")
-    _graf_ter = crear_grafico_propuesta_terapeutica_bytes(r_panel, df_final)
-    if _graf_ter is not None:
-        st.image(_graf_ter, caption="Algoritmo ICG: propuesta terapéutica según fenotipo hemodinámico. No reemplaza criterio clínico ni guías vigentes.", use_container_width=True)
-
-else:
-    # ── MÓDULO EMBARAZO ───────────────────────────────────────────────────────
-    st.subheader("Módulo embarazo — hemodinamia materna")
-    st.markdown(f"<div class='card'><b>Hemodinamia materna:</b><br>{interpretar_hemodinamica_embarazo(r_panel, contexto_embarazo).replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
-    graf_materno_ui = crear_grafico_hemodinamia_materna_gestacional_bytes(r_panel, contexto_embarazo)
-    if graf_materno_ui is not None:
-        st.image(graf_materno_ui, caption="Gráfico diagnóstico de hemodinamia materna: IC vs RVS con referencia gestacional (ACOSTADO/CINTA)", use_container_width=True)
-    graf_eg_ui = crear_grafico_hemodinamia_edad_gestacional_diagnostico_bytes(r_panel, contexto_embarazo)
-    if graf_eg_ui is not None:
-        st.image(graf_eg_ui, caption="Hemodinamia materna vs edad gestacional: IC y RVS sobre curvas de referencia fisiológica gestacional, con conclusiones clínicas remarcadas", use_container_width=True)
-
-
-st.subheader("Informe médico integrado")
-informe = generar_informe_texto(df_final, contexto_embarazo)
-st.text_area("Vista previa", informe, height=430)
-
-# Guardado histórico acumulado por usuario.
-fila_historial = construir_fila_historial_app(usuario_actual, df_final, contexto_embarazo, informe)
-if st.button("💾 Guardar / actualizar informe en historial del usuario", key="guardar_historial_usuario"):
-    if guardar_historial_app(fila_historial):
-        st.success("Informe guardado/actualizado en el historial acumulado del usuario.")
-    else:
-        st.error("No se pudo guardar el historial. Verifique permisos de escritura de la carpeta de la app.")
-
-hist_total = leer_historial_app()
-ver_todos = False
-if usuario_actual.get("rol") == "admin":
-    ver_todos = st.checkbox("Admin: exportar historial de todos los usuarios", value=False)
-if ver_todos:
-    hist_usuario = filtrar_historial_por_usuario(hist_total, usuario_actual, todos=True)
-else:
-    hist_usuario = leer_historial_usuario_app(usuario_actual)
-with st.expander("📚 Historial acumulado de informes por usuario", expanded=False):
-    if hist_usuario.empty:
-        st.info("Todavía no hay informes guardados para este usuario.")
-    else:
-        st.dataframe(hist_usuario.sort_values("fecha_generacion", ascending=False), use_container_width=True)
-    hist_bytes = excel_historial_bytes_app(hist_usuario, df_actual=df_final)
-    if hist_bytes:
-        etiqueta_hist = "todos_los_usuarios" if ver_todos else str(usuario_actual.get("usuario", "usuario"))
-        texto_btn = "📊 Descargar Excel de TODOS los pacientes / TODOS los usuarios" if ver_todos else "📊 Descargar Excel de mis pacientes"
-        st.download_button(
-            texto_btn,
-            data=hist_bytes,
-            file_name=f"Historial_CGI_{etiqueta_hist}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_historial_filtrado_usuario",
-        )
-    if usuario_actual.get("rol") == "admin" and not hist_total.empty:
-        hist_admin_bytes = excel_historial_bytes_app(hist_total, df_actual=None)
-        if hist_admin_bytes:
-            st.download_button(
-                "👑 Admin: descargar Excel global completo",
-                data=hist_admin_bytes,
-                file_name="Historial_CGI_ADMIN_TODOS_LOS_USUARIOS.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_historial_global_admin",
-            )
-
-def nombre_archivo_pdf_paciente(r: Dict[str, Any], prefijo: str = "") -> str:
-    import re
-    paciente = _paper_safe_text(normalizar_nombre_paciente(r.get("paciente")) or "Paciente_SD")
-    fecha = _paper_safe_text(r.get("fecha") or "Fecha_SD")
-    obra = _paper_safe_text(r.get("obra_social") or "ObraSocial_SD")
-    base = f"{paciente} - CGI - {fecha} - {obra}"
-    base = re.sub(r'[\\/:*?"<>|]+', "-", base)
-    base = re.sub(r"\s+", " ", base).strip(" ._-")
-    if prefijo:
-        base = f"{base} - {prefijo}"
-    return base + ".pdf"
-
-nombre = re.sub(r'[\\/:*?"<>|\s]+', "_", str(r.get("paciente") or "paciente").strip())
-
-# =========================================================
-# BOTONES EXPLÍCITOS DE GENERACIÓN DE PDF
-# =========================================================
-# Se separa la acción de generar de la acción de descargar para que el usuario
-# vea claramente ambos informes: completo integrado y resumido de una hoja.
-
-st.subheader("Generación de informes PDF")
-col_pdf1, col_pdf2 = st.columns(2)
-
-with col_pdf1:
-    if st.button("🧾 Generar PDF informe integrado", key="btn_generar_pdf_integrado"):
-        try:
-            st.session_state["pdf_integrado_bytes"] = generar_pdf_integrado(df_final, contexto_embarazo)
-            st.session_state["pdf_integrado_nombre"] = nombre_archivo_pdf_paciente(r, "Informe CGI integrado")
-            st.success("PDF integrado generado correctamente.")
-        except Exception as e:
-            st.session_state.pop("pdf_integrado_bytes", None)
-            st.error(f"No se pudo generar el PDF integrado: {e}")
-
-    if st.session_state.get("pdf_integrado_bytes"):
-        st.download_button(
-            "📄 Descargar PDF informe integrado",
-            data=st.session_state["pdf_integrado_bytes"],
-            file_name=st.session_state.get("pdf_integrado_nombre", nombre_archivo_pdf_paciente(r, "Informe CGI integrado")),
-            mime="application/pdf",
-            key="download_pdf_integrado",
-        )
-
-with col_pdf2:
-    if st.button("📄 Generar PDF resumido de una hoja", key="btn_generar_pdf_resumido"):
-        try:
-            st.session_state["pdf_resumido_bytes"] = generar_pdf_resumido_una_hoja(df_final, contexto_embarazo)
-            st.session_state["pdf_resumido_nombre"] = nombre_archivo_pdf_paciente(r, "Informe CGI resumido 1 hoja")
-            st.success("PDF resumido de una hoja generado correctamente.")
-        except Exception as e:
-            st.session_state.pop("pdf_resumido_bytes", None)
-            st.error(f"No se pudo generar el PDF resumido: {e}")
-
-    if st.session_state.get("pdf_resumido_bytes"):
-        st.download_button(
-            "📄 Descargar PDF resumido - 1 hoja",
-            data=st.session_state["pdf_resumido_bytes"],
-            file_name=st.session_state.get("pdf_resumido_nombre", nombre_archivo_pdf_paciente(r, "Informe CGI resumido 1 hoja")),
-            mime="application/pdf",
-            key="download_pdf_resumido",
-        )
-
-excel_bytes = excel_bytes_paciente_integrado(df_final, contexto_embarazo)
-if excel_bytes:
-    st.download_button(
-        "📊 Descargar fila integrada del paciente (Excel)",
-        data=excel_bytes,
-        file_name=f"Paciente_CGI_integrado_{nombre}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Una sola fila por paciente con los datos integrados de los PDFs (hoja 'Paciente_integrado'). El detalle crudo por archivo queda en la hoja 'Datos_crudos'.",
-    )
-
-
-if contexto_embarazo.get("embarazada"):
+wave_df = None
+curve_error = None
+if wave_file:
     try:
-        dataset_paper = dataset_paper_clinico_row(df_final, contexto_embarazo)
-        csv_paper = dataset_paper.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "📊 Descargar fila dataset paper clínico CSV",
-            data=csv_paper,
-            file_name=f"Dataset_paper_clinico_{nombre}.csv",
-            mime="text/csv",
-        )
-        st.download_button(
-            "🧾 Descargar metodología paper clínico TXT",
-            data=generar_metodologia_paper_texto().encode("utf-8"),
-            file_name="Metodologia_score_PE_HDP.txt",
-            mime="text/plain",
-        )
+        wave_df = read_curve_file_robust(wave_file, row)
+        curve_source = "CSV/TXT real cargado por el usuario"
+        curve_meta = {"metodo": curve_source, "puntos": int(len(wave_df))}
+        st.success("Curva real importada y validada correctamente desde CSV/TXT. El análisis de ondas y armónicos usará únicamente estos puntos del estudio.")
     except Exception as e:
-        st.warning(f"No se pudo generar exportación paper clínico: {e}")
+        curve_error = str(e)
+        st.error("El archivo CSV/TXT importado no contiene una curva real válida. Se intentará digitalizar la curva desde el PDF, si está cargado.")
+        st.caption(f"Detalle técnico CSV/TXT: {curve_error}")
 
-with st.expander("requirements.txt recomendado"):
-    st.code(
-        """
-streamlit
-pandas
-openpyxl
-reportlab
-matplotlib
-pdfplumber
-pypdf
-fpdf2
-        """.strip()
-    )
+if wave_df is None and pdf_bytes:
+    try:
+        with st.spinner("Digitalizando curva real desde la segunda hoja, sector superior izquierdo: panel de curva del PDF..."):
+            wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
+        curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / sector {curve_meta.get('sector', 'izquierdo-superior')} / trazo {curve_meta.get('color_detectado')}"
+        st.success("Curva real digitalizada desde la segunda hoja, sector superior izquierdo: panel de curva del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
+        st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
+        if curve_debug_png:
+            st.image(curve_debug_png, caption="Control visual: segunda hoja, sector superior izquierdo: panel de curva usado para digitalizar la curva", use_container_width=True)
+    except Exception as e:
+        curve_error = str(e)
+        st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
+        st.caption(f"Detalle técnico digitalización PDF: {curve_error}")
+elif wave_df is None:
+    st.error("Para generar informe, separación de ondas y armónicos se debe cargar un PDF con curva visible o un CSV/TXT real del paciente. La app queda en modo estricto: no usa curva sintética ni genérica.")
 
+dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
-def construir_bloque_referencias_pdf() -> str:
-    refs = "\\n".join([f"{i+1}. {r}" for i, r in enumerate(REFERENCIAS_BIBLIOGRAFICAS)])
-    soporte = globals().get("SOPORTE_BIBLIOGRAFICO_APP", "").strip()
-    return (
-        "\\nSOPORTE BIBLIOGRÁFICO DE LA APP\\n"
-        "--------------------------------------------------\\n"
-        f"{soporte}\\n\\n"
-        "REFERENCIAS BIBLIOGRÁFICAS UTILIZADAS\\n"
-        "--------------------------------------------------\\n"
-        f"{refs}\\n"
-    )
+st.subheader("Vista clínica previa")
+summary_cols = st.columns(5)
+summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
+summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
+summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
+summary_cols[3].metric("RVSE equipo", f"{to_float(row.get('rvse')):.0f}%" if not np.isnan(to_float(row.get('rvse'))) else "No disponible")
+summary_cols[4].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
 
+st.markdown("### Análisis de presión central y métricas")
+st.write(dx)
+st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
 
+if wave_df is not None:
+    hdf = harmonic_analysis(wave_df)
+    sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+    conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
 
-# =========================================================
-# V_FINAL_LENGUAJE_DIDACTICO
-# Normalización final del lenguaje de informes: sin términos no deseados,
-# con patrón basal ACOSTADO/CINTA y lectura resumida por dominios.
-# =========================================================
+    summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+    summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
+    st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
+    st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
-try:
-    _generar_informe_texto_pre_lenguaje_didactico = generar_informe_texto
-    def generar_informe_texto(df: pd.DataFrame, contexto_embarazo: Optional[Dict[str, Any]] = None) -> str:
-        return limpiar_patrones_prohibidos(_generar_informe_texto_pre_lenguaje_didactico(df, contexto_embarazo))
-except Exception:
-    pass
+    st.markdown("### Conclusiones clínicas continuas")
+    for title, body in conclusion_blocks_preview:
+        st.markdown(f"**{title}**")
+        st.write(body)
 
-try:
-    _perfil_hemodinamico_integrado_pre_lenguaje_didactico = perfil_hemodinamico_integrado
-    def perfil_hemodinamico_integrado(r: Dict[str, Any], df: Optional[pd.DataFrame] = None) -> str:
-        return limpiar_patrones_prohibidos(_perfil_hemodinamico_integrado_pre_lenguaje_didactico(r, df))
-except Exception:
-    pass
+    st.markdown("---")
+    st.markdown("### Gráficos")
+    st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
+        st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
+        st.image(plot_rvse_area(sep_df_preview, sep_metrics_preview), caption="RVSE / SEVR por áreas presión-tiempo", use_container_width=True)
+    with g2:
+        st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
+        st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
+
+    st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+
+    final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
+    st.markdown("---")
+    st.markdown("### Fenotipo final de presión central")
+    st.success(final_phenotype_preview)
+    st.write(final_phenotype_text_preview)
+    st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+else:
+    st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
+
+st.subheader("Historial y exportación")
+if st.button("Guardar en historial"):
+    hist = save_history(row)
+    st.success(f"Registro guardado. Total: {len(hist)} estudios.")
+
+if HISTORIAL_FILE.exists():
+    hist = pd.read_excel(HISTORIAL_FILE)
+    st.dataframe(hist, use_container_width=True)
+    st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+if wave_df is None:
+    st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
+else:
+    pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
+    pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
+    if not pdf_download_bytes:
+        st.error("No se pudo generar el PDF médico integrado.")
+    else:
+        st.download_button(
+            "Generar y descargar PDF médico integrado",
+            data=pdf_download_bytes,
+            file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+            mime="application/pdf"
+        )
