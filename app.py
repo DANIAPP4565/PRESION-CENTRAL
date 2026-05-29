@@ -81,7 +81,8 @@ BIBLIOGRAFIA = [
     "Herbert A, Cruickshank JK, Laurent S, Boutouyrie P, et al. Establishing reference values for central blood pressure and its amplification. Eur Heart J. 2014;35:3122-3133.",
     "Westerhof BE, Guelen I, Westerhof N, Karemaker JM, Avolio A. Quantification of wave reflection in the human aorta from pressure alone. Hypertension. 2006;48:595-601.",
     "Norton GR, An DW, Aparicio LS, et al. Mortality and cardiovascular end points in relation to the aortic pulse wave components. Hypertension. 2024;81:1065-1075.",
-    "Huang QF, An DW, Aparicio LS, et al. An outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024."
+    "Huang QF, An DW, Aparicio LS, et al. An outcome-driven threshold for pulse pressure amplification. Hypertension Research. 2024.",
+    "Azizzadeh M, Karimi A, Breyer-Kohansal R, et al. Reference equations for pulse wave velocity, augmentation index, amplitude of forward and backward wave in a European general adult population. Scientific Reports. 2024;14:23151."
 ]
 
 CENTRAL_SBP_TABLE = {
@@ -137,6 +138,254 @@ def format_optional(v, dec=1):
         return f"{f:.{dec}f}"
     except Exception:
         return "no disponible"
+
+
+# =========================================================
+# Base de conocimiento LEAD 2024 / Scientific Reports
+# Ecuaciones de referencia LMS para cfPWV, AIx, Pf y Pb
+# Azizzadeh et al. Sci Rep 2024;14:23151.
+# =========================================================
+LEAD_LMS_PULSATIL = {
+    "cf_pwv": {
+        "female": {
+            "M": lambda age: math.exp(1.705 + 0.0073 * age),
+            "S": lambda age: math.exp(-2.140 + 0.0074 * age),
+            "L": -0.7200,
+            "offset": 0.0,
+            "unidad": "m/s",
+            "nombre": "cfPWV",
+            "descripcion": "Velocidad de onda de pulso carotídeo-femoral",
+        },
+        "male": {
+            "M": lambda age: math.exp(1.769 + 0.0070 * age),
+            "S": lambda age: math.exp(-2.046 + 0.0058 * age),
+            "L": -0.6307,
+            "offset": 0.0,
+            "unidad": "m/s",
+            "nombre": "cfPWV",
+            "descripcion": "Velocidad de onda de pulso carotídeo-femoral",
+        },
+    },
+    "aix": {
+        "female": {
+            "M": lambda age: math.exp(3.976 + 0.2266 * math.log(age)),
+            "S": lambda age: math.exp(-1.273 - 0.3239 * math.log(age)),
+            "L": 1.6943,
+            "offset": 100.0,
+            "unidad": "%",
+            "nombre": "AIx / IAu",
+            "descripcion": "Índice de aumentación central",
+        },
+        "male": {
+            "M": lambda age: math.exp(3.815 + 0.2485 * math.log(age)),
+            "S": lambda age: math.exp(-1.025 - 0.3617 * math.log(age)),
+            "L": 1.0469,
+            "offset": 100.0,
+            "unidad": "%",
+            "nombre": "AIx / IAu",
+            "descripcion": "Índice de aumentación central",
+        },
+    },
+    "pf": {
+        "female": {
+            "M": lambda age: math.exp(2.980 + 0.00548 * age),
+            "S": lambda age: math.exp(-1.576 + 0.0035 * age),
+            "L": 0.3488,
+            "offset": 0.0,
+            "unidad": "mmHg",
+            "nombre": "Pf",
+            "descripcion": "Amplitud de onda anterógrada",
+        },
+        "male": {
+            "M": lambda age: math.exp(3.133 + 0.0030 * age),
+            "S": lambda age: math.exp(-1.382 - 0.0003 * age),
+            "L": 0.1310,
+            "offset": 0.0,
+            "unidad": "mmHg",
+            "nombre": "Pf",
+            "descripcion": "Amplitud de onda anterógrada",
+        },
+    },
+    "pb": {
+        "female": {
+            "M": lambda age: math.exp(1.998 + 0.0157 * age),
+            "S": lambda age: math.exp(-1.371 + 0.0016 * age),
+            "L": 0.3678,
+            "offset": 0.0,
+            "unidad": "mmHg",
+            "nombre": "Pb",
+            "descripcion": "Amplitud de onda retrógrada",
+        },
+        "male": {
+            "M": lambda age: math.exp(2.078 + 0.01258 * age),
+            "S": lambda age: math.exp(-1.200 - 0.0011 * age),
+            "L": 0.1720,
+            "offset": 0.0,
+            "unidad": "mmHg",
+            "nombre": "Pb",
+            "descripcion": "Amplitud de onda retrógrada",
+        },
+    },
+}
+
+
+def normalizar_sexo_lms(valor):
+    """Normaliza sexo a male/female para las ecuaciones LMS."""
+    t = safe_text(valor).strip().lower()
+    if not t:
+        return None
+    if t in ["f", "fem", "femenino", "mujer", "female", "woman"]:
+        return "female"
+    if t in ["m", "masc", "masculino", "varon", "varón", "male", "man"]:
+        return "male"
+    if re.search(r"\bfem|mujer|female|woman\b", t):
+        return "female"
+    if re.search(r"\bmasc|var[oó]n|male|man\b", t):
+        return "male"
+    return None
+
+
+def percentil_desde_z(z):
+    """Convierte z-score a percentil normal estándar."""
+    try:
+        return 100.0 * (0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0))))
+    except Exception:
+        return np.nan
+
+
+def interpretar_z_lms(z):
+    """Interpretación clínica operativa de z-score/percentil para mecánica pulsátil."""
+    try:
+        z = float(z)
+        if np.isnan(z):
+            return "no interpretable"
+        if z < -1.0:
+            return "por debajo de lo esperado para edad/sexo"
+        if z <= 1.0:
+            return "dentro de rango esperado para edad/sexo"
+        if z <= 2.0:
+            return "aumentado para edad/sexo"
+        return "marcadamente aumentado para edad/sexo"
+    except Exception:
+        return "no interpretable"
+
+
+def calcular_z_lms_pulsatil(metrica, valor, edad, sexo):
+    """Calcula z-score y percentil LMS para cfPWV, AIx/IAu, Pf y Pb.
+
+    Fórmula LEAD/LMS:
+    z = (((Y/M)^L)-1)/(L*S), si L != 0
+    z = ln(Y/M)/S, si L == 0
+
+    Para AIx/IAu se usa Y = AIx + 100, porque la publicación desplaza
+    AIx +100 unidades para evitar valores negativos antes de aplicar LMS.
+    """
+    key = str(metrica).lower().replace("cfpwv", "cf_pwv").replace("cf-pwv", "cf_pwv").replace("aix", "aix")
+    if key not in LEAD_LMS_PULSATIL:
+        return None
+
+    age = to_float(edad)
+    sex = normalizar_sexo_lms(sexo)
+    y_raw = to_float(valor)
+    if np.isnan(age) or age < 18 or age > 82 or sex is None or np.isnan(y_raw):
+        return None
+
+    ref = LEAD_LMS_PULSATIL[key][sex]
+    y = y_raw + float(ref.get("offset", 0.0))
+    if y <= 0:
+        return None
+
+    M = float(ref["M"](age))
+    S = float(ref["S"](age))
+    L = float(ref["L"])
+    if M <= 0 or S <= 0:
+        return None
+    if abs(L) < 1e-9:
+        z = math.log(y / M) / S
+    else:
+        z = ((y / M) ** L - 1.0) / (L * S)
+    pct = percentil_desde_z(z)
+
+    # Edad vascular equivalente: edad en la que la mediana esperada se aproxima al valor observado.
+    eq_age = np.nan
+    try:
+        ages = np.linspace(18, 82, 641)
+        med = np.array([float(ref["M"](a)) for a in ages], dtype=float)
+        idx = int(np.nanargmin(np.abs(med - y)))
+        eq_age = float(ages[idx])
+    except Exception:
+        pass
+
+    return {
+        "metrica": key,
+        "nombre": ref.get("nombre", key),
+        "descripcion": ref.get("descripcion", ""),
+        "valor": float(y_raw),
+        "valor_lms": float(y),
+        "unidad": ref.get("unidad", ""),
+        "sexo_lms": sex,
+        "edad": float(age),
+        "L": L,
+        "M": M,
+        "S": S,
+        "z": float(z),
+        "percentil": float(pct),
+        "edad_equivalente": eq_age,
+        "interpretacion": interpretar_z_lms(z),
+    }
+
+
+def calcular_panel_lms_pulsatil(row, sep_metrics=None):
+    """Calcula panel LEAD 2024 para variables disponibles en la app PAC."""
+    sep_metrics = sep_metrics or {}
+    edad = row.get("edad")
+    sexo = row.get("sexo")
+
+    valores = {
+        "cf_pwv": row.get("cf_pwv", np.nan),   # opcional/manual si el estudio lo trae
+        "aix": row.get("iau", np.nan),         # IAu de la app = AIx central
+        "pf": sep_metrics.get("pf_pico", np.nan),
+        "pb": sep_metrics.get("pb_pico", np.nan),
+    }
+    resultados = []
+    for metrica, valor in valores.items():
+        res = calcular_z_lms_pulsatil(metrica, valor, edad, sexo)
+        if res is not None:
+            resultados.append(res)
+    return resultados
+
+
+def tabla_lms_pulsatil(resultados):
+    """Tabla lista para ReportLab/Streamlit con z-score, percentil y edad vascular equivalente."""
+    rows = [["Métrica", "Valor", "Mediana esperada", "z", "Percentil", "Edad vascular eq.", "Interpretación"]]
+    for r in resultados or []:
+        rows.append([
+            r["nombre"],
+            f'{r["valor"]:.1f} {r["unidad"]}',
+            f'{r["M"] - r.get("offset", 0.0):.1f} {r["unidad"]}' if r["metrica"] == "aix" else f'{r["M"]:.1f} {r["unidad"]}',
+            f'{r["z"]:.2f}',
+            f'P{r["percentil"]:.0f}',
+            "" if np.isnan(r.get("edad_equivalente", np.nan)) else f'{r["edad_equivalente"]:.0f} años',
+            r["interpretacion"],
+        ])
+    return rows
+
+
+def resumen_lms_pulsatil(resultados):
+    """Resumen textual para integrar en conclusiones y fenotipo vascular."""
+    if not resultados:
+        return "No se pudo calcular normalización LMS LEAD 2024 porque faltan edad, sexo o métricas válidas."
+    alteradas = [r for r in resultados if r.get("z", 0) > 1.0]
+    normales = [r for r in resultados if -1.0 <= r.get("z", 0) <= 1.0]
+    partes = []
+    for r in resultados:
+        partes.append(f'{r["nombre"]}: {r["valor"]:.1f} {r["unidad"]}, z {r["z"]:.2f}, P{r["percentil"]:.0f} ({r["interpretacion"]})')
+    if alteradas:
+        pref = "Métricas pulsátiles elevadas para edad/sexo: " + ", ".join([r["nombre"] for r in alteradas]) + ". "
+    else:
+        pref = "No se identifican métricas pulsátiles por encima de z > +1 en las variables disponibles. "
+    return pref + "Detalle LMS LEAD 2024: " + "; ".join(partes) + "."
+
 
 
 
@@ -2524,18 +2773,25 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     if not altered_text:
         altered_text = "no se identifican métricas alteradas mayores con los puntos de corte operativos disponibles"
 
+    lms_results = calcular_panel_lms_pulsatil(row, sep_metrics)
+    lms_altered = [r for r in lms_results if r.get("z", 0) > 1.0]
+    lms_score = len(lms_altered)
+    lms_detail = resumen_lms_pulsatil(lms_results)
+
     table = [
         ["Dominio", "Puntaje", "Métricas alteradas / consideradas"],
         ["Presión central, aumentación y RVSE", str(pressure_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in pressure_metrics]) if pressure_metrics else "sin datos suficientes"],
         ["Separación de ondas Pf/Pb", str(wave_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in wave_metrics]) if wave_metrics else "sin datos suficientes"],
         ["Armónicos", str(harmonic_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in harmonic_metrics]) if harmonic_metrics else "sin datos suficientes"],
-        ["Puntaje integrado", str(total_score), phenotype],
+        ["Referencia edad/sexo LEAD 2024", str(lms_score), lms_detail],
+        ["Puntaje integrado", str(total_score + lms_score), phenotype],
     ]
 
     text = (
         f"Fenotipo final de presión central: {phenotype}. "
         f"Métricas que definen el fenotipo: {altered_text}. "
         f"La combinación de estas variables configura un patrón de {mechanism}. "
+        f"Normalización por edad y sexo según LEAD 2024: {lms_detail} "
         f"Resumen cuantitativo: PAS central {fmt(pas_c,0,' mmHg')}, PAD central {fmt(pad_c,0,' mmHg')}, "
         f"PP central {fmt(pp_c,0,' mmHg')}, Au {fmt(au,1,' mmHg')}, IAu {fmt(iau,1,'%')}, "
         f"PPA {fmt(ppa,2)}, amplificación PAS {fmt(amp_sbp,1,' mmHg')}, RVSE/SEVR {fmt(rvse_calc,1,'%')}, "
@@ -2551,6 +2807,9 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
     conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
     final_phenotype, final_phenotype_text, final_phenotype_table = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+    lms_results = calcular_panel_lms_pulsatil(row, sep_metrics)
+    lms_rows = tabla_lms_pulsatil(lms_results)
+    lms_summary = resumen_lms_pulsatil(lms_results)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -2660,6 +2919,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
             ["PAM", _fmt(row.get("pam_radial")), _fmt(row.get("pam_central")), "mmHg"],
             ["PP", _fmt(row.get("pp_radial")), _fmt(row.get("pp_central")), "mmHg"],
             ["FC", _fmt(row.get("fc"),0), "", "lpm"],
+            ["cfPWV", "", _fmt(row.get("cf_pwv")), "m/s"],
             ["Au", "", _fmt(row.get("au")), "mmHg"],
             ["IAu", "", _fmt(row.get("iau")), "%"],
             ["RVSE equipo", "", _fmt(row.get("rvse")), "%"],
@@ -2705,6 +2965,10 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ("TOPPADDING", (0,0), (-1,-1), 2.4),
         ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
     ])))
+
+    story.append(Spacer(1, 1.3*mm))
+    story.append(Paragraph("Normalización edad/sexo LEAD 2024 por método LMS", styles["MiniTitlePAC"]))
+    story.append(Paragraph(lms_summary, styles["ConclusionPAC"]))
 
     # Sin salto forzado: ReportLab decide el pase de página y evita blancos grandes.
     story.append(Spacer(1, 2.5*mm))
@@ -2752,6 +3016,11 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
         ("TOPPADDING", (0,0), (-1,-1), 2),
         ("BOTTOMPADDING", (0,0), (-1,-1), 2),
     ])))
+
+    story.append(Spacer(1, 1.8*mm))
+    story.append(Paragraph("Estandarización de mecánica pulsátil LEAD 2024 (LMS)", styles["H3PAC"]))
+    lms_wrapped = [[Paragraph(safe_text(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in lms_rows]
+    story.append(Table(lms_wrapped, colWidths=[24*mm, 25*mm, 31*mm, 14*mm, 18*mm, 25*mm, 51*mm], style=_table_style("#EAF2F8", 6.1)))
     story.append(Spacer(1, 1.5*mm))
     story.append(Paragraph(
         "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. Pf y Pb se muestran sobre la línea diastólica basal para comparar directamente su contribución con la presión aórtica central completa. El fenotipo final integra presión/carga pulsátil central, magnitud y temporalidad de onda retrógrada, y complejidad armónica.",
@@ -2779,6 +3048,10 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
          "pressure and amplification. Eur Heart J. 2014."),
         ("Huang QF, et al. Outcome-driven threshold for pulse pressure "
          "amplification. Hypertension Research. 2024."),
+        ("Azizzadeh M, Karimi A, Breyer-Kohansal R, et al. Reference equations "
+         "for pulse wave velocity, augmentation index, amplitude of forward "
+         "and backward wave in a European general adult population. "
+         "Scientific Reports. 2024;14:23151."),
     ]
     ref_table = [[Paragraph(f"{i}. {ref_txt}", styles["SmallPAC"])] for i, ref_txt in enumerate(refs, 1)]
     story.append(Table(ref_table, colWidths=[188*mm], style=TableStyle([
@@ -2853,7 +3126,7 @@ else:
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
+fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","cf_pwv","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
 row = {}
 for i, f in enumerate(fields):
     with cols[i%4]:
@@ -2921,6 +3194,14 @@ if wave_df is not None:
         st.markdown(f"**{title}**")
         st.write(body)
 
+    lms_results_preview = calcular_panel_lms_pulsatil(row, sep_metrics_preview)
+    st.markdown("### Referencia edad/sexo LEAD 2024 - método LMS")
+    st.write(resumen_lms_pulsatil(lms_results_preview))
+    if lms_results_preview:
+        st.dataframe(pd.DataFrame(tabla_lms_pulsatil(lms_results_preview)[1:], columns=tabla_lms_pulsatil(lms_results_preview)[0]), use_container_width=True)
+    else:
+        st.info("Para calcular z-score/percentil LMS se requieren edad, sexo y métricas válidas: cfPWV opcional, IAu/AIx, Pf y Pb.")
+
     st.markdown("---")
     st.markdown("### Gráficos")
     st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
@@ -2944,6 +3225,11 @@ if wave_df is not None:
     st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
 else:
     st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
+    lms_results_preview = calcular_panel_lms_pulsatil(row, {})
+    if lms_results_preview:
+        st.markdown("### Referencia edad/sexo LEAD 2024 - método LMS")
+        st.write(resumen_lms_pulsatil(lms_results_preview))
+        st.dataframe(pd.DataFrame(tabla_lms_pulsatil(lms_results_preview)[1:], columns=tabla_lms_pulsatil(lms_results_preview)[0]), use_container_width=True)
     st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
 
 st.subheader("Historial y exportación")
