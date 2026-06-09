@@ -3683,4 +3683,91 @@ if wave_df is None and pdf_bytes:
       wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
     curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / sector {curve_meta.get('sector', 'izquierdo-superior')} / trazo {curve_meta.get('color_detectado')}"
     st.success("Curva real digitalizada desde la segunda hoja, sector superior izquierdo: panel de curva del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
-    st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_
+    st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
+    if curve_debug_png:
+      st.image(curve_debug_png, caption="Control visual: segunda hoja, sector superior izquierdo: panel de curva usado para digitalizar la curva", use_container_width=True)
+  except Exception as e:
+    curve_error = str(e)
+    st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
+    st.caption(f"Detalle técnico digitalización PDF: {curve_error}")
+elif wave_df is None:
+  st.error("Para generar informe, separación de ondas y armónicos se debe cargar un PDF con curva visible o un CSV/TXT real del paciente. La app queda en modo estricto: no usa curva sintética ni genérica.")
+
+dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+
+st.subheader("Vista clínica previa")
+summary_cols = st.columns(5)
+summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
+summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
+summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
+summary_cols[3].metric("RVSE equipo", f"{to_float(row.get('rvse')):.0f}%" if not np.isnan(to_float(row.get('rvse'))) else "No disponible")
+summary_cols[4].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
+
+st.markdown("### Análisis de presión central y métricas")
+st.write(dx)
+st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
+
+if wave_df is not None:
+  hdf = harmonic_analysis(wave_df)
+  sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
+  conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
+
+  summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
+  summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
+  st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
+  st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
+
+  st.markdown("### Conclusiones clínicas resumidas y didácticas")
+  for title, body in conclusion_blocks_preview:
+    st.markdown(f"**{title}**")
+    st.write(body)
+
+  st.markdown("---")
+  st.markdown("### Gráficos")
+  st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+
+  g1, g2 = st.columns(2)
+  with g1:
+    st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
+    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
+    st.image(plot_rvse_area(sep_df_preview, sep_metrics_preview), caption="RVSE / SEVR por áreas presión-tiempo", use_container_width=True)
+  with g2:
+    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
+    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
+
+  st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
+
+  final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
+  st.markdown("---")
+  st.markdown("### Fenotipo final de presión central")
+  st.success(final_phenotype_preview)
+  st.write(final_phenotype_text_preview)
+  st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
+else:
+  st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
+  st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
+
+st.subheader("Historial y exportación")
+if st.button("Guardar en historial"):
+  hist = save_history(row)
+  st.success(f"Registro guardado. Total: {len(hist)} estudios.")
+
+if HISTORIAL_FILE.exists():
+  hist = pd.read_excel(HISTORIAL_FILE)
+  st.dataframe(hist, use_container_width=True)
+  st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+if wave_df is None:
+  st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
+else:
+  pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot, firma_png=firma_png, sello_png=sello_png, logo_png=logo_png)
+  pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
+  if not pdf_download_bytes:
+    st.error("No se pudo generar el PDF médico integrado.")
+  else:
+    st.download_button(
+      "Generar y descargar PDF médico integrado",
+      data=pdf_download_bytes,
+      file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+      mime="application/pdf"
+    )
