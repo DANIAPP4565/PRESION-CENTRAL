@@ -2564,76 +2564,367 @@ def interpret_rvse_profile(row, sep_metrics):
   )
 
 
-def build_continuous_conclusions(row, wave_df, hdf):
-  """Devuelve las cuatro conclusiones continuas solicitadas antes de los gráficos."""
-  dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
-  sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
-  sep_interp = interpret_wave_separation(sep_metrics)
+def _didactic_grade_pressure(row):
+  """Conclusión cualitativa sin métricas para presión central/carga pulsátil."""
+  pas_c = to_float(row.get("pas_central"))
+  pp_c = to_float(row.get("pp_central"))
+  au = to_float(row.get("au"))
+  iau = to_float(row.get("iau"))
+  pas_r = to_float(row.get("pas_radial"))
+  pp_r = to_float(row.get("pp_radial"))
+  ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
 
-  def fmt(v, dec=1):
-    try:
-      f = float(v)
-      if np.isnan(f): return "no disponible"
-      return f"{f:.{dec}f}"
-    except Exception:
-      return "no disponible"
+  saha_ref = get_saha_central_sbp_reference(row)
+  aix_ref = get_saha_aix75_reference(row)
 
-  rvse_interp = interpret_rvse_profile(row, sep_metrics)
-  c1 = interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk) + " " + rvse_interp
+  # Presión central ajustada por edad/sexo.
+  if saha_ref.get("ok"):
+    if saha_ref.get("alterada"):
+      pressure = "La presión aórtica central se encuentra elevada para la edad y el sexo del paciente, compatible con hipertensión central ajustada."
+      pressure_short = "presión central aumentada."
+      pressure_level = "alterada"
+    elif pas_c >= saha_ref.get("p90", np.inf):
+      pressure = "La presión aórtica central se ubica en una zona alta o limítrofe para la edad y el sexo, sin alcanzar criterio franco de hipertensión central."
+      pressure_short = "presión central limítrofe alta."
+      pressure_level = "limítrofe"
+    elif pas_c >= saha_ref.get("mediana", np.inf):
+      pressure = "La presión aórtica central se encuentra por encima de la mediana esperada, pero sin criterio de hipertensión central."
+      pressure_short = "presión central discretamente alta, sin hipertensión central."
+      pressure_level = "intermedia"
+    else:
+      pressure = "La presión aórtica central se encuentra dentro de un rango esperado para la edad y el sexo del paciente."
+      pressure_short = "presión central conservada."
+      pressure_level = "normal"
+  elif not np.isnan(pas_c):
+    if pas_c >= 130:
+      pressure = "La presión aórtica central se interpreta como elevada por criterio clínico de respaldo."
+      pressure_short = "presión central aumentada."
+      pressure_level = "alterada"
+    elif pas_c >= 120:
+      pressure = "La presión aórtica central se interpreta como limítrofe por criterio clínico de respaldo."
+      pressure_short = "presión central limítrofe."
+      pressure_level = "limítrofe"
+    else:
+      pressure = "La presión aórtica central no muestra elevación relevante."
+      pressure_short = "presión central conservada."
+      pressure_level = "normal"
+  else:
+    pressure = "La presión aórtica central no pudo clasificarse de forma completa por datos insuficientes."
+    pressure_short = "clasificación no disponible."
+    pressure_level = "sin_datos"
 
-  c2 = (
-    f"La separación de ondas estima un componente anterógrado Pf pico de {fmt(sep_metrics.get('pf_pico', np.nan),1)} mmHg "
-    f"y un componente retrógrado Pb pico de {fmt(sep_metrics.get('pb_pico', np.nan),1)} mmHg. "
-    f"La magnitud de reflexión RM Pb/Pf es {fmt(sep_metrics.get('rm', np.nan),2)}, el índice de reflexión RI es "
-    f"{fmt(sep_metrics.get('ri', np.nan),2)}, Tfor es {fmt(sep_metrics.get('tfor_ms', np.nan),0)} ms, "
-    f"Tref es {fmt(sep_metrics.get('tref_ms', np.nan),0)} ms y la relación Tfor/Tref es "
-    f"{fmt(sep_metrics.get('tfor_tref', np.nan),2)}. {sep_interp}"
+  # Carga pulsátil y amplificación.
+  pulse_flags = []
+  if not np.isnan(pp_c):
+    if pp_c >= 60:
+      pulse_flags.append("carga pulsátil central marcadamente aumentada")
+    elif pp_c >= 50:
+      pulse_flags.append("carga pulsátil central aumentada")
+    elif pp_c >= 45:
+      pulse_flags.append("carga pulsátil central limítrofe")
+    else:
+      pulse_flags.append("carga pulsátil central conservada")
+  if not np.isnan(ppa):
+    if ppa < 1.20:
+      pulse_flags.append("pérdida franca de amplificación periférico-central")
+    elif ppa < 1.30:
+      pulse_flags.append("amplificación periférico-central reducida")
+    else:
+      pulse_flags.append("amplificación periférico-central conservada")
+  if not np.isnan(au) and au > 0:
+    pulse_flags.append("aumentación central positiva")
+  if aix_ref.get("ok"):
+    if aix_ref.get("alterada"):
+      pulse_flags.append("aumentación central elevada para edad y sexo")
+    elif iau >= aix_ref.get("p75", np.inf):
+      pulse_flags.append("aumentación central limítrofe alta para edad y sexo")
+    else:
+      pulse_flags.append("aumentación central esperada para edad y sexo")
+  elif not np.isnan(iau):
+    if iau >= 35:
+      pulse_flags.append("aumentación central marcada")
+    elif iau >= 25:
+      pulse_flags.append("aumentación central aumentada")
+    else:
+      pulse_flags.append("aumentación central no aumentada")
+
+  if not pulse_flags:
+    pulse_text = "La carga pulsátil central no pudo clasificarse de forma completa por datos insuficientes."
+    pulse_short = "carga pulsátil no clasificable."
+  else:
+    adverse = any(("aumentada" in x or "reducida" in x or "pérdida" in x or "marcada" in x or "elevada" in x) for x in pulse_flags)
+    borderline = any("limítrofe" in x for x in pulse_flags)
+    if adverse:
+      pulse_text = "La carga pulsátil central muestra elementos desfavorables que sugieren mayor transmisión de energía pulsátil hacia la aorta y órganos centrales."
+      pulse_short = "carga pulsátil central aumentada o amplificación desfavorable."
+    elif borderline:
+      pulse_text = "La carga pulsátil central muestra un comportamiento intermedio, con señales limítrofes que requieren integración con el contexto clínico."
+      pulse_short = "carga pulsátil limítrofe."
+    else:
+      pulse_text = "La carga pulsátil y la amplificación periférico-central se mantienen en un perfil favorable."
+      pulse_short = "carga pulsátil y amplificación conservadas."
+
+  return pressure, pressure_short, pressure_level, pulse_text, pulse_short
+
+
+def _didactic_grade_rvse(sep_metrics):
+  rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
+  if np.isnan(rvse_calc):
+    return (
+      "La reserva subendocárdica no pudo estimarse de forma estable porque no se definieron adecuadamente las áreas de la curva.",
+      "reserva subendocárdica no clasificable.",
+      "sin_datos",
+    )
+  if rvse_calc < 120:
+    return (
+      "La reserva subendocárdica se interpreta como reducida, sugiriendo menor balance relativo entre perfusión diastólica y demanda sistólica.",
+      "reserva subendocárdica reducida.",
+      "alterada",
+    )
+  if rvse_calc < 150:
+    return (
+      "La reserva subendocárdica se ubica en una zona intermedia, dependiente de la frecuencia cardíaca, presión diastólica y poscarga central.",
+      "reserva subendocárdica intermedia.",
+      "limítrofe",
+    )
+  return (
+    "La reserva subendocárdica se encuentra conservada, con balance presión-tiempo globalmente favorable en la curva analizada.",
+    "reserva subendocárdica conservada.",
+    "normal",
   )
 
-  c3 = interpret_harmonic_profile(hdf)
 
-  rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan)
-  pp_c = to_float(row.get("pp_central")); iau = to_float(row.get("iau")); pas_c = to_float(row.get("pas_central"))
-  integrated_flags = []
-  saha_ref = get_saha_central_sbp_reference(row)
-  if saha_ref.get("ok") and saha_ref.get("alterada"):
-    integrated_flags.append("hipertensión central ajustada por edad/sexo según SAHA")
-  elif saha_ref.get("ok") and pas_c >= saha_ref.get("p90", np.inf):
-    integrated_flags.append("PAS central alta/limítrofe para edad/sexo según SAHA")
-  elif not np.isnan(pas_c) and pas_c >= 130:
-    integrated_flags.append("presión central elevada por umbral fijo de respaldo")
-  if not np.isnan(pp_c) and pp_c >= 50:
-    integrated_flags.append("carga pulsátil central aumentada")
-  saha_aix = get_saha_aix75_reference(row)
-  if saha_aix.get("ok") and saha_aix.get("alterada"):
-    integrated_flags.append("IAu/AIx central aumentado para edad/sexo según SAHA")
-  elif saha_aix.get("ok") and iau >= saha_aix.get("p75", np.inf):
-    integrated_flags.append("IAu/AIx central alto-limítrofe para edad/sexo según SAHA")
-  elif not np.isnan(iau) and iau >= 25:
-    integrated_flags.append("aumentación sistólica elevada por umbral fijo de respaldo")
-  if not np.isnan(rm) and rm >= 0.45:
-    integrated_flags.append("reflexión de onda aumentada")
-  if not np.isnan(ri) and ri >= 0.32:
-    integrated_flags.append("mayor contribución retrógrada")
-  rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
-  if not np.isnan(rvse_calc) and rvse_calc < 120:
-    integrated_flags.append("RVSE reducido por análisis de área presión-tiempo")
-  elif not np.isnan(rvse_calc) and rvse_calc >= 150:
-    integrated_flags.append("RVSE conservado")
-  if not integrated_flags:
-    integrated_flags.append("sin marcadores mayores simultáneos de sobrecarga pulsátil central en los parámetros disponibles")
+def _didactic_grade_wave(sep_metrics):
+  rm = sep_metrics.get("rm", np.nan)
+  ri = sep_metrics.get("ri", np.nan)
+  tref = sep_metrics.get("tref_ms", np.nan)
+  pf = sep_metrics.get("pf_pico", np.nan)
+  pb = sep_metrics.get("pb_pico", np.nan)
 
-  _, c4, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+  if all(np.isnan(x) for x in [rm, ri, tref, pf, pb]):
+    return (
+      "La separación de ondas no pudo clasificarse por datos insuficientes o por ausencia de curva válida.",
+      "separación de ondas no clasificable.",
+      "sin_datos",
+    )
+
+  adverse = False
+  borderline = False
+  favorable = False
+
+  if not np.isnan(rm):
+    if rm >= 0.50:
+      adverse = True
+    elif rm >= 0.35:
+      borderline = True
+    else:
+      favorable = True
+  if not np.isnan(ri):
+    if ri >= 0.35:
+      adverse = True
+    elif ri >= 0.25:
+      borderline = True
+    else:
+      favorable = True
+  if not np.isnan(tref):
+    if tref < 320:
+      adverse = True
+    elif tref <= 430:
+      borderline = True
+    else:
+      favorable = True
+
+  if adverse:
+    return (
+      "La separación de ondas muestra un patrón reflectivo desfavorable, con mayor peso de la onda retrógrada o retorno reflejo precoz. Esto puede aumentar la poscarga pulsátil central.",
+      "reflexión de onda aumentada o precoz.",
+      "alterada",
+    )
+  if borderline:
+    return (
+      "La separación de ondas muestra una contribución retrógrada intermedia, sin predominio claramente severo. Debe integrarse con presión central, reserva subendocárdica y riesgo clínico.",
+      "reflexión de onda intermedia.",
+      "limítrofe",
+    )
+  if favorable:
+    return (
+      "La separación de ondas muestra baja contribución retrógrada o retorno reflejo tardío, compatible con interacción ventrículo-arterial favorable.",
+      "reflexión de onda baja o tardía.",
+      "normal",
+    )
+  return (
+    "La separación de ondas fue estimable, pero su interpretación queda en zona indeterminada.",
+    "reflexión de onda indeterminada.",
+    "sin_datos",
+  )
+
+
+def _didactic_grade_harmonics(hdf):
+  try:
+    e = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+    e = e[np.isfinite(e)]
+    if len(e) == 0:
+      raise ValueError("sin datos armónicos")
+    e1 = e[0] if len(e) > 0 else np.nan
+    e_high = np.nansum(e[3:]) if len(e) > 4 else np.nan
+
+    if not np.isnan(e_high) and e_high >= 25:
+      return (
+        "El análisis armónico muestra alta complejidad espectral, compatible con una onda más abrupta o con mayor contenido de componentes rápidos.",
+        "complejidad armónica aumentada.",
+        "alterada",
+      )
+    if not np.isnan(e_high) and e_high >= 12:
+      return (
+        "El análisis armónico muestra complejidad espectral intermedia, sin patrón claramente severo, pero con mayor contenido de componentes superiores.",
+        "complejidad armónica intermedia.",
+        "limítrofe",
+      )
+    if not np.isnan(e1) and e1 < 35:
+      return (
+        "El análisis armónico muestra menor predominio de la onda fundamental, lo que puede sugerir una morfología menos suavizada.",
+        "menor predominio armónico fundamental.",
+        "limítrofe",
+      )
+    return (
+      "El análisis armónico muestra predominio de componentes bajos, compatible con una onda central relativamente suavizada.",
+      "morfología armónica de bajo impacto pulsátil.",
+      "normal",
+    )
+  except Exception:
+    return (
+      "El análisis armónico no pudo clasificarse de forma estable; se recomienda revisar el gráfico espectral y la calidad de la curva digitalizada.",
+      "análisis armónico no clasificable.",
+      "sin_datos",
+    )
+
+
+def _didactic_phenotype_text(phenotype):
+  p = safe_text(phenotype).lower()
+  if "rígido-reflectivo con estrés subendocárdico" in p:
+    return (
+      "La integración global configura un patrón central desfavorable complejo, con sobrecarga pulsátil, reflexión aumentada, menor reserva subendocárdica y mayor complejidad morfológica.",
+      "fenotipo central rígido-reflectivo complejo con compromiso subendocárdico."
+    )
+  if "rígido-reflectivo con rvse reducido" in p:
+    return (
+      "La integración global configura un patrón rígido-reflectivo con compromiso del balance subendocárdico, compatible con mayor exigencia hemodinámica central.",
+      "fenotipo rígido-reflectivo con reserva subendocárdica reducida."
+    )
+  if "rígido-reflectivo con complejidad armónica" in p:
+    return (
+      "La integración global muestra sobrecarga central con reflexión aumentada y morfología de onda más compleja.",
+      "fenotipo rígido-reflectivo con complejidad armónica."
+    )
+  if "rígido-reflectivo" in p:
+    return (
+      "La integración global muestra elevación de carga central asociada a mayor contribución de la onda reflejada.",
+      "fenotipo vascular central rígido-reflectivo."
+    )
+  if "carga central elevada con compromiso subendocárdico" in p:
+    return (
+      "La integración global sugiere presión o carga pulsátil central aumentada con menor reserva subendocárdica relativa.",
+      "fenotipo de carga central elevada con compromiso subendocárdico."
+    )
+  if "reflectivo con compromiso subendocárdico" in p:
+    return (
+      "La integración global muestra predominio de reflexión de onda asociado a menor reserva subendocárdica relativa.",
+      "fenotipo reflectivo con compromiso subendocárdico."
+    )
+  if "carga pulsátil central elevada con distorsión armónica" in p:
+    return (
+      "La integración global muestra aumento de carga pulsátil central asociado a mayor complejidad morfológica de la onda.",
+      "fenotipo de carga pulsátil central elevada con distorsión armónica."
+    )
+  if "reflectivo predominante" in p:
+    return (
+      "La integración global muestra predominio de reflexión de onda, aun sin clara sobrecarga central global.",
+      "fenotipo reflectivo predominante."
+    )
+  if "armónico complejo" in p:
+    return (
+      "La integración global muestra complejidad morfológica de la onda, sin predominio claro de sobrecarga central o reflexión severa.",
+      "fenotipo armónico complejo."
+    )
+  if "presión central elevada" in p:
+    return (
+      "La integración global muestra elevación de presión o carga central sin predominio reflectivo marcado.",
+      "fenotipo de presión central elevada no reflectivo predominante."
+    )
+  return (
+    "La integración global configura un perfil vascular central conservado o de bajo impacto pulsátil.",
+    "fenotipo vascular central conservado o de bajo impacto pulsátil."
+  )
+
+
+def build_continuous_conclusions(row, wave_df, hdf):
+  """Conclusiones clínicas resumidas y didácticas, sin métricas en el texto.
+
+  Mantiene el cálculo interno completo, pero la Parte 2 del PDF queda redactada
+  por dominios clínicos, con conclusión breve por ítem y sin valores numéricos.
+  Las métricas quedan reservadas para tablas técnicas, gráficos y anexos.
+  """
+  sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
+  sep_interp = interpret_wave_separation(sep_metrics)
+  phenotype, _, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+
+  pressure_txt, pressure_short, pressure_level, pulse_txt, pulse_short = _didactic_grade_pressure(row)
+  rvse_txt, rvse_short, rvse_level = _didactic_grade_rvse(sep_metrics)
+  wave_txt, wave_short, wave_level = _didactic_grade_wave(sep_metrics)
+  harm_txt, harm_short, harm_level = _didactic_grade_harmonics(hdf)
+  phenotype_txt, phenotype_short = _didactic_phenotype_text(phenotype)
+
+  c1 = (
+    f"{pressure_txt} "
+    f"{pulse_txt} "
+    f"Conclusión breve: {pressure_short.capitalize()}"
+  )
+
+  c2 = (
+    f"{pulse_txt} "
+    "Este dominio resume el impacto de la presión pulsátil sobre la aorta y la conservación o pérdida de amplificación periférica. "
+    f"Conclusión breve: {pulse_short.capitalize()}"
+  )
+
+  c3 = (
+    "El análisis de aumentación central evalúa cuánto contribuye la onda reflejada al componente sistólico central. "
+    "Cuando se encuentra aumentada, sugiere mayor poscarga pulsátil; cuando es esperada, acompaña un perfil vascular más favorable. "
+  )
+  if "aumentación" in pulse_short or "amplificación" in pulse_short or "carga pulsátil" in pulse_short:
+    c3 += f"Conclusión breve: {pulse_short.capitalize()}"
+  else:
+    c3 += "Conclusión breve: aumentación central sin alteraciones relevantes."
+
+  c4 = (
+    f"{wave_txt} "
+    f"Conclusión breve: {wave_short.capitalize()}"
+  )
+
+  c5 = (
+    f"{rvse_txt} "
+    f"Conclusión breve: {rvse_short.capitalize()}"
+  )
+
+  c6 = (
+    f"{harm_txt} "
+    f"Conclusión breve: {harm_short.capitalize()}"
+  )
+
+  c7 = (
+    f"{phenotype_txt} "
+    "Esta conclusión integra presión central, carga pulsátil, aumentación, reflexión de onda, reserva subendocárdica y morfología armónica. "
+    f"Conclusión final: {phenotype_short.capitalize()}"
+  )
 
   return [
-    ("1. Análisis de presión central y métricas", c1),
-    ("2. Análisis de separación de ondas", c2),
-    ("3. Análisis de armónicos", c3),
-    ("4. Fenotipo final de presión central", c4),
+    ("1. Presión aórtica central", c1),
+    ("2. Carga pulsátil central", c2),
+    ("3. Aumentación central", c3),
+    ("4. Separación de ondas", c4),
+    ("5. Reserva subendocárdica", c5),
+    ("6. Análisis armónico", c6),
+    ("7. Fenotipo vascular central integrado", c7),
   ], sep_df, sep_metrics, sep_interp
-
-
-
 
 def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   """Define fenotipo final explícito integrando presión central, RVSE/SEVR, separación de ondas y armónicos."""
@@ -2984,7 +3275,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
 
   story = []
   story.append(Paragraph("PRESIÓN AÓRTICA CENTRAL", styles["TitlePAC"]))
-  story.append(Paragraph("Informe médico integrado con conclusiones clínicas continuas y panel gráfico compacto", styles["BodyPAC"]))
+  story.append(Paragraph("Informe médico integrado con conclusiones clínicas resumidas y didácticas", styles["BodyPAC"]))
   story.append(Spacer(1, 1.7*mm))
 
   story.append(_section("1. Datos del paciente y valores principales"))
@@ -3041,7 +3332,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
   story.append(values_table)
   story.append(Spacer(1, 1.8*mm))
 
-  story.append(_section("2. Conclusiones clínicas continuas"))
+  story.append(_section("2. Conclusiones clínicas resumidas y didácticas"))
   conclusion_rows = []
   for title, body in conclusion_blocks:
     conclusion_rows.append([Paragraph(pdf_text(title), styles["MiniTitlePAC"])])
@@ -3279,7 +3570,7 @@ if wave_df is not None:
   st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
   st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
-  st.markdown("### Conclusiones clínicas continuas")
+  st.markdown("### Conclusiones clínicas resumidas y didácticas")
   for title, body in conclusion_blocks_preview:
     st.markdown(f"**{title}**")
     st.write(body)
