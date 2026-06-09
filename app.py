@@ -40,6 +40,7 @@ from reportlab.platypus import (
   SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image,
   PageBreak, KeepTogether
 )
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 def ensure_download_bytes(obj):
@@ -68,6 +69,55 @@ def ensure_download_bytes(obj):
     return bytes(obj)
   except Exception:
     return str(obj).encode("latin-1", errors="ignore")
+
+
+def read_uploaded_image_bytes(uploaded_file):
+  """Devuelve bytes de imagen cargada, compatibles con ReportLab y Streamlit."""
+  if uploaded_file is None:
+    return None
+  try:
+    data = uploaded_file.getvalue()
+  except Exception:
+    try:
+      data = uploaded_file.read()
+    except Exception:
+      data = None
+  if not data:
+    return None
+  return bytes(data)
+
+
+def image_aspect_ratio(image_bytes):
+  """Calcula ancho/alto de una imagen preservando proporciones en el PDF."""
+  if not image_bytes:
+    return None
+  try:
+    if PILImage is not None:
+      im = PILImage.open(io.BytesIO(image_bytes))
+      w, h = im.size
+      if w > 0 and h > 0:
+        return float(w) / float(h)
+    reader = ImageReader(io.BytesIO(image_bytes))
+    w, h = reader.getSize()
+    if w > 0 and h > 0:
+      return float(w) / float(h)
+  except Exception:
+    return None
+  return None
+
+
+def fit_image_box(image_bytes, max_w, max_h):
+  """Ajusta una imagen a una caja máxima sin deformar ni truncar."""
+  ar = image_aspect_ratio(image_bytes)
+  if not ar or ar <= 0:
+    return max_w, max_h
+  if max_w / max_h > ar:
+    h = max_h
+    w = h * ar
+  else:
+    w = max_w
+    h = w / ar
+  return w, h
 
 
 st.set_page_config(page_title="PAC IA - Presión Aórtica Central", layout="wide")
@@ -3178,7 +3228,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   )
   return phenotype, text, table
 
-def build_pdf(row, wave_df, hdf, screenshot_png=None):
+def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=None, logo_png=None):
   """Construye un PDF compacto, con conclusiones primero y luego grilla gráfica profesional."""
   dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
   conclusion_blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
@@ -3188,7 +3238,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
   doc = SimpleDocTemplate(
     buf, pagesize=A4,
     rightMargin=11*mm, leftMargin=11*mm,
-    topMargin=21*mm, bottomMargin=13*mm
+    topMargin=21*mm, bottomMargin=38*mm
   )
   styles = getSampleStyleSheet()
   styles.add(ParagraphStyle(
@@ -3254,6 +3304,59 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
       ("BOTTOMPADDING", (0,0), (-1,-1), 2),
     ])
 
+  def _draw_image_contained(canvas, image_bytes, x, y, max_w, max_h):
+    """Dibuja imagen dentro de caja máxima, centrada y sin distorsión."""
+    if not image_bytes:
+      return False
+    try:
+      w, h = fit_image_box(image_bytes, max_w, max_h)
+      dx = x + (max_w - w) / 2.0
+      dy = y + (max_h - h) / 2.0
+      canvas.drawImage(ImageReader(io.BytesIO(image_bytes)), dx, dy, width=w, height=h, mask='auto')
+      return True
+    except Exception:
+      return False
+
+  def _draw_first_page_branding(canvas):
+    """Logo institucional, firma y sello al pie de la primera hoja.
+
+    Se dibujan en una banda reservada por el margen inferior del documento,
+    por lo que no se superponen con tablas, conclusiones ni pie de página.
+    Cada imagen conserva su relación de aspecto y se ajusta a su caja máxima.
+    """
+    if not any([logo_png, firma_png, sello_png]):
+      return
+    width, _ = A4
+    left = 11*mm
+    right = width - 11*mm
+    band_y = 12.5*mm
+    band_h = 23.5*mm
+    gap = 3*mm
+
+    canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor('#CFD8DC'))
+    canvas.setLineWidth(0.25)
+    canvas.line(left, band_y + band_h + 1.2*mm, right, band_y + band_h + 1.2*mm)
+
+    col_w = (right - left - 2*gap) / 3.0
+    logo_box = (left, band_y, col_w, band_h)
+    firma_box = (left + col_w + gap, band_y, col_w, band_h)
+    sello_box = (left + 2*(col_w + gap), band_y, col_w, band_h)
+
+    _draw_image_contained(canvas, logo_png, *logo_box)
+    _draw_image_contained(canvas, firma_png, *firma_box)
+    _draw_image_contained(canvas, sello_png, *sello_box)
+
+    canvas.setFillColor(colors.HexColor('#607D8B'))
+    canvas.setFont('Helvetica', 5.9)
+    if logo_png:
+      canvas.drawCentredString(logo_box[0] + logo_box[2]/2.0, band_y - 1.7*mm, 'Logo institucional')
+    if firma_png:
+      canvas.drawCentredString(firma_box[0] + firma_box[2]/2.0, band_y - 1.7*mm, 'Firma digital')
+    if sello_png:
+      canvas.drawCentredString(sello_box[0] + sello_box[2]/2.0, band_y - 1.7*mm, 'Sello digital')
+    canvas.restoreState()
+
   def _header_footer(canvas, doc_obj):
     canvas.saveState()
     width, height = A4
@@ -3268,6 +3371,8 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None):
     canvas.setFont("Helvetica", 6.8)
     canvas.drawString(11*mm, 7*mm, "Informe médico integrado - diseño compacto profesional")
     canvas.drawRightString(width-11*mm, 7*mm, f"Página {doc_obj.page}")
+    if doc_obj.page == 1:
+      _draw_first_page_branding(canvas)
     canvas.restoreState()
 
   def _graph_cell(title, img, width=91*mm, height=50*mm):
@@ -3477,7 +3582,9 @@ with st.sidebar:
   st.header("1) Importar estudio")
   pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
   wave_file = st.file_uploader("Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+  st.markdown("---")
   st.info("Modo datos reales: si no se carga CSV/TXT, la app digitaliza automáticamente la curva desde la imagen del PDF. No se aceptan curvas sintéticas ni genéricas.")
+  st.caption("La carga de logo, firma y sello está visible en la pantalla principal, debajo del título de la app.")
 
 base = {}
 screenshot = None
@@ -3492,6 +3599,46 @@ if pdf_file:
   screenshot = render_pdf_page_png(pdf_bytes, page_index=1)
 else:
   base = parse_model_pac("")
+
+# -----------------------------------------------------------------------------
+# IDENTIDAD VISUAL DEL INFORME
+# -----------------------------------------------------------------------------
+st.markdown("## Identidad visual del informe")
+st.info("Cargue aquí los archivos que se insertarán automáticamente al final de la primera hoja del PDF. La app reserva una banda inferior para evitar superposiciones, deformaciones o truncamientos.")
+with st.expander("Cargar logo institucional, firma digital y sello digital", expanded=True):
+  c_logo, c_firma, c_sello = st.columns(3)
+  with c_logo:
+    logo_file = st.file_uploader(
+      "Logo institucional",
+      type=["png", "jpg", "jpeg"],
+      key="logo_institucional_main",
+      help="Imagen opcional. Se ubicará al pie de la primera hoja, sector izquierdo."
+    )
+    if logo_file is not None:
+      st.image(logo_file, caption="Logo cargado", use_container_width=True)
+  with c_firma:
+    firma_file = st.file_uploader(
+      "Firma digital",
+      type=["png", "jpg", "jpeg"],
+      key="firma_digital_main",
+      help="Imagen opcional. Se ubicará al pie de la primera hoja, sector central."
+    )
+    if firma_file is not None:
+      st.image(firma_file, caption="Firma cargada", use_container_width=True)
+  with c_sello:
+    sello_file = st.file_uploader(
+      "Sello digital",
+      type=["png", "jpg", "jpeg"],
+      key="sello_digital_main",
+      help="Imagen opcional. Se ubicará al pie de la primera hoja, sector derecho."
+    )
+    if sello_file is not None:
+      st.image(sello_file, caption="Sello cargado", use_container_width=True)
+  st.caption("Formatos aceptados: PNG, JPG y JPEG. Cada imagen conserva su proporción dentro de su caja asignada.")
+
+logo_png = read_uploaded_image_bytes(logo_file)
+firma_png = read_uploaded_image_bytes(firma_file)
+sello_png = read_uploaded_image_bytes(sello_file)
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
@@ -3536,91 +3683,4 @@ if wave_df is None and pdf_bytes:
       wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(pdf_bytes, row, max_pages=4, zoom=3.0)
     curve_source = f"PDF digitalizado automáticamente: página {curve_meta.get('pagina')} / sector {curve_meta.get('sector', 'izquierdo-superior')} / trazo {curve_meta.get('color_detectado')}"
     st.success("Curva real digitalizada desde la segunda hoja, sector superior izquierdo: panel de curva del PDF, y calibrada con PAS/PAD central del estudio. Cada paciente usará su propia morfología extraída del PDF.")
-    st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_meta.get('puntos')}. BBox: {curve_meta.get('bbox_px')}.")
-    if curve_debug_png:
-      st.image(curve_debug_png, caption="Control visual: segunda hoja, sector superior izquierdo: panel de curva usado para digitalizar la curva", use_container_width=True)
-  except Exception as e:
-    curve_error = str(e)
-    st.error("No se pudo obtener una curva real del paciente desde CSV/TXT ni desde la imagen del PDF. No se generarán curvas sintéticas.")
-    st.caption(f"Detalle técnico digitalización PDF: {curve_error}")
-elif wave_df is None:
-  st.error("Para generar informe, separación de ondas y armónicos se debe cargar un PDF con curva visible o un CSV/TXT real del paciente. La app queda en modo estricto: no usa curva sintética ni genérica.")
-
-dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
-
-st.subheader("Vista clínica previa")
-summary_cols = st.columns(5)
-summary_cols[0].metric("PAS central", f"{to_float(row.get('pas_central')):.0f} mmHg")
-summary_cols[1].metric("PP central", f"{to_float(row.get('pp_central')):.0f} mmHg")
-summary_cols[2].metric("PPA", f"{ppa:.2f}" if not np.isnan(ppa) else "No disponible")
-summary_cols[3].metric("RVSE equipo", f"{to_float(row.get('rvse')):.0f}%" if not np.isnan(to_float(row.get('rvse'))) else "No disponible")
-summary_cols[4].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
-
-st.markdown("### Análisis de presión central y métricas")
-st.write(dx)
-st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
-
-if wave_df is not None:
-  hdf = harmonic_analysis(wave_df)
-  sep_df_preview, sep_metrics_preview = estimate_wave_separation(wave_df, row)
-  conclusion_blocks_preview, sep_df_preview, sep_metrics_preview, sep_interp_preview = build_continuous_conclusions(row, wave_df, hdf)
-
-  summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
-  summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
-  st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
-  st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
-
-  st.markdown("### Conclusiones clínicas resumidas y didácticas")
-  for title, body in conclusion_blocks_preview:
-    st.markdown(f"**{title}**")
-    st.write(body)
-
-  st.markdown("---")
-  st.markdown("### Gráficos")
-  st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
-
-  g1, g2 = st.columns(2)
-  with g1:
-    st.image(plot_waveform(wave_df), caption="Onda central real importada", use_container_width=True)
-    st.image(plot_aortic_flow(sep_df_preview), caption="Flujo aórtico estimado desde curva real", use_container_width=True)
-    st.image(plot_rvse_area(sep_df_preview, sep_metrics_preview), caption="RVSE / SEVR por áreas presión-tiempo", use_container_width=True)
-  with g2:
-    st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales", use_container_width=True)
-    st.image(plot_harmonics(hdf), caption="Armónicos de la onda central real", use_container_width=True)
-
-  st.image(plot_clinical_gauges(row, ppa), caption="Semaforización clínica", use_container_width=True)
-
-  final_phenotype_preview, final_phenotype_text_preview, final_phenotype_table_preview = classify_central_pressure_phenotype(row, sep_metrics_preview, hdf)
-  st.markdown("---")
-  st.markdown("### Fenotipo final de presión central")
-  st.success(final_phenotype_preview)
-  st.write(final_phenotype_text_preview)
-  st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
-else:
-  st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
-  st.image(plot_pressure_comparison(row), caption="Presiones periféricas vs centrales extraídas del estudio", use_container_width=True)
-
-st.subheader("Historial y exportación")
-if st.button("Guardar en historial"):
-  hist = save_history(row)
-  st.success(f"Registro guardado. Total: {len(hist)} estudios.")
-
-if HISTORIAL_FILE.exists():
-  hist = pd.read_excel(HISTORIAL_FILE)
-  st.dataframe(hist, use_container_width=True)
-  st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-if wave_df is None:
-  st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
-else:
-  pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot)
-  pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
-  if not pdf_download_bytes:
-    st.error("No se pudo generar el PDF médico integrado.")
-  else:
-    st.download_button(
-      "Generar y descargar PDF médico integrado",
-      data=pdf_download_bytes,
-      file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
-      mime="application/pdf"
-    )
+    st.caption(f"Fuente de curva: {curve_source}. Puntos generados: {curve_
