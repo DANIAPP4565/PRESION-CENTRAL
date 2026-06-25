@@ -151,7 +151,7 @@ CENTRAL_SBP_TABLE = {
 # Referencias del Manual de Mecánica Vascular SAHA 2024, Tabla 2:
 # Presión arterial sistólica aórtica central por sexo, grupo etario y esquema de calibración.
 # Valores = percentil 50 (mediana) y DE. Se usa P95 = mediana + 1.645*DE para definir
-# hipertensión central ajustada por edad/sexo; P90 = mediana + 1.282*DE para categoría limítrofe/alta.
+# hipertensión central ajustada por edad/sexo; P95 = mediana + 1.645*DE para diagnóstico binario de hipertensión central.
 SAHA_AOSBP_REF = {
   "M": {
     "<20": {"C_PAOC": (110.29, 16.41), "SD_PAOC": (102.41, 10.22)},
@@ -261,19 +261,11 @@ def get_saha_aix75_reference(row):
   z = (iau - mean) / sd if sd and not np.isnan(sd) else np.nan
   if iau >= p90:
     categoria = "IAu/AIx central aumentado para edad y sexo"
-    severidad = "elevado"
+    severidad = "aumentado"
     alterada = True
-  elif iau >= p75:
-    categoria = "IAu/AIx central alto-limítrofe para edad y sexo"
-    severidad = "limítrofe alto"
-    alterada = False
-  elif iau >= p50:
-    categoria = "IAu/AIx central sobre la mediana esperada"
-    severidad = "sobre mediana"
-    alterada = False
   else:
-    categoria = "IAu/AIx central esperado para edad y sexo"
-    severidad = "normal"
+    categoria = "IAu/AIx central no aumentado para edad y sexo"
+    severidad = "no aumentado"
     alterada = False
   return {
     "ok": True, "sexo": sex, "edad_grupo": age_group, "iau": iau,
@@ -323,7 +315,9 @@ def saha_age_group(age):
 def get_saha_central_sbp_reference(row):
   """Referencia SAHA 2024 para PAS aórtica central según edad, sexo y calibración.
 
-  Devuelve mediana, DE, P90, P95, z-score y percentil estimado.
+  Devuelve mediana, DE, P90, P95, z-score y percentil estimado. La decisión
+  diagnóstica es binaria: hipertensión central si PAS central >= P95; sin
+  hipertensión central si PAS central < P95. No se generan categorías ambiguas.
   """
   sex = safe_text(row.get("sexo", "M")).upper()[:1]
   if sex not in ("M", "F"):
@@ -345,19 +339,11 @@ def get_saha_central_sbp_reference(row):
   p97 = median + 1.960 * sd
   if pas_c >= p95:
     categoria = "Hipertensión central ajustada por edad y sexo"
-    severidad = "elevada"
+    severidad = "hipertensión central"
     alterada = True
-  elif pas_c >= p90:
-    categoria = "PAS central alta/limítrofe para edad y sexo"
-    severidad = "limítrofe alta"
-    alterada = False
-  elif pas_c >= median:
-    categoria = "PAS central sobre la mediana esperada para edad y sexo"
-    severidad = "sobre mediana"
-    alterada = False
   else:
-    categoria = "PAS central esperada para edad y sexo"
-    severidad = "normal"
+    categoria = "Sin hipertensión central ajustada por edad y sexo"
+    severidad = "sin hipertensión central"
     alterada = False
   return {
     "ok": True, "sexo": sex, "edad_grupo": age_group, "metodo": method,
@@ -367,19 +353,92 @@ def get_saha_central_sbp_reference(row):
     "alterada": alterada,
   }
 
+def central_hypertension_status(row):
+  """Diagnóstico binario de hipertensión central.
+
+  Prioridad diagnóstica:
+  1) Tabla SAHA 2024 por edad, sexo y método de calibración: HTA central si PASc >= P95.
+  2) Respaldo operativo si no hay datos para SAHA: HTA central si PASc >= 130 mmHg.
+  """
+  pas_c = to_float(row.get("pas_central"))
+  if np.isnan(pas_c):
+    return {
+      "ok": False,
+      "tiene_hta_central": False,
+      "diagnostico": "Hipertensión central: no clasificable por falta de PAS central.",
+      "diagnostico_breve": "Hipertensión central: no clasificable.",
+      "criterio": "PAS central no disponible",
+      "umbral": np.nan,
+      "pas_central": pas_c,
+    }
+
+  saha_ref = get_saha_central_sbp_reference(row)
+  if saha_ref.get("ok"):
+    umbral = saha_ref.get("p95", np.nan)
+    hta = pas_c >= umbral
+    criterio = (
+      f"criterio SAHA 2024 ajustado por edad/sexo/calibración: PAS central >= P95 "
+      f"({umbral:.1f} mmHg)"
+    )
+    detalle = (
+      f"PAS central {pas_c:.0f} mmHg; P95 SAHA {umbral:.1f} mmHg; "
+      f"{saha_ref['sexo']}, {saha_ref['edad_grupo']} años, {saha_ref['metodo']}; "
+      f"z {saha_ref['z']:.2f}; percentil {saha_ref['percentil']:.0f}."
+    )
+  else:
+    umbral = 130.0
+    hta = pas_c >= umbral
+    criterio = "criterio operativo de respaldo: PAS central >= 130 mmHg"
+    detalle = f"PAS central {pas_c:.0f} mmHg; umbral operativo {umbral:.0f} mmHg."
+
+  diagnostico_breve = "Hipertensión central: SÍ." if hta else "Hipertensión central: NO."
+  return {
+    "ok": True,
+    "tiene_hta_central": bool(hta),
+    "diagnostico": f"{diagnostico_breve} {detalle}",
+    "diagnostico_breve": diagnostico_breve,
+    "criterio": criterio,
+    "umbral": umbral,
+    "pas_central": pas_c,
+  }
+
+
 def format_saha_central_htn(row, compact=False):
-  ref = get_saha_central_sbp_reference(row)
-  if not ref.get("ok"):
-    return "Clasificación SAHA por edad/sexo no disponible: " + ref.get("motivo", "datos insuficientes")
-  txt = (
-    f"Clasificación SAHA por edad/sexo: {ref['categoria']}. "
-    f"PAS central {ref['pas_central']:.0f} mmHg; referencia {ref['sexo']}, {ref['edad_grupo']} años, "
-    f"{ref['metodo']}: mediana {ref['mediana']:.1f} mmHg, DE {ref['de']:.1f}, "
-    f"P90 {ref['p90']:.1f} mmHg y P95 {ref['p95']:.1f} mmHg. "
-    f"Z-score {ref['z']:.2f}; percentil estimado {ref['percentil']:.0f}."
-  )
+  status = central_hypertension_status(row)
+  if not status.get("ok"):
+    return status.get("diagnostico", "Hipertensión central: no clasificable.")
+  txt = f"Diagnóstico de presión central: {status['diagnostico']} Criterio utilizado: {status['criterio']}."
   if not compact:
-    txt += " Se define hipertensión central ajustada cuando la PAS central alcanza o supera el P95 de la tabla SAHA seleccionada."
+    txt += " La decisión del informe es binaria: hipertensión central sí o no."
+  return txt
+
+
+def _markdown_bold_conclusions(text):
+  """Resalta conclusiones finales en la vista Streamlit."""
+  txt = safe_text(text)
+  patterns = ["Conclusión breve:", "Conclusión diagnóstica:", "Conclusión integrada:", "Conclusión final:"]
+  for pat in patterns:
+    txt = txt.replace(pat, f"**{pat}")
+  # Cierra la negrita al final del párrafo si se abrió alguna etiqueta markdown.
+  if any(f"**{pat}" in txt for pat in patterns) and not txt.endswith("**"):
+    txt += "**"
+  return txt
+
+
+def _pdf_bold_conclusions(text):
+  """Escapa texto dinámico y permite negrita solo en frases de conclusión controladas."""
+  txt = pdf_text(text)
+  keys = ["Conclusión breve:", "Conclusión diagnóstica:", "Conclusión integrada:", "Conclusión final:"]
+  for key in keys:
+    txt = txt.replace(pdf_text(key), f"<b>{pdf_text(key)}")
+  if any(f"<b>{pdf_text(k)}" in txt for k in keys) and "</b>" not in txt:
+    txt += "</b>"
+  elif any(f"<b>{pdf_text(k)}" in txt for k in keys):
+    # Asegurar cierre final aunque hubiese otro tag previo.
+    open_tags = txt.count("<b>")
+    close_tags = txt.count("</b>")
+    if open_tags > close_tags:
+      txt += "</b>"
   return txt
 
 def safe_text(x):
@@ -1914,43 +1973,30 @@ def central_diagnosis(row):
   sex = (row.get("sexo") or "M").upper()[:1]
   cat = brachial_bp_category(pSBP, pDBP)
 
-  # Referencia principal: Manual SAHA 2024 por edad, sexo y método de calibración.
+  status = central_hypertension_status(row)
   saha_ref = get_saha_central_sbp_reference(row)
-  ref = saha_ref.get("p95", np.nan) if saha_ref.get("ok") else CENTRAL_SBP_TABLE.get(cat, {}).get(sex, np.nan)
+  ref = status.get("umbral", np.nan)
 
   amp_sbp = pSBP - cSBP if not np.isnan(pSBP) and not np.isnan(cSBP) else np.nan
   ppa = (to_float(row.get("pp_radial")) / cPP) if cPP and not np.isnan(cPP) and cPP != 0 else np.nan
 
-  if np.isnan(cSBP):
-    dx = "No clasificable por falta de PAS central."
-  elif saha_ref.get("ok"):
-    dx = (
-      f"{saha_ref['categoria']} según Manual SAHA 2024 "
-      f"({saha_ref['sexo']}, {saha_ref['edad_grupo']} años, {saha_ref['metodo']}; "
-      f"PAS central {cSBP:.0f} mmHg, P95 {saha_ref['p95']:.1f} mmHg, "
-      f"z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f})."
-    )
-  elif cSBP >= 130:
-    dx = "Hipertensión central probable / PAS aórtica central elevada por umbral fijo operativo."
-  elif not np.isnan(ref) and cSBP > ref:
-    dx = f"PAS central por encima de referencia operativa para la categoría braquial {cat}."
-  else:
-    dx = "Sin hipertensión central por los datos disponibles."
+  dx = status.get("diagnostico", "Hipertensión central: no clasificable.")
 
   risk = []
-  if saha_ref.get("ok") and saha_ref.get("alterada"):
-    risk.append("hipertensión central ajustada por edad y sexo según SAHA")
-  elif saha_ref.get("ok") and cSBP >= saha_ref.get("p90", np.inf):
-    risk.append("PAS central limítrofe/alta para edad y sexo según SAHA")
-  if not np.isnan(ppa) and ppa < 1.30: risk.append("amplificación de presión de pulso reducida (<1,30)")
-  if not np.isnan(cPP) and cPP >= 50: risk.append("presión de pulso central aumentada")
+  if status.get("ok"):
+    if status.get("tiene_hta_central"):
+      risk.append("hipertensión central confirmada por el criterio seleccionado")
+    else:
+      risk.append("sin hipertensión central por el criterio seleccionado")
+  if not np.isnan(ppa) and ppa < 1.30:
+    risk.append("amplificación de presión de pulso reducida (<1,30)")
+  if not np.isnan(cPP) and cPP >= 50:
+    risk.append("presión de pulso central aumentada")
   saha_aix = get_saha_aix75_reference(row)
   if saha_aix.get("ok") and saha_aix.get("alterada"):
     risk.append("IAu/AIx central aumentado para edad y sexo según LEAD 2024/SphygmoCor")
-  elif saha_aix.get("ok") and to_float(row.get("iau")) >= saha_aix.get("p75", np.inf):
-    risk.append("IAu/AIx central alto-limítrofe para edad y sexo según LEAD 2024/SphygmoCor")
-  elif not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25:
-    risk.append("índice de aumentación elevado por umbral fijo de respaldo")
+  elif not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25 and not saha_aix.get("ok"):
+    risk.append("índice de aumentación aumentado por umbral fijo de respaldo")
   return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
 
 
@@ -2341,14 +2387,14 @@ def interpret_wave_separation(sep_metrics):
     if ri < 0.23:
       parts.append("El índice de reflexión (RI) se encuentra en rango bajo.")
     elif ri < 0.32:
-      parts.append("El índice de reflexión (RI) se encuentra en rango intermedio.")
+      parts.append("El índice de reflexión (RI) no alcanza criterio de aumento definido por el punto de corte operativo.")
     else:
       parts.append("El índice de reflexión (RI) se encuentra aumentado, sugiriendo mayor carga por onda reflejada.")
   if not np.isnan(tref):
     if tref < 320:
       parts.append("El retorno de la onda retrógrada es precoz, patrón compatible con rigidez arterial aumentada o reflexión periférica temprana.")
     elif tref <= 430:
-      parts.append("El tiempo de retorno de la onda reflejada es intermedio.")
+      parts.append("El tiempo de retorno de la onda reflejada no es precoz por el punto de corte operativo.")
     else:
       parts.append("El tiempo de retorno de la onda reflejada es tardío, patrón más compatible con mejor complacencia arterial central.")
   if not np.isnan(ratio):
@@ -2495,19 +2541,11 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
       return "no disponible"
 
   pressure_flags = []
-  saha_ref = get_saha_central_sbp_reference(row)
-  if saha_ref.get("ok"):
-    if saha_ref.get("alterada"):
-      pressure_flags.append(f"hipertensión central ajustada por edad/sexo: PAS central ≥ P95 SAHA ({saha_ref['p95']:.1f} mmHg)")
-    elif pas_c >= saha_ref.get("p90", np.inf):
-      pressure_flags.append(f"PAS central alta/limítrofe para edad/sexo: ≥P90 SAHA ({saha_ref['p90']:.1f} mmHg) y <P95")
-    else:
-      pressure_flags.append(f"PAS central sin hipertensión por edad/sexo: <P95 SAHA ({saha_ref['p95']:.1f} mmHg)")
-  elif not np.isnan(pas_c):
-    if pas_c >= 130:
-      pressure_flags.append("PAS central elevada por umbral operativo fijo de 130 mmHg")
-    else:
-      pressure_flags.append("PAS central por debajo del umbral operativo fijo de 130 mmHg")
+  status = central_hypertension_status(row)
+  if status.get("ok"):
+    pressure_flags.append(status.get("diagnostico_breve", "Hipertensión central: no clasificable."))
+  else:
+    pressure_flags.append("Hipertensión central: no clasificable por falta de PAS central")
   if not np.isnan(pp_c):
     if pp_c >= 50:
       pressure_flags.append("presión de pulso central aumentada")
@@ -2516,18 +2554,14 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
   saha_aix = get_saha_aix75_reference(row)
   if saha_aix.get("ok"):
     if saha_aix.get("alterada"):
-      pressure_flags.append(f"IAu/AIx aumentado para edad/sexo: IAu ≥P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
-    elif iau >= saha_aix.get("p75", np.inf):
-      pressure_flags.append(f"IAu/AIx alto-limítrofe para edad/sexo: ≥P75 LEAD 2024 ({saha_aix['p75']:.1f}%) y <P90")
+      pressure_flags.append(f"IAu/AIx aumentado para edad/sexo: IAu >= P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
     else:
-      pressure_flags.append(f"IAu/AIx esperado para edad/sexo: <P75 LEAD 2024 ({saha_aix['p75']:.1f}%)")
+      pressure_flags.append(f"IAu/AIx no aumentado para edad/sexo: IAu < P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
   elif not np.isnan(iau):
     if iau >= 25:
-      pressure_flags.append("IAu elevado por umbral fijo de respaldo")
-    elif iau >= 10:
-      pressure_flags.append("IAu intermedio por umbral fijo de respaldo")
+      pressure_flags.append("IAu aumentado por umbral fijo de respaldo")
     else:
-      pressure_flags.append("IAu bajo")
+      pressure_flags.append("IAu no aumentado por umbral fijo de respaldo")
   if not np.isnan(ppa):
     if ppa < 1.30:
       pressure_flags.append("amplificación de presión de pulso reducida")
@@ -2539,7 +2573,7 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
     f"PAM central {fmt(pam_c,0)} mmHg y PP central {fmt(pp_c,0)} mmHg. La categoría tensional periférica/braquial es {cat}. "
     f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(ppa,2)}. "
     f"Au: {fmt(au,1)} mmHg, IAu: {fmt(iau,1)}%, FC: {fmt(fc,0)} lpm. "
-    f"Conclusión operativa: {dx}. {format_saha_central_htn(row, compact=True)} {format_saha_aix75(row, compact=True)} "
+    f"Conclusión diagnóstica: {status.get('diagnostico', dx)} "
     f"Perfil hemodinámico agregado: {risk}. "
     f"Síntesis: {'; '.join(pressure_flags) if pressure_flags else 'sin marcadores suficientes para estratificación central completa'}."
   )
@@ -2566,7 +2600,7 @@ def interpret_harmonic_profile(hdf):
     if not np.isnan(e_high) and e_high >= 25:
       spectral_note = "mayor contenido de alta frecuencia, hallazgo compatible con morfología más abrupta o mayor complejidad de la onda de presión"
     elif not np.isnan(e_high) and e_high >= 12:
-      spectral_note = "contenido de alta frecuencia intermedio"
+      spectral_note = "contenido de alta frecuencia no aumentado"
     else:
       spectral_note = "predominio de componentes armónicos bajos, compatible con onda más suavizada"
 
@@ -2595,8 +2629,8 @@ def interpret_rvse_profile(row, sep_metrics):
     grade = "reducido"
     meaning = "sugiere menor reserva subendocárdica relativa o mayor demanda sistólica respecto del tiempo diastólico disponible"
   elif rvse_calc < 150:
-    grade = "limítrofe/intermedio"
-    meaning = "sugiere balance subendocárdico intermedio, dependiente de la frecuencia cardíaca, presión diastólica central y poscarga sistólica"
+    grade = "conservado"
+    meaning = "no cumple criterio de reducción franca; interpretar junto con frecuencia cardíaca, presión diastólica central y poscarga sistólica"
   else:
     grade = "conservado"
     meaning = "sugiere balance presión-tiempo diastólico/sistólico favorable en la curva analizada"
@@ -2616,68 +2650,37 @@ def interpret_rvse_profile(row, sep_metrics):
 
 def _didactic_grade_pressure(row):
   """Conclusión cualitativa sin métricas para presión central/carga pulsátil."""
-  pas_c = to_float(row.get("pas_central"))
   pp_c = to_float(row.get("pp_central"))
   au = to_float(row.get("au"))
   iau = to_float(row.get("iau"))
-  pas_r = to_float(row.get("pas_radial"))
   pp_r = to_float(row.get("pp_radial"))
   ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
 
-  saha_ref = get_saha_central_sbp_reference(row)
+  status = central_hypertension_status(row)
   aix_ref = get_saha_aix75_reference(row)
 
-  # Presión central ajustada por edad/sexo.
-  if saha_ref.get("ok"):
-    if saha_ref.get("alterada"):
-      pressure = "La presión aórtica central se encuentra elevada para la edad y el sexo del paciente, compatible con hipertensión central ajustada."
-      pressure_short = "presión central aumentada."
+  if status.get("ok"):
+    if status.get("tiene_hta_central"):
+      pressure = "El paciente presenta hipertensión central según el criterio seleccionado para el informe."
+      pressure_short = "hipertensión central: SÍ."
       pressure_level = "alterada"
-    elif pas_c >= saha_ref.get("p90", np.inf):
-      pressure = "La presión aórtica central se ubica en una zona alta o limítrofe para la edad y el sexo, sin alcanzar criterio franco de hipertensión central."
-      pressure_short = "presión central limítrofe alta."
-      pressure_level = "limítrofe"
-    elif pas_c >= saha_ref.get("mediana", np.inf):
-      pressure = "La presión aórtica central se encuentra por encima de la mediana esperada, pero sin criterio de hipertensión central."
-      pressure_short = "presión central discretamente alta, sin hipertensión central."
-      pressure_level = "intermedia"
     else:
-      pressure = "La presión aórtica central se encuentra dentro de un rango esperado para la edad y el sexo del paciente."
-      pressure_short = "presión central conservada."
-      pressure_level = "normal"
-  elif not np.isnan(pas_c):
-    if pas_c >= 130:
-      pressure = "La presión aórtica central se interpreta como elevada por criterio clínico de respaldo."
-      pressure_short = "presión central aumentada."
-      pressure_level = "alterada"
-    elif pas_c >= 120:
-      pressure = "La presión aórtica central se interpreta como limítrofe por criterio clínico de respaldo."
-      pressure_short = "presión central limítrofe."
-      pressure_level = "limítrofe"
-    else:
-      pressure = "La presión aórtica central no muestra elevación relevante."
-      pressure_short = "presión central conservada."
+      pressure = "El paciente no presenta hipertensión central según el criterio seleccionado para el informe."
+      pressure_short = "hipertensión central: NO."
       pressure_level = "normal"
   else:
-    pressure = "La presión aórtica central no pudo clasificarse de forma completa por datos insuficientes."
-    pressure_short = "clasificación no disponible."
+    pressure = "La hipertensión central no pudo clasificarse por ausencia de PAS central válida."
+    pressure_short = "hipertensión central: no clasificable."
     pressure_level = "sin_datos"
 
-  # Carga pulsátil y amplificación.
   pulse_flags = []
   if not np.isnan(pp_c):
-    if pp_c >= 60:
-      pulse_flags.append("carga pulsátil central marcadamente aumentada")
-    elif pp_c >= 50:
+    if pp_c >= 50:
       pulse_flags.append("carga pulsátil central aumentada")
-    elif pp_c >= 45:
-      pulse_flags.append("carga pulsátil central limítrofe")
     else:
       pulse_flags.append("carga pulsátil central conservada")
   if not np.isnan(ppa):
-    if ppa < 1.20:
-      pulse_flags.append("pérdida franca de amplificación periférico-central")
-    elif ppa < 1.30:
+    if ppa < 1.30:
       pulse_flags.append("amplificación periférico-central reducida")
     else:
       pulse_flags.append("amplificación periférico-central conservada")
@@ -2685,15 +2688,11 @@ def _didactic_grade_pressure(row):
     pulse_flags.append("aumentación central positiva")
   if aix_ref.get("ok"):
     if aix_ref.get("alterada"):
-      pulse_flags.append("aumentación central elevada para edad y sexo")
-    elif iau >= aix_ref.get("p75", np.inf):
-      pulse_flags.append("aumentación central limítrofe alta para edad y sexo")
+      pulse_flags.append("aumentación central aumentada para edad y sexo")
     else:
-      pulse_flags.append("aumentación central esperada para edad y sexo")
+      pulse_flags.append("aumentación central no aumentada para edad y sexo")
   elif not np.isnan(iau):
-    if iau >= 35:
-      pulse_flags.append("aumentación central marcada")
-    elif iau >= 25:
+    if iau >= 25:
       pulse_flags.append("aumentación central aumentada")
     else:
       pulse_flags.append("aumentación central no aumentada")
@@ -2702,14 +2701,10 @@ def _didactic_grade_pressure(row):
     pulse_text = "La carga pulsátil central no pudo clasificarse de forma completa por datos insuficientes."
     pulse_short = "carga pulsátil no clasificable."
   else:
-    adverse = any(("aumentada" in x or "reducida" in x or "pérdida" in x or "marcada" in x or "elevada" in x) for x in pulse_flags)
-    borderline = any("limítrofe" in x for x in pulse_flags)
+    adverse = any(("aumentada" in x or "reducida" in x or "positiva" in x) for x in pulse_flags)
     if adverse:
       pulse_text = "La carga pulsátil central muestra elementos desfavorables que sugieren mayor transmisión de energía pulsátil hacia la aorta y órganos centrales."
-      pulse_short = "carga pulsátil central aumentada o amplificación desfavorable."
-    elif borderline:
-      pulse_text = "La carga pulsátil central muestra un comportamiento intermedio, con señales limítrofes que requieren integración con el contexto clínico."
-      pulse_short = "carga pulsátil limítrofe."
+      pulse_short = "carga pulsátil central aumentada o amplificación reducida."
     else:
       pulse_text = "La carga pulsátil y la amplificación periférico-central se mantienen en un perfil favorable."
       pulse_short = "carga pulsátil y amplificación conservadas."
@@ -2731,14 +2726,8 @@ def _didactic_grade_rvse(sep_metrics):
       "reserva subendocárdica reducida.",
       "alterada",
     )
-  if rvse_calc < 150:
-    return (
-      "La reserva subendocárdica se ubica en una zona intermedia, dependiente de la frecuencia cardíaca, presión diastólica y poscarga central.",
-      "reserva subendocárdica intermedia.",
-      "limítrofe",
-    )
   return (
-    "La reserva subendocárdica se encuentra conservada, con balance presión-tiempo globalmente favorable en la curva analizada.",
+    "La reserva subendocárdica se interpreta como conservada, con balance presión-tiempo globalmente favorable en la curva analizada.",
     "reserva subendocárdica conservada.",
     "normal",
   )
@@ -2759,28 +2748,21 @@ def _didactic_grade_wave(sep_metrics):
     )
 
   adverse = False
-  borderline = False
   favorable = False
 
   if not np.isnan(rm):
     if rm >= 0.50:
       adverse = True
-    elif rm >= 0.35:
-      borderline = True
     else:
       favorable = True
   if not np.isnan(ri):
     if ri >= 0.35:
       adverse = True
-    elif ri >= 0.25:
-      borderline = True
     else:
       favorable = True
   if not np.isnan(tref):
     if tref < 320:
       adverse = True
-    elif tref <= 430:
-      borderline = True
     else:
       favorable = True
 
@@ -2790,21 +2772,15 @@ def _didactic_grade_wave(sep_metrics):
       "reflexión de onda aumentada o precoz.",
       "alterada",
     )
-  if borderline:
-    return (
-      "La separación de ondas muestra una contribución retrógrada intermedia, sin predominio claramente severo. Debe integrarse con presión central, reserva subendocárdica y riesgo clínico.",
-      "reflexión de onda intermedia.",
-      "limítrofe",
-    )
   if favorable:
     return (
-      "La separación de ondas muestra baja contribución retrógrada o retorno reflejo tardío, compatible con interacción ventrículo-arterial favorable.",
-      "reflexión de onda baja o tardía.",
+      "La separación de ondas muestra baja contribución retrógrada o retorno reflejo no precoz, compatible con interacción ventrículo-arterial favorable.",
+      "reflexión de onda no aumentada.",
       "normal",
     )
   return (
-    "La separación de ondas fue estimable, pero su interpretación queda en zona indeterminada.",
-    "reflexión de onda indeterminada.",
+    "La separación de ondas fue estimable, pero no pudo asignarse un diagnóstico estable con los datos disponibles.",
+    "reflexión de onda no clasificable.",
     "sin_datos",
   )
 
@@ -2818,23 +2794,11 @@ def _didactic_grade_harmonics(hdf):
     e1 = e[0] if len(e) > 0 else np.nan
     e_high = np.nansum(e[3:]) if len(e) > 4 else np.nan
 
-    if not np.isnan(e_high) and e_high >= 25:
+    if (not np.isnan(e_high) and e_high >= 25) or (not np.isnan(e1) and e1 < 35):
       return (
-        "El análisis armónico muestra alta complejidad espectral, compatible con una onda más abrupta o con mayor contenido de componentes rápidos.",
+        "El análisis armónico muestra complejidad espectral aumentada, compatible con una onda más abrupta o con mayor contenido de componentes rápidos.",
         "complejidad armónica aumentada.",
         "alterada",
-      )
-    if not np.isnan(e_high) and e_high >= 12:
-      return (
-        "El análisis armónico muestra complejidad espectral intermedia, sin patrón claramente severo, pero con mayor contenido de componentes superiores.",
-        "complejidad armónica intermedia.",
-        "limítrofe",
-      )
-    if not np.isnan(e1) and e1 < 35:
-      return (
-        "El análisis armónico muestra menor predominio de la onda fundamental, lo que puede sugerir una morfología menos suavizada.",
-        "menor predominio armónico fundamental.",
-        "limítrofe",
       )
     return (
       "El análisis armónico muestra predominio de componentes bajos, compatible con una onda central relativamente suavizada.",
@@ -2927,7 +2891,7 @@ def build_continuous_conclusions(row, wave_df, hdf):
   c1 = (
     f"{pressure_txt} "
     f"{pulse_txt} "
-    f"Conclusión breve: {pressure_short.capitalize()}"
+    f"Conclusión diagnóstica: {pressure_short.capitalize()}"
   )
 
   c2 = (
@@ -2963,7 +2927,7 @@ def build_continuous_conclusions(row, wave_df, hdf):
   c7 = (
     f"{phenotype_txt} "
     "Esta conclusión integra presión central, carga pulsátil, aumentación, reflexión de onda, reserva subendocárdica y morfología armónica. "
-    f"Conclusión final: {phenotype_short.capitalize()}"
+    f"Conclusión integrada: {phenotype_short.capitalize()}"
   )
 
   return [
@@ -3047,12 +3011,6 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
         f"HTA central si ≥P95 ({saha_ref['p95']:.1f} mmHg); {saha_ref['sexo']} {saha_ref['edad_grupo']} años, {saha_ref['metodo']}",
         f"hipertensión central ajustada por edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 3
       )
-    elif pas_c >= saha_ref.get("p90", np.inf):
-      pressure_score += add_metric(
-        pressure_metrics, True, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
-        f"alta/limítrofe si ≥P90 ({saha_ref['p90']:.1f}) y <P95 ({saha_ref['p95']:.1f})",
-        f"PAS central alta para edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 1
-      )
     else:
       add_metric(
         pressure_metrics, False, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
@@ -3062,10 +3020,8 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   elif not np.isnan(pas_c):
     if pas_c >= 130:
       pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "alterada si ≥130 mmHg por umbral fijo de respaldo", "presión central sistólica elevada", 2)
-    elif pas_c >= 120:
-      pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c, 0, " mmHg"), "limítrofe 120-129 mmHg por umbral fijo de respaldo", "presión central sistólica limítrofe", 1)
     else:
-      add_metric(pressure_metrics, False, "PAS central", fmt(pas_c, 0, " mmHg"), "normal si <120-130 mmHg según contexto", "no elevada", 0)
+      add_metric(pressure_metrics, False, "PAS central", fmt(pas_c, 0, " mmHg"), "sin hipertensión central si <130 mmHg por umbral fijo de respaldo", "sin hipertensión central", 0)
   if not np.isnan(pp_c):
     if pp_c >= 60:
       pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c, 0, " mmHg"), "marcadamente alterada si ≥60 mmHg", "carga pulsátil central alta", 2)
@@ -3081,16 +3037,10 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
         f"aumentado si ≥P90 ({saha_aix['p90']:.1f}%); {saha_aix['sexo']} {saha_aix['edad_grupo']} años",
         f"aumentación central elevada para edad/sexo; percentil {saha_aix['percentil']:.0f}, z aprox {saha_aix['z_aprox']:.2f}", 2
       )
-    elif iau >= saha_aix.get("p75", np.inf):
-      pressure_score += add_metric(
-        pressure_metrics, True, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
-        f"alto-limítrofe si ≥P75 ({saha_aix['p75']:.1f}%) y <P90 ({saha_aix['p90']:.1f}%)",
-        f"aumentación central alta para edad/sexo; percentil {saha_aix['percentil']:.0f}", 1
-      )
     else:
       add_metric(
         pressure_metrics, False, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
-        f"esperado si <P75 ({saha_aix['p75']:.1f}%)",
+        f"no aumentado si <P90 ({saha_aix['p90']:.1f}%)",
         f"P50 {saha_aix['p50']:.1f}%, P90 {saha_aix['p90']:.1f}%, percentil {saha_aix['percentil']:.0f}", 0
       )
   elif not np.isnan(iau):
@@ -3115,33 +3065,25 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   if not np.isnan(rvse_calc):
     if rvse_calc < 120:
       pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "reducido si <120%", "menor reserva subendocárdica relativa / peor balance oferta-demanda", 2)
-    elif rvse_calc < 150:
-      pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "intermedio 120-149%", "balance subendocárdico intermedio", 1)
     else:
-      add_metric(pressure_metrics, False, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "conservado si ≥150%", "balance subendocárdico conservado", 0)
+      add_metric(pressure_metrics, False, "RVSE/SEVR calculado", fmt(rvse_calc, 1, "%"), "conservado si ≥120%", "balance subendocárdico conservado", 0)
 
   wave_score = 0
   if not np.isnan(rm):
     if rm >= 0.50:
       wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "elevada si ≥0.50", "onda retrógrada de gran magnitud relativa", 2)
-    elif rm >= 0.35:
-      wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm, 2), "intermedia 0.35-0.49", "reflexión de onda intermedia", 1)
     else:
-      add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm, 2), "baja si <0.35", "baja magnitud retrógrada", 0)
+      add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm, 2), "no elevada si <0.50", "sin aumento definido de magnitud retrógrada", 0)
   if not np.isnan(ri):
     if ri >= 0.35:
       wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "aumentado si ≥0.35", "mayor contribución relativa de Pb", 2)
-    elif ri >= 0.25:
-      wave_score += add_metric(wave_metrics, True, "RI", fmt(ri, 2), "intermedio 0.25-0.34", "contribución retrógrada intermedia", 1)
     else:
-      add_metric(wave_metrics, False, "RI", fmt(ri, 2), "bajo si <0.25", "menor peso retrógrado", 0)
+      add_metric(wave_metrics, False, "RI", fmt(ri, 2), "no aumentado si <0.35", "sin aumento definido de contribución retrógrada", 0)
   if not np.isnan(tref):
     if tref < 320:
       wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "precoz si <320 ms", "retorno reflejo precoz compatible con mayor rigidez/reflexión temprana", 2)
-    elif tref <= 430:
-      wave_score += add_metric(wave_metrics, True, "Tref", fmt(tref, 0, " ms"), "intermedio 320-430 ms", "retorno reflejo intermedio", 1)
     else:
-      add_metric(wave_metrics, False, "Tref", fmt(tref, 0, " ms"), "tardío si >430 ms", "retorno reflejo tardío", 0)
+      add_metric(wave_metrics, False, "Tref", fmt(tref, 0, " ms"), "no precoz si ≥320 ms", "retorno reflejo no precoz", 0)
   if not np.isnan(pb) and not np.isnan(pf) and pf > 0:
     add_metric(wave_metrics, pb / pf >= 0.35, "Pf/Pb pico", f"Pf {fmt(pf,1,' mmHg')} / Pb {fmt(pb,1,' mmHg')}", "Pb relevante si Pb/Pf ≥0.35", "relación directa de componentes anterógrado y retrógrado", 0)
 
@@ -3149,10 +3091,8 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   if not np.isnan(e_high):
     if e_high >= 25:
       harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "alto si ≥25% desde cuarto componente", "alta complejidad espectral / onda más abrupta", 2)
-    elif e_high >= 12:
-      harmonic_score += add_metric(harmonic_metrics, True, "Armónicos superiores", fmt(e_high, 1, "%"), "intermedio 12-24%", "complejidad espectral intermedia", 1)
     else:
-      add_metric(harmonic_metrics, False, "Armónicos superiores", fmt(e_high, 1, "%"), "bajo si <12%", "predominio de componentes bajos", 0)
+      add_metric(harmonic_metrics, False, "Armónicos superiores", fmt(e_high, 1, "%"), "no alto si <25%", "predominio de componentes bajos", 0)
   if not np.isnan(e1):
     if e1 < 35:
       harmonic_score += add_metric(harmonic_metrics, True, "Primer armónico", fmt(e1, 1, "%"), "menor predominio si <35%", "menor dominio de onda fundamental", 1)
@@ -3215,7 +3155,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
   ]
 
   text = (
-    f"Fenotipo final de presión central: {phenotype}. "
+    f"Conclusión integrada: Fenotipo final de presión central: {phenotype}. "
     f"Métricas que definen el fenotipo: {altered_text}. "
     f"La combinación de estas variables configura un patrón de {mechanism}. "
     f"Resumen cuantitativo: PAS central {fmt(pas_c,0,' mmHg')}, PAD central {fmt(pad_c,0,' mmHg')}, "
@@ -3441,7 +3381,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
   conclusion_rows = []
   for title, body in conclusion_blocks:
     conclusion_rows.append([Paragraph(pdf_text(title), styles["MiniTitlePAC"])])
-    conclusion_rows.append([Paragraph(pdf_text(body), styles["ConclusionPAC"])])
+    conclusion_rows.append([Paragraph(_pdf_bold_conclusions(body), styles["ConclusionPAC"])])
   story.append(Table(conclusion_rows, colWidths=[188*mm], style=TableStyle([
     ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
     ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
@@ -3704,7 +3644,7 @@ summary_cols[3].metric("RVSE equipo", f"{to_float(row.get('rvse')):.0f}%" if not
 summary_cols[4].metric("Modo de curva", "REAL PDF/CSV" if wave_df is not None else "BLOQUEADO")
 
 st.markdown("### Análisis de presión central y métricas")
-st.write(dx)
+st.markdown(f"**{dx}**")
 st.write(f"Categoría braquial: {cat}. Amplificación PAS periférico-central: {amp_sbp:.1f} mmHg si disponible. Perfil agregado: {risk}.")
 
 if wave_df is not None:
@@ -3717,10 +3657,10 @@ if wave_df is not None:
   st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
   st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
-  st.markdown("### Conclusiones clínicas resumidas y didácticas")
+  st.markdown("### Conclusiones clínicas diagnósticas")
   for title, body in conclusion_blocks_preview:
     st.markdown(f"**{title}**")
-    st.write(body)
+    st.markdown(_markdown_bold_conclusions(body))
 
   st.markdown("---")
   st.markdown("### Gráficos")
@@ -3741,7 +3681,7 @@ if wave_df is not None:
   st.markdown("---")
   st.markdown("### Fenotipo final de presión central")
   st.success(final_phenotype_preview)
-  st.write(final_phenotype_text_preview)
+  st.markdown(_markdown_bold_conclusions(final_phenotype_text_preview))
   st.dataframe(pd.DataFrame(final_phenotype_table_preview[1:], columns=final_phenotype_table_preview[0]), use_container_width=True)
 else:
   st.warning("Carga pendiente: PDF con curva visible o archivo CSV/TXT de curva real con columnas tiempo_ms y presion_mmHg, o equivalentes reconocibles. Sin curva real no se habilita el PDF final.")
