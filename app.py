@@ -2649,15 +2649,16 @@ def interpret_rvse_profile(row, sep_metrics):
 
 
 def _didactic_grade_pressure(row):
-  """Conclusión cualitativa sin métricas para presión central/carga pulsátil."""
+  """Conclusión cualitativa sin métricas para presión central/carga pulsátil.
+
+  La salida está pensada para informe médico: diagnóstico binario de hipertensión
+  central y conclusión por dimensión, sin unir alternativas con "o".
+  """
   pp_c = to_float(row.get("pp_central"))
-  au = to_float(row.get("au"))
-  iau = to_float(row.get("iau"))
   pp_r = to_float(row.get("pp_radial"))
   ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
 
   status = central_hypertension_status(row)
-  aix_ref = get_saha_aix75_reference(row)
 
   if status.get("ok"):
     if status.get("tiene_hta_central"):
@@ -2673,43 +2674,85 @@ def _didactic_grade_pressure(row):
     pressure_short = "hipertensión central: no clasificable."
     pressure_level = "sin_datos"
 
-  pulse_flags = []
-  if not np.isnan(pp_c):
-    if pp_c >= 50:
-      pulse_flags.append("carga pulsátil central aumentada")
-    else:
-      pulse_flags.append("carga pulsátil central conservada")
-  if not np.isnan(ppa):
-    if ppa < 1.30:
-      pulse_flags.append("amplificación periférico-central reducida")
-    else:
-      pulse_flags.append("amplificación periférico-central conservada")
-  if not np.isnan(au) and au > 0:
-    pulse_flags.append("aumentación central positiva")
-  if aix_ref.get("ok"):
-    if aix_ref.get("alterada"):
-      pulse_flags.append("aumentación central aumentada para edad y sexo")
-    else:
-      pulse_flags.append("aumentación central no aumentada para edad y sexo")
-  elif not np.isnan(iau):
-    if iau >= 25:
-      pulse_flags.append("aumentación central aumentada")
-    else:
-      pulse_flags.append("aumentación central no aumentada")
+  carga_aumentada = (not np.isnan(pp_c) and pp_c >= 50) or bool(status.get("tiene_hta_central", False))
+  amplificacion_reducida = not np.isnan(ppa) and ppa < 1.30
+  hay_datos_pulso = (not np.isnan(pp_c)) or (not np.isnan(ppa)) or status.get("ok")
 
-  if not pulse_flags:
+  if not hay_datos_pulso:
     pulse_text = "La carga pulsátil central no pudo clasificarse de forma completa por datos insuficientes."
     pulse_short = "carga pulsátil no clasificable."
+    pulse_level = "sin_datos"
+  elif carga_aumentada and amplificacion_reducida:
+    pulse_text = "El estudio evidencia aumento de la carga pulsátil central, con menor amortiguación periférica de la onda de pulso, compatible con rigidez vascular funcional aumentada."
+    pulse_short = "aumento de la carga pulsátil central con amplificación periférica reducida."
+    pulse_level = "alterada"
+  elif carga_aumentada and not amplificacion_reducida:
+    pulse_text = "El estudio evidencia aumento de la carga pulsátil central, con amortiguación periférica de la onda de pulso relativamente conservada; el patrón sugiere sobrecarga central predominante sin pérdida franca de amplificación periférica."
+    pulse_short = "aumento de la carga pulsátil central con amplificación periférica conservada."
+    pulse_level = "alterada"
+  elif (not carga_aumentada) and amplificacion_reducida:
+    pulse_text = "El estudio evidencia amplificación periférico-central reducida, con menor amortiguación periférica de la onda de pulso, aun sin aumento franco de la carga pulsátil central."
+    pulse_short = "amplificación periférico-central reducida sin aumento franco de carga pulsátil central."
+    pulse_level = "alterada"
   else:
-    adverse = any(("aumentada" in x or "reducida" in x or "positiva" in x) for x in pulse_flags)
-    if adverse:
-      pulse_text = "La carga pulsátil central muestra elementos desfavorables que sugieren mayor transmisión de energía pulsátil hacia la aorta y órganos centrales."
-      pulse_short = "carga pulsátil central aumentada o amplificación reducida."
-    else:
-      pulse_text = "La carga pulsátil y la amplificación periférico-central se mantienen en un perfil favorable."
-      pulse_short = "carga pulsátil y amplificación conservadas."
+    pulse_text = "El estudio no evidencia aumento de la carga pulsátil central y mantiene una amortiguación periférica de la onda de pulso conservada."
+    pulse_short = "carga pulsátil central no aumentada con amplificación periférica conservada."
+    pulse_level = "normal"
 
-  return pressure, pressure_short, pressure_level, pulse_text, pulse_short
+  return pressure, pressure_short, pressure_level, pulse_text, pulse_short, pulse_level
+
+
+def _didactic_grade_augmentation(row):
+  """Conclusión cualitativa específica de la dimensión de aumentación central."""
+  au = to_float(row.get("au"))
+  iau = to_float(row.get("iau"))
+  aix_ref = get_saha_aix75_reference(row)
+
+  if aix_ref.get("ok"):
+    aumentada = bool(aix_ref.get("alterada", False))
+    if aumentada:
+      return (
+        "El estudio evidencia aumentación central aumentada para edad y sexo, compatible con mayor contribución de la onda reflejada al componente sistólico central.",
+        "aumentación central aumentada para edad y sexo.",
+        "alterada",
+      )
+    return (
+      "El estudio no evidencia aumentación central aumentada para edad y sexo, compatible con contribución reflectiva central no incrementada.",
+      "aumentación central no aumentada para edad y sexo.",
+      "normal",
+    )
+
+  if not np.isnan(iau):
+    if iau >= 25:
+      return (
+        "El estudio evidencia aumentación central aumentada por criterio operativo de respaldo, compatible con mayor participación de la onda reflejada en la presión sistólica central.",
+        "aumentación central aumentada.",
+        "alterada",
+      )
+    return (
+      "El estudio no evidencia aumentación central aumentada por criterio operativo de respaldo.",
+      "aumentación central no aumentada.",
+      "normal",
+    )
+
+  if not np.isnan(au):
+    if au > 0:
+      return (
+        "El estudio muestra aumentación central positiva, hallazgo que debe integrarse con IAu/AIx, presión de pulso central y separación de ondas.",
+        "aumentación central positiva.",
+        "alterada",
+      )
+    return (
+      "El estudio no muestra aumentación central positiva en el dato disponible.",
+      "aumentación central no positiva.",
+      "normal",
+    )
+
+  return (
+    "La aumentación central no pudo clasificarse por ausencia de datos válidos de Au o IAu/AIx.",
+    "aumentación central no clasificable.",
+    "sin_datos",
+  )
 
 
 def _didactic_grade_rvse(sep_metrics):
@@ -2882,7 +2925,8 @@ def build_continuous_conclusions(row, wave_df, hdf):
   sep_interp = interpret_wave_separation(sep_metrics)
   phenotype, _, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
 
-  pressure_txt, pressure_short, pressure_level, pulse_txt, pulse_short = _didactic_grade_pressure(row)
+  pressure_txt, pressure_short, pressure_level, pulse_txt, pulse_short, pulse_level = _didactic_grade_pressure(row)
+  aug_txt, aug_short, aug_level = _didactic_grade_augmentation(row)
   rvse_txt, rvse_short, rvse_level = _didactic_grade_rvse(sep_metrics)
   wave_txt, wave_short, wave_level = _didactic_grade_wave(sep_metrics)
   harm_txt, harm_short, harm_level = _didactic_grade_harmonics(hdf)
@@ -2902,12 +2946,9 @@ def build_continuous_conclusions(row, wave_df, hdf):
 
   c3 = (
     "El análisis de aumentación central evalúa cuánto contribuye la onda reflejada al componente sistólico central. "
-    "Cuando se encuentra aumentada, sugiere mayor poscarga pulsátil; cuando es esperada, acompaña un perfil vascular más favorable. "
+    f"{aug_txt} "
+    f"Conclusión breve: {aug_short.capitalize()}"
   )
-  if "aumentación" in pulse_short or "amplificación" in pulse_short or "carga pulsátil" in pulse_short:
-    c3 += f"Conclusión breve: {pulse_short.capitalize()}"
-  else:
-    c3 += "Conclusión breve: aumentación central sin alteraciones relevantes."
 
   c4 = (
     f"{wave_txt} "
