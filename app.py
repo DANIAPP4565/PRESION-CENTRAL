@@ -3008,7 +3008,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
   except Exception:
     return alerts[:7]
 
-def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=980):
+def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1080):
   """Animación HTML/SVG de aorta con presión real, separación Pf/Pb y armónicos.
 
   La animación no crea una curva nueva: usa la curva real regularizada del paciente,
@@ -3172,6 +3172,12 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=9
   .pfLine {{ fill:none; stroke:var(--pf); stroke-width:2; }}
   .pbLine {{ fill:none; stroke:var(--pb); stroke-width:2; stroke-dasharray:5 4; }}
   .marker {{ stroke:#fff; stroke-width:2; }}
+  .metricOverlayBox { fill:#ffffff; stroke:#d5e3ef; stroke-width:1.4; opacity:.96; }
+  .metricOverlayTitle { fill:#12355b; font-size:11px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
+  .metricOverlayLabel { fill:#617385; font-size:10.5px; }
+  .metricOverlayValue { fill:#183044; font-size:16px; font-weight:900; }
+  .metricOverlayMini { fill:#617385; font-size:10.5px; }
+  .metricOverlayLine { stroke:#d5e3ef; stroke-width:1; }
   @media (max-width:850px) {{ .stage {{ grid-template-columns:1fr; }} .cards {{ grid-template-columns:repeat(2,minmax(115px,1fr)); }} .alertLine {{ font-size:12.5px; line-height:1.5; }} }}
 </style>
 </head>
@@ -3208,9 +3214,6 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=9
           <filter id="waveGlow"><feDropShadow dx="0" dy="0" stdDeviation="4" flood-color="#ffffff" flood-opacity=".80"/></filter>
         </defs>
         <rect x="18" y="18" width="784" height="394" rx="20" fill="#fbfdff" stroke="#d5e3ef"/>
-        <text id="liveP" x="410" y="50" text-anchor="middle" fill="#12355b" font-size="19" font-weight="800">-- mmHg</text>
-        <text x="410" y="70" text-anchor="middle" fill="#617385" font-size="12">Pulsatilidad proporcional a la presión central real</text>
-
         <g id="anatomyLayer" filter="url(#softShadow)">
           <!-- Sombra de silueta cardiaca para orientar la raíz aórtica -->
           <path d="M165 215 C122 182 124 129 169 107 C198 92 227 105 244 130 C263 101 303 92 331 116 C377 157 347 226 247 286 C211 263 184 238 165 215 Z" fill="#f2b5ae" opacity=".28"/>
@@ -3255,6 +3258,22 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=9
           <circle r="12" fill="#ef6c00" opacity=".92" class="marker"/>
           <circle r="23" fill="#ef6c00" opacity=".13"/>
         </g>
+
+        <!-- Tablero dinámico en primer plano: evita que las métricas queden detrás del arco aórtico -->
+        <g id="liveMetricOverlay" transform="translate(34 34)">
+          <rect class="metricOverlayBox" x="0" y="0" width="218" height="124" rx="16"/>
+          <text class="metricOverlayTitle" x="14" y="22">Métricas dinámicas</text>
+          <line class="metricOverlayLine" x1="14" x2="204" y1="32" y2="32"/>
+          <text class="metricOverlayLabel" x="14" y="51">Presión central instantánea</text>
+          <text id="liveP" class="metricOverlayValue" x="14" y="72">-- mmHg</text>
+          <text class="metricOverlayLabel" x="116" y="51">Flujo</text>
+          <text id="liveQOverlay" class="metricOverlayValue" x="116" y="72">--</text>
+          <text class="metricOverlayLabel" x="14" y="94">Pf / Pb</text>
+          <text id="livePfPbOverlay" class="metricOverlayMini" x="14" y="112">-- / --</text>
+          <text class="metricOverlayLabel" x="116" y="94">Tiempo ciclo</text>
+          <text id="liveTimeOverlay" class="metricOverlayMini" x="116" y="112">0 ms</text>
+        </g>
+
         <text x="92" y="192" fill="#168038" font-size="13" font-weight="700">Pf anterógrada</text>
         <text x="562" y="222" fill="#ef6c00" font-size="13" font-weight="700">Pb retrógrada</text>
 
@@ -3427,6 +3446,12 @@ function update(idx) {{
   if(pfG) {{ pfG.setAttribute('transform', 'translate('+pfPt.x.toFixed(1)+' '+pfPt.y.toFixed(1)+')'); pfG.querySelector('circle').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13); }}
   if(pbG) {{ pbG.setAttribute('transform', 'translate('+pbPt.x.toFixed(1)+' '+pbPt.y.toFixed(1)+')'); pbG.querySelector('circle').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12); }}
   document.getElementById('liveP').textContent = fmt(p,0)+' mmHg';
+  const qOverlay = document.getElementById('liveQOverlay');
+  if(qOverlay) qOverlay.textContent = fmt(q,0)+' mL/s';
+  const pfPbOverlay = document.getElementById('livePfPbOverlay');
+  if(pfPbOverlay) pfPbOverlay.textContent = fmt(pf,1)+' / '+fmt(pb,1)+' mmHg';
+  const timeOverlay = document.getElementById('liveTimeOverlay');
+  if(timeOverlay) timeOverlay.textContent = fmt(data.t[i],0)+' ms';
   const x = sx(i), y = sy(p);
   document.getElementById('cursor').setAttribute('x1', x); document.getElementById('cursor').setAttribute('x2', x);
   document.getElementById('pDot').setAttribute('cx', x); document.getElementById('pDot').setAttribute('cy', y);
@@ -4680,9 +4705,9 @@ if wave_df is not None:
 
   st.markdown("### Animación hemodinámica real de la aorta")
   st.caption("Animación didáctica basada en la curva real del paciente, separación Pf/Pb, flujo aórtico estimado y armónicos. No usa curvas sintéticas ni plantillas fijas.")
-  animation_html = render_aortic_real_metrics_animation(row, sep_df_preview, sep_metrics_preview, hdf, height=980)
+  animation_html = render_aortic_real_metrics_animation(row, sep_df_preview, sep_metrics_preview, hdf, height=1080)
   if animation_html:
-    components.html(animation_html, height=1020, scrolling=True)
+    components.html(animation_html, height=1120, scrolling=True)
   else:
     st.warning("No fue posible construir la animación con los datos disponibles.")
 
