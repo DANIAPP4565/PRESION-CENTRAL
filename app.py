@@ -4091,6 +4091,154 @@ def _didactic_phenotype_text(phenotype):
   )
 
 
+
+def build_automatic_integrated_conclusion(row, sep_metrics=None, hdf=None):
+  """Conclusión integrada automática con alternativas binarias coherentes.
+
+  Integra de manera explícita:
+  - presencia/ausencia de hipertensión central,
+  - con/sin aumentación central aumentada,
+  - patrón de reflexión aumentado/no aumentado,
+  - distribución armónica compatible/no compatible con mayor complejidad pulsátil central.
+
+  La redacción evita términos ambiguos y agrega valores/criterios cuando están disponibles.
+  """
+  sep_metrics = sep_metrics or {}
+
+  def fmt(v, dec=1, unit=""):
+    try:
+      f = float(v)
+      if np.isnan(f):
+        return "no disponible"
+      return f"{f:.{dec}f}{unit}"
+    except Exception:
+      return "no disponible"
+
+  # 1) Hipertensión central: binaria por P90 SAHA o respaldo operativo.
+  hta_status = central_hypertension_status(row)
+  hta_altered = False
+  if hta_status.get("ok"):
+    hta_altered = bool(hta_status.get("tiene_hta_central", False))
+    hta_phrase = "presencia de hipertensión central" if hta_altered else "ausencia de hipertensión central"
+    hta_detail = (
+      f"PAS central {fmt(hta_status.get('pas_central'),0,' mmHg')} frente a límite diagnóstico "
+      f"{fmt(hta_status.get('umbral'),1,' mmHg')} ({hta_status.get('criterio','criterio no especificado')})"
+    )
+  else:
+    hta_phrase = "hipertensión central no clasificable"
+    hta_detail = hta_status.get("criterio", "PAS central no disponible")
+
+  # 2) Aumentación central: IAu/AIx por referencia edad/sexo; respaldo por IAu o Au.
+  iau = to_float(row.get("iau"))
+  au = to_float(row.get("au"))
+  aix_ref = get_saha_aix75_reference(row)
+  aug_altered = False
+  if aix_ref.get("ok"):
+    aug_altered = bool(aix_ref.get("alterada", False))
+    aug_phrase = "con aumentación central aumentada" if aug_altered else "sin aumentación central aumentada"
+    aug_detail = (
+      f"IAu/AIx {fmt(aix_ref.get('iau'),1,'%')} frente a P90 "
+      f"{fmt(aix_ref.get('p90'),1,'%')} para {aix_ref.get('sexo','')} {aix_ref.get('edad_grupo','')} años; "
+      f"percentil estimado {fmt(aix_ref.get('percentil'),0)}"
+    )
+  elif not np.isnan(iau):
+    aug_altered = iau >= 25
+    aug_phrase = "con aumentación central aumentada" if aug_altered else "sin aumentación central aumentada"
+    aug_detail = f"IAu/AIx {fmt(iau,1,'%')} con criterio operativo de respaldo: aumentado si >=25%"
+  elif not np.isnan(au):
+    aug_altered = au > 0
+    aug_phrase = "con aumentación central positiva" if aug_altered else "sin aumentación central positiva"
+    aug_detail = f"Au {fmt(au,1,' mmHg')}; se usa como respaldo descriptivo por ausencia de IAu/AIx clasificable"
+  else:
+    aug_phrase = "aumentación central no clasificable"
+    aug_detail = "IAu/AIx y Au no disponibles"
+
+  # 3) Reflexión de onda: aumentada si RM o RI elevados, o Tref precoz.
+  rm = sep_metrics.get("rm", np.nan)
+  ri = sep_metrics.get("ri", np.nan)
+  tref = sep_metrics.get("tref_ms", np.nan)
+  reflection_flags = []
+  reflection_details = []
+  if not np.isnan(rm):
+    reflection_details.append(f"RM Pb/Pf {fmt(rm,2)}")
+    if rm >= 0.50:
+      reflection_flags.append("RM elevada")
+  if not np.isnan(ri):
+    reflection_details.append(f"RI {fmt(ri,2)}")
+    if ri >= 0.35:
+      reflection_flags.append("RI aumentado")
+  if not np.isnan(tref):
+    reflection_details.append(f"Tref retorno reflejo {fmt(tref,0,' ms')}")
+    if tref < 320:
+      reflection_flags.append("Tref precoz")
+
+  if reflection_details:
+    reflection_altered = len(reflection_flags) > 0
+    reflection_phrase = "patrón de reflexión aumentado o precoz" if reflection_altered else "patrón de reflexión no aumentado"
+    reflection_detail = "; ".join(reflection_details) + ". Criterios: RM >=0.50, RI >=0.35 o Tref <320 ms."
+  else:
+    reflection_altered = False
+    reflection_phrase = "patrón de reflexión no clasificable"
+    reflection_detail = "no hay métricas suficientes de separación Pf/Pb para clasificar reflexión"
+
+  # 4) Armónicos: mayor complejidad si armónicos altos >=25% o H1 <35%.
+  h1 = np.nan
+  e_high = np.nan
+  harmonic_detail = "sin datos suficientes de FFT"
+  harmonic_altered = False
+  try:
+    if hdf is not None and len(hdf) > 0:
+      e = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+      if len(e) > 0:
+        h1 = e[0]
+      if len(e) > 4:
+        e_high = np.nansum(e[3:])
+      harmonic_altered = ((not np.isnan(e_high) and e_high >= 25) or (not np.isnan(h1) and h1 < 35))
+      harmonic_detail = (
+        f"H1 {fmt(h1,1,'%')} y armónicos superiores desde H4 {fmt(e_high,1,'%')}. "
+        "Criterios: complejidad aumentada si armónicos superiores >=25% o H1 <35%."
+      )
+  except Exception:
+    pass
+
+  if hdf is None or (hasattr(hdf, "__len__") and len(hdf) == 0):
+    harmonic_phrase = "distribución armónica no clasificable"
+  else:
+    harmonic_phrase = (
+      "distribución armónica compatible con mayor complejidad pulsátil central"
+      if harmonic_altered else
+      "distribución armónica no compatible con mayor complejidad pulsátil central"
+    )
+
+  adverse_count = sum([bool(hta_altered), bool(aug_altered), bool(reflection_altered), bool(harmonic_altered)])
+  if adverse_count >= 3:
+    global_phrase = "perfil vascular central globalmente desfavorable, con mayor carga pulsátil y complejidad de onda"
+  elif adverse_count == 2:
+    global_phrase = "perfil vascular central con alteraciones combinadas de impacto intermedio"
+  elif adverse_count == 1:
+    global_phrase = "perfil vascular central con una alteración dominante aislada"
+  elif any("no clasificable" in x for x in [hta_phrase, aug_phrase, reflection_phrase, harmonic_phrase]):
+    global_phrase = "perfil vascular central parcialmente clasificable; interpretar con la calidad de curva y datos disponibles"
+  else:
+    global_phrase = "perfil vascular central conservado o de bajo impacto pulsátil"
+
+  conclusion = (
+    f"Conclusión integrada automática: El estudio evidencia {hta_phrase}, {aug_phrase}, "
+    f"{reflection_phrase} y {harmonic_phrase}. En conjunto, configura un {global_phrase}. "
+    f"Valores y criterios: {hta_detail}; {aug_detail}; {reflection_detail}; {harmonic_detail}. "
+    "La interpretación es integrada y debe correlacionarse con presión braquial, edad, sexo, tratamiento, VOP, riesgo cardiovascular y lesión de órgano blanco."
+  )
+
+  state = {
+    "hta_central_alterada": bool(hta_altered),
+    "aumentacion_alterada": bool(aug_altered),
+    "reflexion_alterada": bool(reflection_altered),
+    "armonicos_alterados": bool(harmonic_altered),
+    "cantidad_dominios_alterados": int(adverse_count),
+    "frase_global": global_phrase,
+  }
+  return conclusion, state
+
 def build_continuous_conclusions(row, wave_df, hdf):
   """Conclusiones clínicas resumidas y didácticas, sin métricas en el texto.
 
@@ -4142,10 +4290,13 @@ def build_continuous_conclusions(row, wave_df, hdf):
     f"Conclusión breve: {harm_short.capitalize()}"
   )
 
+  automatic_integrated_text, automatic_integrated_state = build_automatic_integrated_conclusion(row, sep_metrics, hdf)
+
   c7 = (
     f"{phenotype_txt} "
     "Esta conclusión integra presión central, carga pulsátil, aumentación, reflexión de onda, reserva subendocárdica y morfología armónica. "
-    f"Conclusión integrada: {phenotype_short.capitalize()}"
+    f"Conclusión integrada: {phenotype_short.capitalize()} "
+    f"{automatic_integrated_text}"
   )
 
   return [
@@ -4910,6 +5061,10 @@ if wave_df is not None:
   for title, body in conclusion_blocks_preview:
     st.markdown(f"**{title}**")
     st.markdown(_markdown_bold_conclusions(body))
+
+  automatic_integrated_preview, automatic_integrated_state_preview = build_automatic_integrated_conclusion(row, sep_metrics_preview, hdf)
+  st.markdown("### Conclusión integrada automática")
+  st.success(_markdown_bold_conclusions(automatic_integrated_preview))
 
   st.markdown("---")
   st.markdown("### Gráficos")
