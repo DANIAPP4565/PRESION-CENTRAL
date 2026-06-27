@@ -2672,27 +2672,72 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
 
   <div class="stage">
     <div class="panel">
-      <h3>Aorta funcional: presión, onda anterógrada y onda retrógrada</h3>
-      <svg viewBox="0 0 820 430" role="img" aria-label="Animación de aorta y curva de presión central">
+      <h3>Aorta anatómica funcional: raíz, ascendente, arco, ramas supraaórticas y descendente</h3>
+      <svg viewBox="0 0 820 430" role="img" aria-label="Animación anatómica de aorta con curva de presión central">
         <defs>
           <linearGradient id="aortaGrad" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stop-color="#7f0d0d"/><stop offset="45%" stop-color="#d43c2f"/><stop offset="100%" stop-color="#8a1111"/>
+            <stop offset="0%" stop-color="#6f0808"/><stop offset="45%" stop-color="#d93d31"/><stop offset="100%" stop-color="#7d1010"/>
           </linearGradient>
-          <filter id="softShadow"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#12355b" flood-opacity=".16"/></filter>
+          <linearGradient id="lumenGrad" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stop-color="#3f0505"/><stop offset="48%" stop-color="#8c1212"/><stop offset="100%" stop-color="#4a0606"/>
+          </linearGradient>
+          <radialGradient id="rootGlow" cx="50%" cy="50%" r="70%">
+            <stop offset="0%" stop-color="#ffb4a9" stop-opacity=".85"/><stop offset="78%" stop-color="#b71c1c" stop-opacity=".20"/><stop offset="100%" stop-color="#b71c1c" stop-opacity="0"/>
+          </radialGradient>
+          <filter id="softShadow"><feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#12355b" flood-opacity=".18"/></filter>
+          <filter id="waveGlow"><feDropShadow dx="0" dy="0" stdDeviation="4" flood-color="#ffffff" flood-opacity=".80"/></filter>
         </defs>
         <rect x="18" y="18" width="784" height="394" rx="20" fill="#fbfdff" stroke="#d5e3ef"/>
-        <g filter="url(#softShadow)">
-          <rect id="aortaTube" x="70" y="92" width="630" height="78" rx="39" fill="url(#aortaGrad)" opacity=".96"/>
-          <ellipse id="aortaIn" cx="70" cy="131" rx="28" ry="39" fill="#5b0909" opacity=".96"/>
-          <ellipse id="aortaOut" cx="700" cy="131" rx="28" ry="39" fill="#9d1b1b" opacity=".96"/>
-          <path d="M145 91 C190 38, 295 38, 336 92" fill="none" stroke="#9c1b1b" stroke-width="40" stroke-linecap="round" opacity=".96"/>
-          <path d="M503 92 C545 36, 644 44, 668 102" fill="none" stroke="#9c1b1b" stroke-width="36" stroke-linecap="round" opacity=".93"/>
+        <text id="liveP" x="410" y="50" text-anchor="middle" fill="#12355b" font-size="19" font-weight="800">-- mmHg</text>
+        <text x="410" y="70" text-anchor="middle" fill="#617385" font-size="12">Pulsatilidad proporcional a la presión central real</text>
+
+        <g id="anatomyLayer" filter="url(#softShadow)">
+          <!-- Sombra de silueta cardiaca para orientar la raíz aórtica -->
+          <path d="M165 215 C122 182 124 129 169 107 C198 92 227 105 244 130 C263 101 303 92 331 116 C377 157 347 226 247 286 C211 263 184 238 165 215 Z" fill="#f2b5ae" opacity=".28"/>
+          <path id="rootPulse" d="M246 198 C232 177 234 144 256 126 C278 108 312 111 329 134 C344 154 338 184 317 198 C296 212 263 217 246 198 Z" fill="url(#rootGlow)" opacity=".90"/>
+
+          <!-- Centro anatómico de la aorta; también se usa para mover Pf/Pb -->
+          <path id="aortaCenter" d="M284 199 C258 158 266 103 309 83 C357 61 431 63 481 91 C525 115 541 159 522 193 C506 222 476 239 451 248 C425 258 415 275 420 304 C424 329 423 354 414 380" fill="none" stroke="transparent" stroke-width="2"/>
+
+          <!-- Pared y lumen de la aorta anatómica -->
+          <path id="aortaOuter" d="M284 199 C258 158 266 103 309 83 C357 61 431 63 481 91 C525 115 541 159 522 193 C506 222 476 239 451 248 C425 258 415 275 420 304 C424 329 423 354 414 380" fill="none" stroke="url(#aortaGrad)" stroke-width="60" stroke-linecap="round" stroke-linejoin="round" opacity=".98"/>
+          <path id="aortaInner" d="M284 199 C258 158 266 103 309 83 C357 61 431 63 481 91 C525 115 541 159 522 193 C506 222 476 239 451 248 C425 258 415 275 420 304 C424 329 423 354 414 380" fill="none" stroke="url(#lumenGrad)" stroke-width="35" stroke-linecap="round" stroke-linejoin="round" opacity=".82"/>
+          <path id="aortaHighlight" d="M292 175 C285 135 292 104 324 90 C368 72 430 78 470 101 C503 120 516 151 506 177" fill="none" stroke="#ffd4cc" stroke-width="7" stroke-linecap="round" opacity=".55"/>
+
+          <!-- Ramas supraaórticas: braquiocefálica, carótida común izquierda y subclavia izquierda -->
+          <path id="branch1Outer" d="M358 72 C352 44 337 27 316 13" fill="none" stroke="url(#aortaGrad)" stroke-width="28" stroke-linecap="round"/>
+          <path id="branch1Inner" d="M358 72 C352 44 337 27 316 13" fill="none" stroke="url(#lumenGrad)" stroke-width="15" stroke-linecap="round" opacity=".83"/>
+          <path id="branch1bOuter" d="M344 42 C324 37 306 44 290 59" fill="none" stroke="url(#aortaGrad)" stroke-width="20" stroke-linecap="round"/>
+          <path id="branch1bInner" d="M344 42 C324 37 306 44 290 59" fill="none" stroke="url(#lumenGrad)" stroke-width="10" stroke-linecap="round" opacity=".78"/>
+          <path id="branch2Outer" d="M416 68 C418 42 414 24 405 8" fill="none" stroke="url(#aortaGrad)" stroke-width="24" stroke-linecap="round"/>
+          <path id="branch2Inner" d="M416 68 C418 42 414 24 405 8" fill="none" stroke="url(#lumenGrad)" stroke-width="13" stroke-linecap="round" opacity=".82"/>
+          <path id="branch3Outer" d="M472 90 C498 63 523 48 552 36" fill="none" stroke="url(#aortaGrad)" stroke-width="24" stroke-linecap="round"/>
+          <path id="branch3Inner" d="M472 90 C498 63 523 48 552 36" fill="none" stroke="url(#lumenGrad)" stroke-width="13" stroke-linecap="round" opacity=".82"/>
+
+          <!-- Válvula aórtica y referencias anatómicas -->
+          <ellipse id="valveRing" cx="279" cy="199" rx="31" ry="18" fill="#5a0707" opacity=".92" transform="rotate(28 279 199)"/>
+          <path d="M263 196 Q278 183 293 198 Q278 205 263 196" fill="#ffd1cb" opacity=".74"/>
+          <path d="M275 210 Q286 194 304 205 Q288 216 275 210" fill="#ffd1cb" opacity=".62"/>
+          <text x="202" y="323" fill="#617385" font-size="12">Raíz aórtica</text>
+          <text x="292" y="112" fill="#617385" font-size="12">Ascendente</text>
+          <text x="430" y="132" fill="#617385" font-size="12">Arco</text>
+          <text x="456" y="354" fill="#617385" font-size="12">Descendente</text>
+          <text x="282" y="35" fill="#617385" font-size="10">Tronco braquiocefálico</text>
+          <text x="390" y="28" fill="#617385" font-size="10">Carótida izq.</text>
+          <text x="529" y="61" fill="#617385" font-size="10">Subclavia izq.</text>
         </g>
-        <circle id="pfWave" cx="90" cy="131" r="14" fill="#168038" opacity=".90" class="marker"/>
-        <circle id="pbWave" cx="690" cy="131" r="12" fill="#ef6c00" opacity=".90" class="marker"/>
-        <text x="74" y="203" fill="#168038" font-size="13" font-weight="700">Pf anterógrada</text>
-        <text x="586" y="203" fill="#ef6c00" font-size="13" font-weight="700">Pb retrógrada</text>
-        <text id="liveP" x="410" y="78" text-anchor="middle" fill="#12355b" font-size="19" font-weight="800">-- mmHg</text>
+
+        <g id="pfWave" filter="url(#waveGlow)">
+          <circle r="14" fill="#168038" opacity=".92" class="marker"/>
+          <circle r="26" fill="#168038" opacity=".12"/>
+        </g>
+        <g id="pbWave" filter="url(#waveGlow)">
+          <circle r="12" fill="#ef6c00" opacity=".92" class="marker"/>
+          <circle r="23" fill="#ef6c00" opacity=".13"/>
+        </g>
+        <text x="92" y="192" fill="#168038" font-size="13" font-weight="700">Pf anterógrada</text>
+        <text x="562" y="222" fill="#ef6c00" font-size="13" font-weight="700">Pb retrógrada</text>
+
         <g transform="translate(70 242)">
           <rect x="0" y="0" width="630" height="140" rx="14" fill="#ffffff" stroke="#d5e3ef"/>
           <path id="pressurePath" class="waveLine" d=""/>
@@ -2768,18 +2813,30 @@ function update(idx) {{
   i = Math.max(0, Math.min(N-1, idx)); slider.value = i;
   const p = data.p[i], pf = data.pf[i], pb = data.pb[i], q = data.q[i];
   const norm = (p-minP)/Math.max(maxP-minP, 1e-6);
-  const tubeH = 68 + norm*34;
-  const tubeY = 131 - tubeH/2;
-  const rx = tubeH/2;
-  const tube = document.getElementById('aortaTube'); tube.setAttribute('y', tubeY); tube.setAttribute('height', tubeH); tube.setAttribute('rx', rx);
-  document.getElementById('aortaIn').setAttribute('ry', tubeH/2);
-  document.getElementById('aortaOut').setAttribute('ry', tubeH/2);
-  const pfX = 90 + (data.t[i]/Math.max(data.t[N-1],1))*585;
-  const pbX = 700 - (data.t[i]/Math.max(data.t[N-1],1))*530;
-  document.getElementById('pfWave').setAttribute('cx', pfX);
-  document.getElementById('pfWave').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13);
-  document.getElementById('pbWave').setAttribute('cx', pbX);
-  document.getElementById('pbWave').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12);
+  const pulse = 1 + norm*0.115;
+  const outerW = 56 + norm*18;
+  const innerW = 32 + norm*11;
+  const branchOuterW = 24 + norm*8;
+  const branchInnerW = 12 + norm*5;
+  ['aortaOuter'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', outerW); }});
+  ['aortaInner'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', innerW); }});
+  ['branch1Outer','branch2Outer','branch3Outer'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', branchOuterW); }});
+  ['branch1Inner','branch2Inner','branch3Inner'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', branchInnerW); }});
+  ['branch1bOuter'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', 19 + norm*6); }});
+  ['branch1bInner'].forEach(id => {{ const el=document.getElementById(id); if(el) el.setAttribute('stroke-width', 9 + norm*4); }});
+  const root = document.getElementById('rootPulse');
+  if(root) root.setAttribute('transform', 'translate('+(-279*(pulse-1)).toFixed(2)+' '+(-178*(pulse-1)).toFixed(2)+') scale('+pulse.toFixed(3)+')');
+  const valve = document.getElementById('valveRing');
+  if(valve) valve.setAttribute('transform', 'rotate(28 279 199) scale('+pulse.toFixed(3)+')');
+  const centerPath = document.getElementById('aortaCenter');
+  const totalLen = centerPath.getTotalLength();
+  const frac = (data.t[i]-data.t[0]) / Math.max(data.t[N-1]-data.t[0], 1e-6);
+  const pfPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, frac*totalLen)));
+  const pbPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, (1-frac)*totalLen)));
+  const pfG = document.getElementById('pfWave');
+  const pbG = document.getElementById('pbWave');
+  if(pfG) {{ pfG.setAttribute('transform', 'translate('+pfPt.x.toFixed(1)+' '+pfPt.y.toFixed(1)+')'); pfG.querySelector('circle').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13); }}
+  if(pbG) {{ pbG.setAttribute('transform', 'translate('+pbPt.x.toFixed(1)+' '+pbPt.y.toFixed(1)+')'); pbG.querySelector('circle').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12); }}
   document.getElementById('liveP').textContent = fmt(p,0)+' mmHg';
   const x = sx(i), y = sy(p);
   document.getElementById('cursor').setAttribute('x1', x); document.getElementById('cursor').setAttribute('x2', x);
