@@ -3172,12 +3172,12 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1
   .pfLine {{ fill:none; stroke:var(--pf); stroke-width:2; }}
   .pbLine {{ fill:none; stroke:var(--pb); stroke-width:2; stroke-dasharray:5 4; }}
   .marker {{ stroke:#fff; stroke-width:2; }}
-  .metricOverlayBox { fill:#ffffff; stroke:#d5e3ef; stroke-width:1.4; opacity:.96; }
-  .metricOverlayTitle { fill:#12355b; font-size:11px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
-  .metricOverlayLabel { fill:#617385; font-size:10.5px; }
-  .metricOverlayValue { fill:#183044; font-size:16px; font-weight:900; }
-  .metricOverlayMini { fill:#617385; font-size:10.5px; }
-  .metricOverlayLine { stroke:#d5e3ef; stroke-width:1; }
+  .metricOverlayBox {{ fill:#ffffff; stroke:#d5e3ef; stroke-width:1.4; opacity:.96; }}
+  .metricOverlayTitle {{ fill:#12355b; font-size:11px; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }}
+  .metricOverlayLabel {{ fill:#617385; font-size:10.5px; }}
+  .metricOverlayValue {{ fill:#183044; font-size:16px; font-weight:900; }}
+  .metricOverlayMini {{ fill:#617385; font-size:10.5px; }}
+  .metricOverlayLine {{ stroke:#d5e3ef; stroke-width:1; }}
   @media (max-width:850px) {{ .stage {{ grid-template-columns:1fr; }} .cards {{ grid-template-columns:repeat(2,minmax(115px,1fr)); }} .alertLine {{ font-size:12.5px; line-height:1.5; }} }}
 </style>
 </head>
