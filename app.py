@@ -2835,6 +2835,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
         "rm": _safe_metric_value(rm, 2, ""),
         "ri": _safe_metric_value(ri, 2, ""),
         "tref": _safe_metric_value(tref, 0, " ms"),
+        "tref_label": "Tref retorno reflejo",
         "tfor": _safe_metric_value(tfor, 0, " ms"),
         "qp": _safe_metric_value(qp, 0, " mL/s"),
         "pe": _safe_metric_value(pe_ms, 0, " ms"),
@@ -2900,7 +2901,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
       <div class="card"><div class="k">Diagnóstico</div><div class="v" id="mHTA"></div></div>
       <div class="card"><div class="k">PAS/PAD central</div><div class="v" id="mPASPAD"></div></div>
       <div class="card"><div class="k">RM Pb/Pf</div><div class="v" id="mRM"></div></div>
-      <div class="card"><div class="k">Tref</div><div class="v" id="mTref"></div></div>
+      <div class="card"><div class="k">Tref retorno reflejo</div><div class="v" id="mTref"></div></div>
     </div>
   </div>
 
@@ -3030,7 +3031,7 @@ document.getElementById('mPASPAD').textContent = data.metrics.pas.replace(' mmHg
 document.getElementById('mRM').textContent = data.metrics.rm;
 document.getElementById('mTref').textContent = data.metrics.tref;
 document.getElementById('mRVSE').textContent = data.metrics.rvse_calc;
-document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref '+data.metrics.tref+'; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
+document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref retorno reflejo '+data.metrics.tref+'; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
 const bars = document.getElementById('bars');
 const maxE = Math.max(...data.energies, 1e-6);
 const maxAmp = Math.max(...data.amps.map(v => Math.abs(v)), 1e-6);
@@ -4350,7 +4351,7 @@ if wave_df is not None:
   summary_cols[3].metric("RM Pb/Pf", f"{sep_metrics_preview.get('rm', np.nan):.2f}")
   summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
   st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
-  st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
+  st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Tref retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
 
   st.markdown("### Animación hemodinámica real de la aorta")
   st.caption("Animación didáctica basada en la curva real del paciente, separación Pf/Pb, flujo aórtico estimado y armónicos. No usa curvas sintéticas ni plantillas fijas.")
