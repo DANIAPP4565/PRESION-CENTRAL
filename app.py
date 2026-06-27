@@ -2080,15 +2080,32 @@ def make_waveform(row, n=512):
   return pd.DataFrame({"tiempo_ms": t * 1000, "presion_central_mmHg": p})
 
 def harmonic_analysis(wave_df):
+  """Análisis armónico de la onda central real.
+
+  Además de frecuencia, amplitud y energía relativa, conserva la fase de cada
+  componente de la FFT. Esa fase permite reconstruir la contribución instantánea
+  de cada armónico durante la animación, sincronizada con la curva central real.
+  """
   y = wave_df.iloc[:,1].astype(float).to_numpy()
   t = wave_df.iloc[:,0].astype(float).to_numpy()
   y0 = y - np.mean(y)
   fft = np.fft.rfft(y0)
   amp = np.abs(fft) / len(y0) * 2
   freq = np.fft.rfftfreq(len(y0), d=np.mean(np.diff(t))/1000.0)
-  df = pd.DataFrame({"frecuencia_hz": freq, "amplitud": amp})
-  df["energia_relativa_%"] = (df["amplitud"]**2) / np.sum(df["amplitud"]**2) * 100
+  phase = np.angle(fft)
+  harmonic_index = np.arange(len(freq), dtype=int)
+  total_energy = np.sum(amp[1:]**2) if len(amp) > 1 else np.sum(amp**2)
+  if not np.isfinite(total_energy) or total_energy <= 0:
+    total_energy = np.sum(amp**2) if np.sum(amp**2) > 0 else 1.0
+  df = pd.DataFrame({
+    "armónico": harmonic_index,
+    "frecuencia_hz": freq,
+    "amplitud": amp,
+    "fase_rad": phase,
+  })
+  df["energia_relativa_%"] = (df["amplitud"]**2) / total_energy * 100
   df = df.iloc[1:11].reset_index(drop=True)
+  df["armónico"] = np.arange(1, len(df)+1, dtype=int)
   return df
 
 def _apply_professional_axes(ax, title=None, xlabel=None, ylabel=None):
@@ -2556,13 +2573,24 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
 
     energies = []
     freqs = []
+    amps = []
+    phases = []
     if hdf is not None and len(hdf):
       energies = [round(float(x), 3) for x in pd.to_numeric(hdf.get("energia_relativa_%", []), errors="coerce").fillna(0).tolist()[:10]]
       freqs = [round(float(x), 3) for x in pd.to_numeric(hdf.get("frecuencia_hz", []), errors="coerce").fillna(0).tolist()[:10]]
+      amps = [round(float(x), 6) for x in pd.to_numeric(hdf.get("amplitud", []), errors="coerce").fillna(0).tolist()[:10]]
+      if "fase_rad" in hdf:
+        phases = [round(float(x), 6) for x in pd.to_numeric(hdf.get("fase_rad", []), errors="coerce").fillna(0).tolist()[:10]]
+      else:
+        phases = [0.0 for _ in amps]
     while len(energies) < 10:
       energies.append(0.0)
     while len(freqs) < 10:
       freqs.append(0.0)
+    while len(amps) < 10:
+      amps.append(0.0)
+    while len(phases) < 10:
+      phases.append(0.0)
 
     pas = to_float(row.get("pas_central"))
     pad = to_float(row.get("pad_central"))
@@ -2593,6 +2621,8 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
       "q": q,
       "energies": energies,
       "freqs": freqs,
+      "amps": amps,
+      "phases": phases,
       "metrics": {
         "pas": _safe_metric_value(pas, 0, " mmHg"),
         "pad": _safe_metric_value(pad, 0, " mmHg"),
@@ -2646,8 +2676,12 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
   .grid2 {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
   .small {{ font-size:12px; color:var(--muted); line-height:1.35; }}
   .barbg {{ fill:#e8f0f7; }}
-  .bar {{ fill:#455a64; transition:height .12s, y .12s, opacity .12s; }}
-  .bar.active {{ fill:#12355b; opacity:1; }}
+  .barEnergy {{ fill:#455a64; opacity:.35; }}
+  .barLive {{ fill:#12355b; opacity:.88; transition:height .08s, y .08s, opacity .08s; }}
+  .barLive.positive {{ fill:#1565c0; }}
+  .barLive.negative {{ fill:#ad1457; }}
+  .barEnergy.active {{ opacity:.78; }}
+  .phaseDot {{ fill:#12355b; opacity:.85; transition:cy .08s; }}
   .waveLine {{ fill:none; stroke:#111; stroke-width:2.5; }}
   .pfLine {{ fill:none; stroke:var(--pf); stroke-width:2; }}
   .pbLine {{ fill:none; stroke:var(--pb); stroke-width:2; stroke-dasharray:5 4; }}
@@ -2799,16 +2833,46 @@ document.getElementById('mRVSE').textContent = data.metrics.rvse_calc;
 document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref '+data.metrics.tref+'; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
 const bars = document.getElementById('bars');
 const maxE = Math.max(...data.energies, 1e-6);
+const maxAmp = Math.max(...data.amps.map(v => Math.abs(v)), 1e-6);
+const harmonicBaseline = 86;
 let domIdx = 0; data.energies.forEach((e, idx)=>{{ if(e>data.energies[domIdx]) domIdx=idx; }});
 for(let b=0;b<10;b++) {{
   const x = b*39;
-  const h = Math.max(2, data.energies[b]/maxE*120);
-  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect'); bg.setAttribute('x',x); bg.setAttribute('y',18); bg.setAttribute('width',25); bg.setAttribute('height',128); bg.setAttribute('rx',5); bg.setAttribute('class','barbg'); bars.appendChild(bg);
-  const r = document.createElementNS('http://www.w3.org/2000/svg','rect'); r.setAttribute('id','bar'+b); r.setAttribute('x',x); r.setAttribute('y',146-h); r.setAttribute('width',25); r.setAttribute('height',h); r.setAttribute('rx',5); r.setAttribute('class','bar'); bars.appendChild(r);
-  const tx = document.createElementNS('http://www.w3.org/2000/svg','text'); tx.setAttribute('x',x+12.5); tx.setAttribute('y',166); tx.setAttribute('text-anchor','middle'); tx.setAttribute('fill','#617385'); tx.setAttribute('font-size','11'); tx.textContent = (b+1); bars.appendChild(tx);
+  const h = Math.max(2, data.energies[b]/maxE*54);
+  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect'); bg.setAttribute('x',x); bg.setAttribute('y',18); bg.setAttribute('width',25); bg.setAttribute('height',136); bg.setAttribute('rx',5); bg.setAttribute('class','barbg'); bars.appendChild(bg);
+  const mid = document.createElementNS('http://www.w3.org/2000/svg','line'); mid.setAttribute('x1',x+1); mid.setAttribute('x2',x+24); mid.setAttribute('y1',harmonicBaseline); mid.setAttribute('y2',harmonicBaseline); mid.setAttribute('stroke','#9eb2c5'); mid.setAttribute('stroke-width','1'); mid.setAttribute('opacity','.80'); bars.appendChild(mid);
+  const energy = document.createElementNS('http://www.w3.org/2000/svg','rect'); energy.setAttribute('id','energy'+b); energy.setAttribute('x',x+3); energy.setAttribute('y',harmonicBaseline-h); energy.setAttribute('width',19); energy.setAttribute('height',h); energy.setAttribute('rx',4); energy.setAttribute('class','barEnergy'); bars.appendChild(energy);
+  const live = document.createElementNS('http://www.w3.org/2000/svg','rect'); live.setAttribute('id','liveBar'+b); live.setAttribute('x',x+8); live.setAttribute('y',harmonicBaseline-1); live.setAttribute('width',9); live.setAttribute('height',2); live.setAttribute('rx',4); live.setAttribute('class','barLive positive'); bars.appendChild(live);
+  const dot = document.createElementNS('http://www.w3.org/2000/svg','circle'); dot.setAttribute('id','phaseDot'+b); dot.setAttribute('cx',x+12.5); dot.setAttribute('cy',harmonicBaseline); dot.setAttribute('r',3.2); dot.setAttribute('class','phaseDot'); bars.appendChild(dot);
+  const tx = document.createElementNS('http://www.w3.org/2000/svg','text'); tx.setAttribute('x',x+12.5); tx.setAttribute('y',166); tx.setAttribute('text-anchor','middle'); tx.setAttribute('fill','#617385'); tx.setAttribute('font-size','11'); tx.textContent = 'H'+(b+1); bars.appendChild(tx);
   const ty = document.createElementNS('http://www.w3.org/2000/svg','text'); ty.setAttribute('x',x+12.5); ty.setAttribute('y',14); ty.setAttribute('text-anchor','middle'); ty.setAttribute('fill','#617385'); ty.setAttribute('font-size','10'); ty.textContent = fmt(data.energies[b],0)+'%'; bars.appendChild(ty);
 }}
-document.getElementById('domH').textContent = 'Armónico dominante: H'+(domIdx+1)+' | frecuencia aprox. '+fmt(data.freqs[domIdx],2)+' Hz | energía '+fmt(data.energies[domIdx],1)+'%';
+document.getElementById('domH').textContent = 'Barras sincronizadas: altura viva = contribución instantánea por amplitud y fase FFT. Dominante H'+(domIdx+1)+' | '+fmt(data.freqs[domIdx],2)+' Hz | energía '+fmt(data.energies[domIdx],1)+'%';
+function harmonicValue(b, idx) {{
+  const timeS = data.t[idx] / 1000.0;
+  return data.amps[b] * Math.cos(2*Math.PI*data.freqs[b]*timeS + data.phases[b]);
+}}
+function updateHarmonicBars(idx) {{
+  let liveVals = [];
+  for(let b=0;b<10;b++) liveVals.push(harmonicValue(b, idx));
+  for(let b=0;b<10;b++) {{
+    const v = liveVals[b];
+    const mag = Math.max(2, Math.abs(v)/maxAmp*62);
+    const live = document.getElementById('liveBar'+b);
+    const dot = document.getElementById('phaseDot'+b);
+    const energy = document.getElementById('energy'+b);
+    if(live) {{
+      live.setAttribute('height', mag);
+      live.setAttribute('y', v >= 0 ? harmonicBaseline-mag : harmonicBaseline);
+      live.setAttribute('class', v >= 0 ? 'barLive positive' : 'barLive negative');
+      live.setAttribute('opacity', b===domIdx ? '.98' : '.72');
+    }}
+    if(dot) {{ dot.setAttribute('cy', harmonicBaseline - Math.max(-58, Math.min(58, v/maxAmp*58))); }}
+    if(energy) energy.setAttribute('class', b===domIdx ? 'barEnergy active' : 'barEnergy');
+  }}
+  const h1 = liveVals[0] || 0, h2 = liveVals[1] || 0, h3 = liveVals[2] || 0;
+  document.getElementById('domH').textContent = 't '+fmt(data.t[idx],0)+' ms | H1 '+fmt(h1,2)+' mmHg, H2 '+fmt(h2,2)+' mmHg, H3 '+fmt(h3,2)+' mmHg | dominante energético H'+(domIdx+1)+' ('+fmt(data.energies[domIdx],1)+'%)';
+}}
 function update(idx) {{
   i = Math.max(0, Math.min(N-1, idx)); slider.value = i;
   const p = data.p[i], pf = data.pf[i], pb = data.pb[i], q = data.q[i];
@@ -2847,7 +2911,7 @@ function update(idx) {{
   document.getElementById('instP').textContent = fmt(p,0)+' mmHg';
   document.getElementById('instQ').textContent = fmt(q,0)+' mL/s';
   document.getElementById('instPfPb').textContent = fmt(pf,1)+' / '+fmt(pb,1);
-  for(let b=0;b<10;b++) {{ const el=document.getElementById('bar'+b); if(el) el.setAttribute('class', b===domIdx ? 'bar active' : 'bar'); }}
+  updateHarmonicBars(i);
 }}
 function loop() {{ if(playing) update((i+1)%N); window.setTimeout(loop, 45); }}
 document.getElementById('playBtn').onclick = () => {{ playing=!playing; document.getElementById('playBtn').textContent = playing?'Pausar':'Reproducir'; }};
