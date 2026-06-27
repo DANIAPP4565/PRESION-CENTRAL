@@ -2565,6 +2565,107 @@ def _harmonic_live_values(hdf, t_ms, max_harmonics=6):
   return vals
 
 
+
+
+def _wrap_lines_for_keyframe(text, width=54, max_lines=4):
+  """Divide texto clínico para que entre dentro de una captura 2x2 sin recortarse."""
+  txt = safe_text(text)
+  if not txt:
+    return []
+  lines = []
+  for part in re.split(r"\s*\|\s*|\.\s+", txt):
+    part = safe_text(part)
+    if not part:
+      continue
+    wrapped = textwrap.wrap(part, width=width, break_long_words=False, replace_whitespace=True)
+    lines.extend(wrapped if wrapped else [part])
+    if len(lines) >= max_lines:
+      break
+  if len(lines) > max_lines:
+    lines = lines[:max_lines]
+  if len(lines) == max_lines and len(" ".join(lines)) < len(txt) - 8:
+    lines[-1] = lines[-1].rstrip(" .") + "..."
+  return lines
+
+
+def _frame_severity_color(severity):
+  sev = safe_text(severity).lower()
+  if "diagn" in sev:
+    return "#B71C1C", "#FDECEA"
+  if "alta" in sev:
+    return "#D84315", "#FFF3E0"
+  if "relev" in sev:
+    return "#EF6C00", "#FFF8E1"
+  return "#455A64", "#F5F7FA"
+
+
+def _alerts_to_keyframes_for_report(row, sep_df, sep_metrics, hdf, max_frames=4):
+  """Selecciona capturas del informe a partir de métricas alteradas reales.
+
+  Usa el mismo motor de alertas de la pausa didáctica. Si hay más de cuatro
+  alteraciones, prioriza diagnóstico y severidad. Si hay menos, completa el
+  panel con una leyenda explícita de que no hay otra alerta automática para no
+  reemplazar alteraciones por momentos genéricos.
+  """
+  try:
+    t_vals = pd.to_numeric(sep_df.get("tiempo_ms", pd.Series([], dtype=float)), errors="coerce").dropna().to_numpy(dtype=float)
+  except Exception:
+    t_vals = np.asarray([], dtype=float)
+  if len(t_vals) == 0:
+    t_vals = np.linspace(0, 1000, 190)
+
+  alerts = _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_vals)
+  severity_rank = {"diagnóstica": 0, "diagnostica": 0, "alta": 1, "relevante": 2, "alterada": 3}
+  alerts = sorted(alerts, key=lambda a: (severity_rank.get(safe_text(a.get("severity")).lower(), 9), int(a.get("pause_order", 99)), int(a.get("idx", 0))))
+
+  frames = []
+  for i, al in enumerate(alerts[:max_frames], start=1):
+    value = safe_text(al.get("value", "ND"))
+    threshold = safe_text(al.get("threshold", "criterio no disponible"))
+    label = safe_text(al.get("label", "Métrica alterada"))
+    frames.append({
+      "title": f"{i}. Métrica alterada: {label}",
+      "subtitle": f"Valor {value} | Criterio: {threshold}",
+      "time_ms": float(al.get("t_ms", 0) or 0),
+      "alert": al,
+    })
+
+  if not frames:
+    base_frames = _animation_keyframe_definitions(sep_metrics)
+    for i, fr in enumerate(base_frames[:max_frames], start=1):
+      frames.append({
+        **fr,
+        "title": f"{i}. Sin métrica alterada automática",
+        "subtitle": "No se detectó desviación relevante con los criterios disponibles; se muestra momento fisiológico de referencia.",
+        "alert": {
+          "label": "Sin alerta automática",
+          "value": "sin alteración relevante",
+          "threshold": "criterios operativos disponibles",
+          "why": "Las métricas evaluadas no superan los umbrales definidos para pausa didáctica.",
+          "mechanism": "La captura se mantiene como referencia anatómica y temporal de la onda central real.",
+          "severity": "normal",
+        }
+      })
+  elif len(frames) < max_frames:
+    # Completar sin inventar alteraciones: se explicita que no hay más alertas.
+    base_frames = _animation_keyframe_definitions(sep_metrics)
+    k = 0
+    while len(frames) < max_frames and k < len(base_frames):
+      fr = base_frames[k]; k += 1
+      frames.append({
+        **fr,
+        "title": f"{len(frames)+1}. Sin otra métrica alterada relevante",
+        "subtitle": "Panel de cierre: no se agrega una alteración inexistente.",
+        "alert": {
+          "label": "Sin otra alerta automática",
+          "value": "no corresponde",
+          "threshold": "sin nuevo criterio superado",
+          "why": "No se identifican más métricas alteradas con los puntos de corte disponibles.",
+          "mechanism": "El informe prioriza solo valores reales alterados; este cuadro evita reemplazarlos por momentos genéricos.",
+          "severity": "normal",
+        }
+      })
+  return frames[:max_frames], alerts
 def _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=None):
   """Dibuja una captura fija de la animación con anatomía, Pf/Pb, curva y armónicos."""
   t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
@@ -2666,6 +2767,36 @@ def _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=None):
   if vals:
     ax.text(0.57, 0.265, f"H1 {vals[0]:+.2f}, H2 {vals[1] if len(vals)>1 else 0:+.2f}, H3 {vals[2] if len(vals)>2 else 0:+.2f}", fontsize=5.9, color="#263238")
 
+  # Panel explicativo específico para capturas del informe integrado.
+  alert = frame.get("alert") if isinstance(frame, dict) else None
+  if alert:
+    sev_color, sev_bg = _frame_severity_color(alert.get("severity", "alterada"))
+    px, py, pw, ph = 0.535, 0.575, 0.425, 0.275
+    ax.add_patch(plt.Rectangle((px, py), pw, ph, facecolor=sev_bg, edgecolor=sev_color, linewidth=0.9, zorder=20))
+    ax.add_patch(plt.Rectangle((px, py+ph-0.045), pw, 0.045, facecolor=sev_color, edgecolor=sev_color, linewidth=0, zorder=21))
+    ax.text(px+0.012, py+ph-0.023, "PAUSA DIDÁCTICA POR MÉTRICA ALTERADA", fontsize=5.7, color="white", fontweight="bold", ha="left", va="center", zorder=22)
+    ax.text(px+pw-0.012, py+ph-0.023, safe_text(alert.get("severity", "ALERTA")).upper(), fontsize=5.4, color="white", fontweight="bold", ha="right", va="center", zorder=22)
+
+    ytxt = py + ph - 0.070
+    ax.text(px+0.012, ytxt, safe_text(alert.get("label", "Métrica alterada"))[:64], fontsize=6.3, color="#12355B", fontweight="bold", ha="left", va="top", zorder=22)
+    ytxt -= 0.030
+    ax.text(px+0.012, ytxt, f"Valor: {safe_text(alert.get('value', 'ND'))}", fontsize=5.9, color="#263238", fontweight="bold", ha="left", va="top", zorder=22)
+    ytxt -= 0.027
+    crit_lines = _wrap_lines_for_keyframe("Criterio: " + safe_text(alert.get("threshold", "")), width=52, max_lines=2)
+    for line in crit_lines:
+      ax.text(px+0.012, ytxt, line, fontsize=5.3, color="#37474F", ha="left", va="top", zorder=22)
+      ytxt -= 0.023
+    why_lines = _wrap_lines_for_keyframe("Por qué: " + safe_text(alert.get("why", "")), width=55, max_lines=2)
+    for line in why_lines:
+      ax.text(px+0.012, ytxt, line, fontsize=5.3, color="#37474F", ha="left", va="top", zorder=22)
+      ytxt -= 0.023
+    mech_lines = _wrap_lines_for_keyframe("Mecanismo: " + safe_text(alert.get("mechanism", "")), width=55, max_lines=3)
+    for line in mech_lines:
+      if ytxt < py + 0.018:
+        break
+      ax.text(px+0.012, ytxt, line, fontsize=5.15, color="#455A64", ha="left", va="top", zorder=22)
+      ytxt -= 0.021
+
 
 def _animation_keyframe_definitions(sep_metrics):
   """Elige cuatro momentos clínicamente relevantes para capturas fijas del ciclo."""
@@ -2683,15 +2814,23 @@ def _animation_keyframe_definitions(sep_metrics):
 
 
 def plot_aortic_animation_keyframes(row, sep_df, sep_metrics, hdf):
-  """Genera cuatro capturas didácticas de la animación para incluir en el PDF integrado."""
-  frames = _animation_keyframe_definitions(sep_metrics)
-  fig, axes = plt.subplots(2, 2, figsize=(11.4, 7.6))
+  """Genera capturas del informe desde métricas alteradas reales.
+
+  Las cuatro imágenes ya no son momentos genéricos fijos: se seleccionan desde
+  las alertas de pausa didáctica, con valor real, criterio y mecanismo.
+  """
+  frames, alerts = _alerts_to_keyframes_for_report(row, sep_df, sep_metrics, hdf, max_frames=4)
+  fig, axes = plt.subplots(2, 2, figsize=(12.4, 8.35))
   fig.patch.set_facecolor("white")
   for ax, frame in zip(axes.ravel(), frames):
     _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=row)
-  fig.suptitle("Capturas didácticas de la animación hemodinámica de la aorta", fontsize=12.5, fontweight="bold", color="#12355B", y=0.995)
-  fig.text(0.5, 0.012, "Las capturas usan la curva central real, Pf/Pb, flujo estimado y armónicos FFT sincronizados. La distensión aórtica es una representación didáctica proporcional a la presión pulsátil, no una medición anatómica directa de diámetro.", ha="center", fontsize=7.4, color="#455A64")
-  fig.tight_layout(rect=[0.01, 0.035, 0.99, 0.965], pad=1.2)
+  n_alerts = len(alerts) if alerts is not None else 0
+  title = "Capturas del informe: métricas alteradas de la animación hemodinámica"
+  if n_alerts == 0:
+    title = "Capturas del informe: sin métricas alteradas automáticas detectadas"
+  fig.suptitle(title, fontsize=12.6, fontweight="bold", color="#12355B", y=0.997)
+  fig.text(0.5, 0.014, "Cada cuadro usa la curva central real, Pf/Pb, flujo estimado y armónicos FFT sincronizados. Las tarjetas muestran valor real, criterio de alteración y explicación didáctica. La distensión aórtica es proporcional a la presión pulsátil y no mide diámetro anatómico.", ha="center", fontsize=7.35, color="#455A64")
+  fig.tight_layout(rect=[0.006, 0.038, 0.994, 0.965], pad=1.05)
   buf = io.BytesIO()
   fig.savefig(buf, format="png", dpi=210, bbox_inches="tight", facecolor="white")
   plt.close(fig)
@@ -4528,12 +4667,12 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
   try:
     keyframes_png = plot_aortic_animation_keyframes(row, sep_df, sep_metrics, hdf)
     story.append(PageBreak())
-    story.append(_section("5. Capturas didácticas de la animación hemodinámica"))
+    story.append(_section("5. Capturas didácticas de métricas alteradas"))
     story.append(Spacer(1, 2*mm))
     story.append(Image(keyframes_png, width=188*mm, height=126*mm))
     story.append(Spacer(1, 1.4*mm))
     story.append(Paragraph(
-      "Secuencia interpretativa: inicio de eyección, pico sistólico central, retorno de onda reflejada y fase diastólica/SEVR. Cada cuadro conserva el mismo tiempo del ciclo para aorta, Pf/Pb, curva central, flujo estimado y barras armónicas FFT.",
+      "Las capturas corresponden a las métricas alteradas detectadas por el mismo motor de pausa didáctica de la animación. Cada cuadro muestra valor real del paciente, criterio/umbral aplicado y explicación del mecanismo fisiológico. Si hay menos de cuatro alteraciones, los cuadros restantes se identifican explícitamente como ausencia de otra alerta automática.",
       styles["SmallPAC"]
     ))
   except Exception as e:
@@ -4760,10 +4899,10 @@ if wave_df is not None:
   else:
     st.warning("No fue posible construir la animación con los datos disponibles.")
 
-  st.markdown("### Capturas didácticas para el informe médico integrado")
-  st.caption("Estas cuatro imágenes se incorporan al PDF: inicio de eyección, pico sistólico, retorno reflejo y diástole/SEVR, sincronizadas con los datos reales.")
+  st.markdown("### Capturas de métricas alteradas para el informe médico integrado")
+  st.caption("Estas imágenes se incorporan al PDF y se seleccionan desde las métricas alteradas reales: cada cuadro incluye valor, criterio y explicación didáctica del mecanismo.")
   try:
-    st.image(plot_aortic_animation_keyframes(row, sep_df_preview, sep_metrics_preview, hdf), caption="Cuatro cuadros relevantes de la animación hemodinámica", use_container_width=True)
+    st.image(plot_aortic_animation_keyframes(row, sep_df_preview, sep_metrics_preview, hdf), caption="Capturas de métricas alteradas con valor, criterio y explicación didáctica", use_container_width=True)
   except Exception as e:
     st.warning(f"No se pudieron generar las capturas didácticas: {e}")
 
