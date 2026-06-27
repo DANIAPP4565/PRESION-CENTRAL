@@ -3008,7 +3008,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
   except Exception:
     return alerts[:7]
 
-def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=760):
+def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=980):
   """Animación HTML/SVG de aorta con presión real, separación Pf/Pb y armónicos.
 
   La animación no crea una curva nueva: usa la curva real regularizada del paciente,
@@ -3132,12 +3132,32 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
   .toggle input {{ accent-color:#12355b; }}
   input[type=range] {{ flex:1 1 320px; accent-color:#12355b; }}
   .timebox {{ color:var(--muted); font-variant-numeric:tabular-nums; min-width:86px; text-align:right; }}
-  .alertCard {{ margin-top:10px; border:1px solid #f3c37a; background:#fff8eb; border-radius:16px; padding:11px 13px; display:none; box-shadow:0 8px 18px rgba(135,86,10,.08); }}
+  .alertCard {{
+    margin-top:12px;
+    border:1px solid #f3c37a;
+    background:#fff8eb;
+    border-radius:16px;
+    padding:14px 16px;
+    display:none;
+    box-shadow:0 8px 18px rgba(135,86,10,.08);
+    width:100%;
+    box-sizing:border-box;
+    max-height:none;
+    overflow:visible;
+  }}
   .alertCard.show {{ display:block; }}
-  .alertHead {{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:5px; }}
-  .alertTitle {{ color:#7a3d00; font-weight:900; font-size:14px; }}
-  .alertPill {{ background:#7a3d00; color:#fff; border-radius:999px; padding:3px 8px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; }}
-  .alertLine {{ font-size:12px; color:#48311a; line-height:1.35; margin-top:3px; }}
+  .alertHead {{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }}
+  .alertTitle {{ color:#7a3d00; font-weight:900; font-size:15px; line-height:1.25; overflow-wrap:anywhere; }}
+  .alertPill {{ background:#7a3d00; color:#fff; border-radius:999px; padding:4px 9px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; }}
+  .alertLine {{
+    font-size:13px;
+    color:#48311a;
+    line-height:1.55;
+    margin-top:6px;
+    white-space:normal;
+    overflow-wrap:anywhere;
+    word-break:normal;
+  }}
   .alertLine b {{ color:#2a1d0f; }}
   .grid2 {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
   .small {{ font-size:12px; color:var(--muted); line-height:1.35; }}
@@ -3152,7 +3172,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
   .pfLine {{ fill:none; stroke:var(--pf); stroke-width:2; }}
   .pbLine {{ fill:none; stroke:var(--pb); stroke-width:2; stroke-dasharray:5 4; }}
   .marker {{ stroke:#fff; stroke-width:2; }}
-  @media (max-width:850px) {{ .stage {{ grid-template-columns:1fr; }} .cards {{ grid-template-columns:repeat(2,minmax(115px,1fr)); }} }}
+  @media (max-width:850px) {{ .stage {{ grid-template-columns:1fr; }} .cards {{ grid-template-columns:repeat(2,minmax(115px,1fr)); }} .alertLine {{ font-size:12.5px; line-height:1.5; }} }}
 </style>
 </head>
 <body>
@@ -3301,6 +3321,7 @@ function showMetricAlert(a) {{
   document.getElementById('alertWhy').textContent = a.why || 'La métrica supera el límite definido.';
   document.getElementById('alertMechanism').textContent = a.mechanism || 'Interpretar de forma integrada con la curva central y el resto de métricas.';
   box.classList.add('show');
+  try {{ box.scrollIntoView({{behavior:'smooth', block:'nearest'}}); }} catch(e) {{}}
 }}
 function checkSmartPause(idx) {{
   if(!smartPause || !smartPause.checked || !alerts.length) return;
@@ -4659,9 +4680,9 @@ if wave_df is not None:
 
   st.markdown("### Animación hemodinámica real de la aorta")
   st.caption("Animación didáctica basada en la curva real del paciente, separación Pf/Pb, flujo aórtico estimado y armónicos. No usa curvas sintéticas ni plantillas fijas.")
-  animation_html = render_aortic_real_metrics_animation(row, sep_df_preview, sep_metrics_preview, hdf, height=760)
+  animation_html = render_aortic_real_metrics_animation(row, sep_df_preview, sep_metrics_preview, hdf, height=980)
   if animation_html:
-    components.html(animation_html, height=780, scrolling=False)
+    components.html(animation_html, height=1020, scrolling=True)
   else:
     st.warning("No fue posible construir la animación con los datos disponibles.")
 
