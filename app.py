@@ -150,8 +150,9 @@ CENTRAL_SBP_TABLE = {
 
 # Referencias del Manual de Mecánica Vascular SAHA 2024, Tabla 2:
 # Presión arterial sistólica aórtica central por sexo, grupo etario y esquema de calibración.
-# Valores = percentil 50 (mediana) y DE. Se usa P95 = mediana + 1.645*DE para definir
-# hipertensión central ajustada por edad/sexo; P95 = mediana + 1.645*DE para diagnóstico binario de hipertensión central.
+# Valores = percentil 50 (mediana) y DE. Se usa P90 = mediana + 1.282*DE como
+# límite diagnóstico binario: CON HIPERTENSIÓN CENTRAL si PAS central >= P90 y
+# SIN HIPERTENSIÓN CENTRAL si PAS central < P90.
 SAHA_AOSBP_REF = {
   "M": {
     "<20": {"C_PAOC": (110.29, 16.41), "SD_PAOC": (102.41, 10.22)},
@@ -260,12 +261,12 @@ def get_saha_aix75_reference(row):
   pct = _percentile_from_percentile_table(iau, vals=(p10, p25, p50, p75, p90))
   z = (iau - mean) / sd if sd and not np.isnan(sd) else np.nan
   if iau >= p90:
-    categoria = "IAu/AIx central aumentado para edad y sexo"
-    severidad = "aumentado"
+    categoria = "CON AUMENTACIÓN CENTRAL AUMENTADA PARA EDAD Y SEXO"
+    severidad = "con aumentación central aumentada"
     alterada = True
   else:
-    categoria = "IAu/AIx central no aumentado para edad y sexo"
-    severidad = "no aumentado"
+    categoria = "SIN AUMENTACIÓN CENTRAL AUMENTADA PARA EDAD Y SEXO"
+    severidad = "sin aumentación central aumentada"
     alterada = False
   return {
     "ok": True, "sexo": sex, "edad_grupo": age_group, "iau": iau,
@@ -280,13 +281,13 @@ def format_saha_aix75(row, compact=False):
   if not ref.get("ok"):
     return "Clasificación IAu/AIx no disponible: " + ref.get("motivo", "datos insuficientes")
   txt = (
-    f"Clasificación IAu/AIx por edad/sexo: {ref['categoria']}. "
+    f"Diagnóstico de aumentación central por IAu/AIx: {ref['categoria']}. "
     f"IAu {ref['iau']:.1f}%; referencia LEAD 2024 {ref['sexo']}, {ref['edad_grupo']} años: "
     f"P50 {ref['p50']:.1f}%, P75 {ref['p75']:.1f}% y P90 {ref['p90']:.1f}%. "
     f"Percentil estimado {ref['percentil']:.0f}; z aproximado {ref['z_aprox']:.2f}."
   )
   if not compact:
-    txt += " Se define IAu/AIx central aumentado para edad/sexo cuando alcanza o supera el P90 de la referencia LEAD 2024/SphygmoCor."
+    txt += " La decisión del informe es binaria: CON AUMENTACIÓN CENTRAL AUMENTADA o SIN AUMENTACIÓN CENTRAL AUMENTADA; el punto de corte es IAu/AIx >= P90 de la referencia LEAD 2024/SphygmoCor."
   return txt
 
 SAHA_CALIBRATION_LABELS = {
@@ -316,8 +317,8 @@ def get_saha_central_sbp_reference(row):
   """Referencia SAHA 2024 para PAS aórtica central según edad, sexo y calibración.
 
   Devuelve mediana, DE, P90, P95, z-score y percentil estimado. La decisión
-  diagnóstica es binaria: hipertensión central si PAS central >= P95; sin
-  hipertensión central si PAS central < P95. No se generan categorías ambiguas.
+  diagnóstica es binaria: CON HIPERTENSIÓN CENTRAL si PAS central >= P90 y
+  SIN HIPERTENSIÓN CENTRAL si PAS central < P90. No se generan categorías ambiguas.
   """
   sex = safe_text(row.get("sexo", "M")).upper()[:1]
   if sex not in ("M", "F"):
@@ -337,12 +338,12 @@ def get_saha_central_sbp_reference(row):
   p90 = median + 1.282 * sd
   p95 = median + 1.645 * sd
   p97 = median + 1.960 * sd
-  if pas_c >= p95:
-    categoria = "Hipertensión central ajustada por edad y sexo"
-    severidad = "hipertensión central"
+  if pas_c >= p90:
+    categoria = "CON HIPERTENSIÓN CENTRAL ajustada por edad, sexo y calibración"
+    severidad = "con hipertensión central"
     alterada = True
   else:
-    categoria = "Sin hipertensión central ajustada por edad y sexo"
+    categoria = "SIN HIPERTENSIÓN CENTRAL ajustada por edad, sexo y calibración"
     severidad = "sin hipertensión central"
     alterada = False
   return {
@@ -357,16 +358,16 @@ def central_hypertension_status(row):
   """Diagnóstico binario de hipertensión central.
 
   Prioridad diagnóstica:
-  1) Tabla SAHA 2024 por edad, sexo y método de calibración: HTA central si PASc >= P95.
-  2) Respaldo operativo si no hay datos para SAHA: HTA central si PASc >= 130 mmHg.
+  1) Tabla SAHA 2024 por edad, sexo y método de calibración: CON HIPERTENSIÓN CENTRAL si PASc >= P90.
+  2) Respaldo operativo si no hay datos para SAHA: CON HIPERTENSIÓN CENTRAL si PASc >= 130 mmHg.
   """
   pas_c = to_float(row.get("pas_central"))
   if np.isnan(pas_c):
     return {
       "ok": False,
       "tiene_hta_central": False,
-      "diagnostico": "Hipertensión central: no clasificable por falta de PAS central.",
-      "diagnostico_breve": "Hipertensión central: no clasificable.",
+      "diagnostico": "Hipertensión central no clasificable por falta de PAS central.",
+      "diagnostico_breve": "Hipertensión central no clasificable.",
       "criterio": "PAS central no disponible",
       "umbral": np.nan,
       "pas_central": pas_c,
@@ -374,14 +375,14 @@ def central_hypertension_status(row):
 
   saha_ref = get_saha_central_sbp_reference(row)
   if saha_ref.get("ok"):
-    umbral = saha_ref.get("p95", np.nan)
+    umbral = saha_ref.get("p90", np.nan)
     hta = pas_c >= umbral
     criterio = (
-      f"criterio SAHA 2024 ajustado por edad/sexo/calibración: PAS central >= P95 "
+      f"criterio SAHA 2024 ajustado por edad/sexo/calibración: PAS central >= P90 "
       f"({umbral:.1f} mmHg)"
     )
     detalle = (
-      f"PAS central {pas_c:.0f} mmHg; P95 SAHA {umbral:.1f} mmHg; "
+      f"PAS central {pas_c:.0f} mmHg; P90 SAHA {umbral:.1f} mmHg; "
       f"{saha_ref['sexo']}, {saha_ref['edad_grupo']} años, {saha_ref['metodo']}; "
       f"z {saha_ref['z']:.2f}; percentil {saha_ref['percentil']:.0f}."
     )
@@ -391,7 +392,7 @@ def central_hypertension_status(row):
     criterio = "criterio operativo de respaldo: PAS central >= 130 mmHg"
     detalle = f"PAS central {pas_c:.0f} mmHg; umbral operativo {umbral:.0f} mmHg."
 
-  diagnostico_breve = "Hipertensión central: SÍ." if hta else "Hipertensión central: NO."
+  diagnostico_breve = "CON HIPERTENSIÓN CENTRAL." if hta else "SIN HIPERTENSIÓN CENTRAL."
   return {
     "ok": True,
     "tiene_hta_central": bool(hta),
@@ -409,7 +410,7 @@ def format_saha_central_htn(row, compact=False):
     return status.get("diagnostico", "Hipertensión central: no clasificable.")
   txt = f"Diagnóstico de presión central: {status['diagnostico']} Criterio utilizado: {status['criterio']}."
   if not compact:
-    txt += " La decisión del informe es binaria: hipertensión central sí o no."
+    txt += " La decisión del informe es binaria: CON HIPERTENSIÓN CENTRAL o SIN HIPERTENSIÓN CENTRAL."
   return txt
 
 
@@ -1985,7 +1986,7 @@ def central_diagnosis(row):
   risk = []
   if status.get("ok"):
     if status.get("tiene_hta_central"):
-      risk.append("hipertensión central confirmada por el criterio seleccionado")
+      risk.append("con hipertensión central por el criterio seleccionado")
     else:
       risk.append("sin hipertensión central por el criterio seleccionado")
   if not np.isnan(ppa) and ppa < 1.30:
@@ -1994,7 +1995,7 @@ def central_diagnosis(row):
     risk.append("presión de pulso central aumentada")
   saha_aix = get_saha_aix75_reference(row)
   if saha_aix.get("ok") and saha_aix.get("alterada"):
-    risk.append("IAu/AIx central aumentado para edad y sexo según LEAD 2024/SphygmoCor")
+    risk.append("con aumentación central aumentada por IAu/AIx según LEAD 2024/SphygmoCor")
   elif not np.isnan(row.get("iau", np.nan)) and row.get("iau") >= 25 and not saha_aix.get("ok"):
     risk.append("índice de aumentación aumentado por umbral fijo de respaldo")
   return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
@@ -2554,14 +2555,14 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
   saha_aix = get_saha_aix75_reference(row)
   if saha_aix.get("ok"):
     if saha_aix.get("alterada"):
-      pressure_flags.append(f"IAu/AIx aumentado para edad/sexo: IAu >= P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
+      pressure_flags.append(f"CON AUMENTACIÓN CENTRAL AUMENTADA por IAu/AIx: IAu >= P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
     else:
-      pressure_flags.append(f"IAu/AIx no aumentado para edad/sexo: IAu < P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
+      pressure_flags.append(f"SIN AUMENTACIÓN CENTRAL AUMENTADA por IAu/AIx: IAu < P90 LEAD 2024 ({saha_aix['p90']:.1f}%)")
   elif not np.isnan(iau):
     if iau >= 25:
-      pressure_flags.append("IAu aumentado por umbral fijo de respaldo")
+      pressure_flags.append("CON AUMENTACIÓN CENTRAL AUMENTADA por umbral fijo de respaldo")
     else:
-      pressure_flags.append("IAu no aumentado por umbral fijo de respaldo")
+      pressure_flags.append("SIN AUMENTACIÓN CENTRAL AUMENTADA por umbral fijo de respaldo")
   if not np.isnan(ppa):
     if ppa < 1.30:
       pressure_flags.append("amplificación de presión de pulso reducida")
@@ -2662,12 +2663,12 @@ def _didactic_grade_pressure(row):
 
   if status.get("ok"):
     if status.get("tiene_hta_central"):
-      pressure = "El paciente presenta hipertensión central según el criterio seleccionado para el informe."
-      pressure_short = "hipertensión central: SÍ."
+      pressure = "El paciente se clasifica CON HIPERTENSIÓN CENTRAL según el criterio seleccionado para el informe."
+      pressure_short = "con hipertensión central."
       pressure_level = "alterada"
     else:
-      pressure = "El paciente no presenta hipertensión central según el criterio seleccionado para el informe."
-      pressure_short = "hipertensión central: NO."
+      pressure = "El paciente se clasifica SIN HIPERTENSIÓN CENTRAL según el criterio seleccionado para el informe."
+      pressure_short = "sin hipertensión central."
       pressure_level = "normal"
   else:
     pressure = "La hipertensión central no pudo clasificarse por ausencia de PAS central válida."
@@ -2712,26 +2713,26 @@ def _didactic_grade_augmentation(row):
     aumentada = bool(aix_ref.get("alterada", False))
     if aumentada:
       return (
-        "El estudio evidencia aumentación central aumentada para edad y sexo, compatible con mayor contribución de la onda reflejada al componente sistólico central.",
-        "aumentación central aumentada para edad y sexo.",
+        "El estudio se clasifica CON AUMENTACIÓN CENTRAL AUMENTADA para edad y sexo, compatible con mayor contribución de la onda reflejada al componente sistólico central.",
+        "con aumentación central aumentada para edad y sexo.",
         "alterada",
       )
     return (
-      "El estudio no evidencia aumentación central aumentada para edad y sexo, compatible con contribución reflectiva central no incrementada.",
-      "aumentación central no aumentada para edad y sexo.",
+      "El estudio se clasifica SIN AUMENTACIÓN CENTRAL AUMENTADA para edad y sexo, compatible con contribución reflectiva central no incrementada.",
+      "sin aumentación central aumentada para edad y sexo.",
       "normal",
     )
 
   if not np.isnan(iau):
     if iau >= 25:
       return (
-        "El estudio evidencia aumentación central aumentada por criterio operativo de respaldo, compatible con mayor participación de la onda reflejada en la presión sistólica central.",
-        "aumentación central aumentada.",
+        "El estudio se clasifica CON AUMENTACIÓN CENTRAL AUMENTADA por criterio operativo de respaldo, compatible con mayor participación de la onda reflejada en la presión sistólica central.",
+        "con aumentación central aumentada.",
         "alterada",
       )
     return (
-      "El estudio no evidencia aumentación central aumentada por criterio operativo de respaldo.",
-      "aumentación central no aumentada.",
+      "El estudio se clasifica SIN AUMENTACIÓN CENTRAL AUMENTADA por criterio operativo de respaldo.",
+      "sin aumentación central aumentada.",
       "normal",
     )
 
@@ -3049,13 +3050,13 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     if saha_ref.get("alterada"):
       pressure_score += add_metric(
         pressure_metrics, True, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
-        f"HTA central si ≥P95 ({saha_ref['p95']:.1f} mmHg); {saha_ref['sexo']} {saha_ref['edad_grupo']} años, {saha_ref['metodo']}",
-        f"hipertensión central ajustada por edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 3
+        f"CON HIPERTENSIÓN CENTRAL si ≥P90 ({saha_ref['p90']:.1f} mmHg); {saha_ref['sexo']} {saha_ref['edad_grupo']} años, {saha_ref['metodo']}",
+        f"con hipertensión central ajustada por edad/sexo; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 3
       )
     else:
       add_metric(
         pressure_metrics, False, "PAS central por SAHA edad/sexo", fmt(pas_c, 0, " mmHg"),
-        f"sin HTA central si <P95 ({saha_ref['p95']:.1f} mmHg)",
+        f"SIN HIPERTENSIÓN CENTRAL si <P90 ({saha_ref['p90']:.1f} mmHg)",
         f"mediana {saha_ref['mediana']:.1f} mmHg; z {saha_ref['z']:.2f}, percentil {saha_ref['percentil']:.0f}", 0
       )
   elif not np.isnan(pas_c):
@@ -3076,13 +3077,13 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
       pressure_score += add_metric(
         pressure_metrics, True, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
         f"aumentado si ≥P90 ({saha_aix['p90']:.1f}%); {saha_aix['sexo']} {saha_aix['edad_grupo']} años",
-        f"aumentación central elevada para edad/sexo; percentil {saha_aix['percentil']:.0f}, z aprox {saha_aix['z_aprox']:.2f}", 2
+        f"con aumentación central aumentada para edad/sexo; percentil {saha_aix['percentil']:.0f}, z aprox {saha_aix['z_aprox']:.2f}", 2
       )
     else:
       add_metric(
         pressure_metrics, False, "IAu/AIx por SAHA edad/sexo", fmt(iau, 1, "%"),
         f"no aumentado si <P90 ({saha_aix['p90']:.1f}%)",
-        f"P50 {saha_aix['p50']:.1f}%, P90 {saha_aix['p90']:.1f}%, percentil {saha_aix['percentil']:.0f}", 0
+        f"sin aumentación central aumentada; P50 {saha_aix['p50']:.1f}%, P90 {saha_aix['p90']:.1f}%, percentil {saha_aix['percentil']:.0f}", 0
       )
   elif not np.isnan(iau):
     if iau >= 35:
@@ -3373,7 +3374,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
     ["IMC", _fmt(row.get("imc",""),1), "Medicación", safe_text(row.get("medicacion",""))],
   ]
   saha_pdf_ref = get_saha_central_sbp_reference(row)
-  saha_p95 = _fmt(saha_pdf_ref.get("p95"), 1) if saha_pdf_ref.get("ok") else ""
+  saha_p90 = _fmt(saha_pdf_ref.get("p90"), 1) if saha_pdf_ref.get("ok") else ""
   saha_zpct = (f"z {saha_pdf_ref.get('z', np.nan):.2f} / P{saha_pdf_ref.get('percentil', np.nan):.0f}" if saha_pdf_ref.get("ok") else "")
   saha_aix_pdf_ref = get_saha_aix75_reference(row)
   saha_aix_p90 = _fmt(saha_aix_pdf_ref.get("p90"), 1) if saha_aix_pdf_ref.get("ok") else ""
@@ -3390,7 +3391,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
       ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
       ["PE", "", _fmt(row.get("pe")), "%"],
       ["APC", "", _fmt(row.get("apc")), "relación"],
-      ["SAHA P95 edad/sexo", "", saha_p95, "mmHg"],
+      ["SAHA P90 edad/sexo", "", saha_p90, "mmHg"],
       ["SAHA z / percentil", "", saha_zpct, ""],
       ["LEAD IAu P90 edad/sexo", "", saha_aix_p90, "%"],
       ["LEAD IAu percentil", "", saha_aix_pct, ""]]
