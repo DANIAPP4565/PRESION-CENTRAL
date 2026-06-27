@@ -2,13 +2,14 @@
 # App Streamlit para informe de Presión Aórtica Central (PAC)
 # Importa PDF tipo MODELO PAC, extrae variables, genera historial Excel y PDF médico integrado.
 
-import io, re, math, tempfile
+import io, re, math, tempfile, json
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import matplotlib.pyplot as plt
 
 try:
@@ -2489,6 +2490,321 @@ def plot_harmonics(hdf):
   return fig_to_png(fig)
 
 
+
+def _resample_for_animation(x, y, n=180):
+  """Reduce una señal real a una longitud liviana para animación HTML."""
+  try:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if len(x) < 3:
+      return [], []
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    keep = np.r_[True, np.diff(x) > 0]
+    x, y = x[keep], y[keep]
+    if len(x) < 3:
+      return [], []
+    grid = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), int(n))
+    vals = np.interp(grid, x, y)
+    return [round(float(v), 3) for v in grid], [round(float(v), 3) for v in vals]
+  except Exception:
+    return [], []
+
+
+def _safe_metric_value(value, decimals=1, suffix=""):
+  """Valor compacto para tarjetas de animación."""
+  v = to_float(value)
+  if np.isnan(v):
+    return "ND"
+  if decimals <= 0:
+    return f"{v:.0f}{suffix}"
+  return f"{v:.{decimals}f}{suffix}"
+
+
+def _animation_vector_from_sep(sep_df, column, n=180, default_zero=False):
+  """Obtiene una columna real de sep_df y la remuestrea para la animación."""
+  try:
+    t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    if column in sep_df:
+      y = pd.to_numeric(sep_df[column], errors="coerce").to_numpy(dtype=float)
+    elif default_zero:
+      y = np.zeros_like(t, dtype=float)
+    else:
+      return [], []
+    return _resample_for_animation(t, y, n=n)
+  except Exception:
+    return [], []
+
+
+def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=760):
+  """Animación HTML/SVG de aorta con presión real, separación Pf/Pb y armónicos.
+
+  La animación no crea una curva nueva: usa la curva real regularizada del paciente,
+  las ondas Pf/Pb estimadas desde esa curva y el espectro armónico calculado por FFT.
+  El cambio de calibre aórtico es didáctico y proporcional a la presión pulsátil real;
+  no representa medición anatómica directa del diámetro de la aorta.
+  """
+  try:
+    t, p = _animation_vector_from_sep(sep_df, "presion_total_mmHg", n=190)
+    _, pf = _animation_vector_from_sep(sep_df, "onda_anterograda_pf", n=190, default_zero=True)
+    _, pb = _animation_vector_from_sep(sep_df, "onda_retrograda_pb", n=190, default_zero=True)
+    _, q = _animation_vector_from_sep(sep_df, "flujo_aortico_estimado_ml_s", n=190, default_zero=True)
+    if not t or not p:
+      return ""
+
+    energies = []
+    freqs = []
+    if hdf is not None and len(hdf):
+      energies = [round(float(x), 3) for x in pd.to_numeric(hdf.get("energia_relativa_%", []), errors="coerce").fillna(0).tolist()[:10]]
+      freqs = [round(float(x), 3) for x in pd.to_numeric(hdf.get("frecuencia_hz", []), errors="coerce").fillna(0).tolist()[:10]]
+    while len(energies) < 10:
+      energies.append(0.0)
+    while len(freqs) < 10:
+      freqs.append(0.0)
+
+    pas = to_float(row.get("pas_central"))
+    pad = to_float(row.get("pad_central"))
+    pp = to_float(row.get("pp_central"))
+    iau = to_float(row.get("iau"))
+    au = to_float(row.get("au"))
+    rvse_eq = to_float(row.get("rvse"))
+    rvse_calc = to_float(sep_metrics.get("rvse_calculado_%"))
+    rm = to_float(sep_metrics.get("rm"))
+    ri = to_float(sep_metrics.get("ri"))
+    tref = to_float(sep_metrics.get("tref_ms"))
+    tfor = to_float(sep_metrics.get("tfor_ms"))
+    qp = to_float(sep_metrics.get("qp_ml_s"))
+    pe_ms = to_float(sep_metrics.get("pe_ms"))
+    ai_morph = to_float(sep_metrics.get("ai_morfologico_%"))
+    curve_id = safe_text(sep_metrics.get("curve_id", "sin_firma"))
+    hta_status = central_hypertension_status(row)
+    saha_ref = get_saha_central_sbp_reference(row)
+    p90 = saha_ref.get("p90", np.nan) if saha_ref.get("ok") else np.nan
+    aix_ref = get_saha_aix75_reference(row)
+    aix_p90 = aix_ref.get("p90", np.nan) if aix_ref.get("ok") else np.nan
+
+    payload = {
+      "t": t,
+      "p": p,
+      "pf": pf,
+      "pb": pb,
+      "q": q,
+      "energies": energies,
+      "freqs": freqs,
+      "metrics": {
+        "pas": _safe_metric_value(pas, 0, " mmHg"),
+        "pad": _safe_metric_value(pad, 0, " mmHg"),
+        "pp": _safe_metric_value(pp, 0, " mmHg"),
+        "p90": _safe_metric_value(p90, 1, " mmHg"),
+        "hta": "CON HTA central" if hta_status.get("tiene_hta_central") else "SIN HTA central",
+        "iau": _safe_metric_value(iau, 1, "%"),
+        "iau_p90": _safe_metric_value(aix_p90, 1, "%"),
+        "au": _safe_metric_value(au, 1, " mmHg"),
+        "rm": _safe_metric_value(rm, 2, ""),
+        "ri": _safe_metric_value(ri, 2, ""),
+        "tref": _safe_metric_value(tref, 0, " ms"),
+        "tfor": _safe_metric_value(tfor, 0, " ms"),
+        "qp": _safe_metric_value(qp, 0, " mL/s"),
+        "pe": _safe_metric_value(pe_ms, 0, " ms"),
+        "rvse_calc": _safe_metric_value(rvse_calc, 0, "%"),
+        "rvse_eq": _safe_metric_value(rvse_eq, 0, "%"),
+        "ai_morph": _safe_metric_value(ai_morph, 1, "%"),
+        "curve_id": curve_id,
+      }
+    }
+    data_json = json.dumps(payload, ensure_ascii=False)
+
+    html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {{ --bg:#f7fbff; --ink:#183044; --muted:#617385; --card:#ffffff; --line:#d5e3ef; --aorta:#b71c1c; --pf:#168038; --pb:#ef6c00; --flow:#6a1b9a; }}
+  body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; background:transparent; color:var(--ink); }}
+  .wrap {{ border:1px solid var(--line); border-radius:22px; background:linear-gradient(180deg,#ffffff 0%,var(--bg) 100%); padding:18px; box-sizing:border-box; }}
+  .top {{ display:flex; gap:14px; align-items:stretch; flex-wrap:wrap; }}
+  .title {{ flex:1 1 380px; padding:8px 4px; }}
+  h2 {{ margin:0 0 6px 0; font-size:22px; letter-spacing:-.02em; }}
+  .sub {{ color:var(--muted); font-size:13px; line-height:1.35; max-width:980px; }}
+  .cards {{ display:grid; grid-template-columns:repeat(4,minmax(115px,1fr)); gap:10px; flex:1 1 470px; }}
+  .card {{ background:var(--card); border:1px solid var(--line); border-radius:16px; padding:10px 12px; box-shadow:0 6px 16px rgba(18,53,91,.05); }}
+  .k {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }}
+  .v {{ font-size:18px; font-weight:800; margin-top:3px; }}
+  .stage {{ display:grid; grid-template-columns:1.15fr .85fr; gap:16px; margin-top:16px; }}
+  .panel {{ background:#fff; border:1px solid var(--line); border-radius:18px; padding:12px; box-shadow:0 8px 18px rgba(18,53,91,.05); }}
+  .panel h3 {{ font-size:14px; margin:0 0 8px 0; }}
+  svg {{ width:100%; height:auto; display:block; }}
+  .legend {{ display:flex; gap:12px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin-top:8px; }}
+  .dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:-1px; }}
+  .controls {{ margin-top:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+  button {{ border:0; background:#12355b; color:#fff; border-radius:999px; padding:9px 14px; font-weight:700; cursor:pointer; }}
+  input[type=range] {{ flex:1 1 320px; accent-color:#12355b; }}
+  .timebox {{ color:var(--muted); font-variant-numeric:tabular-nums; min-width:86px; text-align:right; }}
+  .grid2 {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+  .small {{ font-size:12px; color:var(--muted); line-height:1.35; }}
+  .barbg {{ fill:#e8f0f7; }}
+  .bar {{ fill:#455a64; transition:height .12s, y .12s, opacity .12s; }}
+  .bar.active {{ fill:#12355b; opacity:1; }}
+  .waveLine {{ fill:none; stroke:#111; stroke-width:2.5; }}
+  .pfLine {{ fill:none; stroke:var(--pf); stroke-width:2; }}
+  .pbLine {{ fill:none; stroke:var(--pb); stroke-width:2; stroke-dasharray:5 4; }}
+  .marker {{ stroke:#fff; stroke-width:2; }}
+  @media (max-width:850px) {{ .stage {{ grid-template-columns:1fr; }} .cards {{ grid-template-columns:repeat(2,minmax(115px,1fr)); }} }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="title">
+      <h2>Animación hemodinámica central con datos reales</h2>
+      <div class="sub">Integra la curva central real digitalizada/importada, separación de ondas Pf/Pb, flujo aórtico estimado y armónicos por FFT. El cambio de calibre visible es una representación didáctica proporcional a la presión pulsátil real, no una medición anatómica del diámetro aórtico.</div>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="k">Diagnóstico</div><div class="v" id="mHTA"></div></div>
+      <div class="card"><div class="k">PAS/PAD central</div><div class="v" id="mPASPAD"></div></div>
+      <div class="card"><div class="k">RM Pb/Pf</div><div class="v" id="mRM"></div></div>
+      <div class="card"><div class="k">Tref</div><div class="v" id="mTref"></div></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="panel">
+      <h3>Aorta funcional: presión, onda anterógrada y onda retrógrada</h3>
+      <svg viewBox="0 0 820 430" role="img" aria-label="Animación de aorta y curva de presión central">
+        <defs>
+          <linearGradient id="aortaGrad" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stop-color="#7f0d0d"/><stop offset="45%" stop-color="#d43c2f"/><stop offset="100%" stop-color="#8a1111"/>
+          </linearGradient>
+          <filter id="softShadow"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#12355b" flood-opacity=".16"/></filter>
+        </defs>
+        <rect x="18" y="18" width="784" height="394" rx="20" fill="#fbfdff" stroke="#d5e3ef"/>
+        <g filter="url(#softShadow)">
+          <rect id="aortaTube" x="70" y="92" width="630" height="78" rx="39" fill="url(#aortaGrad)" opacity=".96"/>
+          <ellipse id="aortaIn" cx="70" cy="131" rx="28" ry="39" fill="#5b0909" opacity=".96"/>
+          <ellipse id="aortaOut" cx="700" cy="131" rx="28" ry="39" fill="#9d1b1b" opacity=".96"/>
+          <path d="M145 91 C190 38, 295 38, 336 92" fill="none" stroke="#9c1b1b" stroke-width="40" stroke-linecap="round" opacity=".96"/>
+          <path d="M503 92 C545 36, 644 44, 668 102" fill="none" stroke="#9c1b1b" stroke-width="36" stroke-linecap="round" opacity=".93"/>
+        </g>
+        <circle id="pfWave" cx="90" cy="131" r="14" fill="#168038" opacity=".90" class="marker"/>
+        <circle id="pbWave" cx="690" cy="131" r="12" fill="#ef6c00" opacity=".90" class="marker"/>
+        <text x="74" y="203" fill="#168038" font-size="13" font-weight="700">Pf anterógrada</text>
+        <text x="586" y="203" fill="#ef6c00" font-size="13" font-weight="700">Pb retrógrada</text>
+        <text id="liveP" x="410" y="78" text-anchor="middle" fill="#12355b" font-size="19" font-weight="800">-- mmHg</text>
+        <g transform="translate(70 242)">
+          <rect x="0" y="0" width="630" height="140" rx="14" fill="#ffffff" stroke="#d5e3ef"/>
+          <path id="pressurePath" class="waveLine" d=""/>
+          <path id="pfPath" class="pfLine" d=""/>
+          <path id="pbPath" class="pbLine" d=""/>
+          <line id="cursor" x1="0" x2="0" y1="10" y2="130" stroke="#12355b" stroke-width="1.4" opacity=".75"/>
+          <circle id="pDot" r="5" fill="#111" class="marker"/>
+          <circle id="pfDot" r="4" fill="#168038" class="marker"/>
+          <circle id="pbDot" r="4" fill="#ef6c00" class="marker"/>
+          <text x="12" y="22" fill="#617385" font-size="12">Presión total + Pf/Pb sobre la línea basal</text>
+        </g>
+      </svg>
+      <div class="legend"><span><i class="dot" style="background:#111"></i>Presión central</span><span><i class="dot" style="background:#168038"></i>Pf</span><span><i class="dot" style="background:#ef6c00"></i>Pb</span><span><i class="dot" style="background:#6a1b9a"></i>Flujo estimado</span></div>
+      <div class="controls"><button id="playBtn">Pausar</button><input id="slider" type="range" min="0" max="0" value="0" step="1"><span class="timebox" id="timeBox">0 ms</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>Métricas reales integradas</h3>
+      <div class="grid2">
+        <div class="card"><div class="k">Presión instantánea</div><div class="v" id="instP">--</div></div>
+        <div class="card"><div class="k">Flujo estimado</div><div class="v" id="instQ">--</div></div>
+        <div class="card"><div class="k">Pf / Pb inst.</div><div class="v" id="instPfPb">--</div></div>
+        <div class="card"><div class="k">RVSE calculado</div><div class="v" id="mRVSE"></div></div>
+      </div>
+      <svg viewBox="0 0 460 245" aria-label="Energía armónica relativa">
+        <rect x="16" y="20" width="428" height="190" rx="15" fill="#fff" stroke="#d5e3ef"/>
+        <text x="30" y="44" fill="#12355b" font-size="14" font-weight="800">Armónicos por FFT de la onda central real</text>
+        <g id="bars" transform="translate(34 62)"></g>
+        <text id="domH" x="30" y="232" fill="#617385" font-size="12"></text>
+      </svg>
+      <div class="small" id="detailBox"></div>
+    </div>
+  </div>
+</div>
+<script>
+const data = {data_json};
+const N = data.t.length;
+let i = 0, playing = true;
+const minP = Math.min(...data.p), maxP = Math.max(...data.p);
+const maxPf = Math.max(...data.pf, 1e-6), maxPb = Math.max(...data.pb, 1e-6), maxQ = Math.max(...data.q, 1e-6);
+const slider = document.getElementById('slider'); slider.max = Math.max(N-1,0);
+function fmt(x,d=0) {{ if(!Number.isFinite(x)) return 'ND'; return x.toFixed(d); }}
+function sx(idx) {{ return (data.t[idx] - data.t[0]) / Math.max(data.t[N-1]-data.t[0], 1e-6) * 630; }}
+function sy(v) {{ return 130 - (v - minP) / Math.max(maxP-minP, 1e-6) * 110; }}
+function syComp(v) {{ return 130 - v / Math.max(maxP-minP, 1e-6) * 95; }}
+function linePath(vals, mode) {{
+  let d='';
+  for(let k=0;k<N;k++) {{ let x=sx(k), y=(mode==='comp'? syComp(vals[k]):sy(vals[k])); d += (k===0?'M':'L') + x.toFixed(1)+' '+y.toFixed(1)+' '; }}
+  return d;
+}}
+document.getElementById('pressurePath').setAttribute('d', linePath(data.p, 'p'));
+document.getElementById('pfPath').setAttribute('d', linePath(data.pf, 'comp'));
+document.getElementById('pbPath').setAttribute('d', linePath(data.pb, 'comp'));
+document.getElementById('mHTA').textContent = data.metrics.hta;
+document.getElementById('mPASPAD').textContent = data.metrics.pas.replace(' mmHg','') + '/' + data.metrics.pad.replace(' mmHg','');
+document.getElementById('mRM').textContent = data.metrics.rm;
+document.getElementById('mTref').textContent = data.metrics.tref;
+document.getElementById('mRVSE').textContent = data.metrics.rvse_calc;
+document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref '+data.metrics.tref+'; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
+const bars = document.getElementById('bars');
+const maxE = Math.max(...data.energies, 1e-6);
+let domIdx = 0; data.energies.forEach((e, idx)=>{{ if(e>data.energies[domIdx]) domIdx=idx; }});
+for(let b=0;b<10;b++) {{
+  const x = b*39;
+  const h = Math.max(2, data.energies[b]/maxE*120);
+  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect'); bg.setAttribute('x',x); bg.setAttribute('y',18); bg.setAttribute('width',25); bg.setAttribute('height',128); bg.setAttribute('rx',5); bg.setAttribute('class','barbg'); bars.appendChild(bg);
+  const r = document.createElementNS('http://www.w3.org/2000/svg','rect'); r.setAttribute('id','bar'+b); r.setAttribute('x',x); r.setAttribute('y',146-h); r.setAttribute('width',25); r.setAttribute('height',h); r.setAttribute('rx',5); r.setAttribute('class','bar'); bars.appendChild(r);
+  const tx = document.createElementNS('http://www.w3.org/2000/svg','text'); tx.setAttribute('x',x+12.5); tx.setAttribute('y',166); tx.setAttribute('text-anchor','middle'); tx.setAttribute('fill','#617385'); tx.setAttribute('font-size','11'); tx.textContent = (b+1); bars.appendChild(tx);
+  const ty = document.createElementNS('http://www.w3.org/2000/svg','text'); ty.setAttribute('x',x+12.5); ty.setAttribute('y',14); ty.setAttribute('text-anchor','middle'); ty.setAttribute('fill','#617385'); ty.setAttribute('font-size','10'); ty.textContent = fmt(data.energies[b],0)+'%'; bars.appendChild(ty);
+}}
+document.getElementById('domH').textContent = 'Armónico dominante: H'+(domIdx+1)+' | frecuencia aprox. '+fmt(data.freqs[domIdx],2)+' Hz | energía '+fmt(data.energies[domIdx],1)+'%';
+function update(idx) {{
+  i = Math.max(0, Math.min(N-1, idx)); slider.value = i;
+  const p = data.p[i], pf = data.pf[i], pb = data.pb[i], q = data.q[i];
+  const norm = (p-minP)/Math.max(maxP-minP, 1e-6);
+  const tubeH = 68 + norm*34;
+  const tubeY = 131 - tubeH/2;
+  const rx = tubeH/2;
+  const tube = document.getElementById('aortaTube'); tube.setAttribute('y', tubeY); tube.setAttribute('height', tubeH); tube.setAttribute('rx', rx);
+  document.getElementById('aortaIn').setAttribute('ry', tubeH/2);
+  document.getElementById('aortaOut').setAttribute('ry', tubeH/2);
+  const pfX = 90 + (data.t[i]/Math.max(data.t[N-1],1))*585;
+  const pbX = 700 - (data.t[i]/Math.max(data.t[N-1],1))*530;
+  document.getElementById('pfWave').setAttribute('cx', pfX);
+  document.getElementById('pfWave').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13);
+  document.getElementById('pbWave').setAttribute('cx', pbX);
+  document.getElementById('pbWave').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12);
+  document.getElementById('liveP').textContent = fmt(p,0)+' mmHg';
+  const x = sx(i), y = sy(p);
+  document.getElementById('cursor').setAttribute('x1', x); document.getElementById('cursor').setAttribute('x2', x);
+  document.getElementById('pDot').setAttribute('cx', x); document.getElementById('pDot').setAttribute('cy', y);
+  document.getElementById('pfDot').setAttribute('cx', x); document.getElementById('pfDot').setAttribute('cy', syComp(pf));
+  document.getElementById('pbDot').setAttribute('cx', x); document.getElementById('pbDot').setAttribute('cy', syComp(pb));
+  document.getElementById('timeBox').textContent = fmt(data.t[i],0)+' ms';
+  document.getElementById('instP').textContent = fmt(p,0)+' mmHg';
+  document.getElementById('instQ').textContent = fmt(q,0)+' mL/s';
+  document.getElementById('instPfPb').textContent = fmt(pf,1)+' / '+fmt(pb,1);
+  for(let b=0;b<10;b++) {{ const el=document.getElementById('bar'+b); if(el) el.setAttribute('class', b===domIdx ? 'bar active' : 'bar'); }}
+}}
+function loop() {{ if(playing) update((i+1)%N); window.setTimeout(loop, 45); }}
+document.getElementById('playBtn').onclick = () => {{ playing=!playing; document.getElementById('playBtn').textContent = playing?'Pausar':'Reproducir'; }};
+slider.oninput = (e) => {{ playing=false; document.getElementById('playBtn').textContent='Reproducir'; update(parseInt(e.target.value)); }};
+update(0); loop();
+</script>
+</body>
+</html>
+"""
+    return html
+  except Exception as e:
+    return f"<div style='padding:12px;border:1px solid #e0e0e0;border-radius:12px;color:#7a1f1f;background:#fff5f5'>No se pudo generar la animación hemodinámica real: {pdf_text(e)}</div>"
+
+
 def plot_pressure_comparison(row):
   labels = ["PAS", "PAD", "PAM", "PP"]
   radial = [row.get("pas_radial"), row.get("pad_radial"), row.get("pam_radial"), row.get("pp_radial")]
@@ -3698,6 +4014,14 @@ if wave_df is not None:
   summary_cols[4].metric("RVSE calculado", f"{sep_metrics_preview.get('rvse_calculado_%', np.nan):.0f}%")
   st.caption(f"Fuente de curva real: {curve_source or curve_meta.get('metodo','no especificada')}")
   st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
+
+  st.markdown("### Animación hemodinámica real de la aorta")
+  st.caption("Animación didáctica basada en la curva real del paciente, separación Pf/Pb, flujo aórtico estimado y armónicos. No usa curvas sintéticas ni plantillas fijas.")
+  animation_html = render_aortic_real_metrics_animation(row, sep_df_preview, sep_metrics_preview, hdf, height=760)
+  if animation_html:
+    components.html(animation_html, height=780, scrolling=False)
+  else:
+    st.warning("No fue posible construir la animación con los datos disponibles.")
 
   st.markdown("### Conclusiones clínicas diagnósticas")
   for title, body in conclusion_blocks_preview:
