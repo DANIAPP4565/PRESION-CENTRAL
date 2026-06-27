@@ -2755,6 +2755,259 @@ def _animation_vector_from_sep(sep_df, column, n=180, default_zero=False):
     return [], []
 
 
+
+def _nearest_index_for_time_ms(t_values, target_ms):
+  """Índice de la serie de animación más cercano a un tiempo fisiológico dado."""
+  try:
+    arr = np.asarray(t_values, dtype=float)
+    if len(arr) == 0:
+      return 0
+    target = float(target_ms)
+    if np.isnan(target):
+      target = float(arr[len(arr)//2])
+    return int(np.nanargmin(np.abs(arr - target)))
+  except Exception:
+    return 0
+
+
+def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
+  """Construye alertas didácticas para pausar la animación en métricas alteradas.
+
+  Cada alerta se ubica en un momento fisiológico del ciclo:
+  pico sistólico para presión/carga pulsátil, Tref para reflexión/aumentación,
+  fin de eyección/diástole para RVSE-SEVR y pico para complejidad armónica.
+  """
+  alerts = []
+
+  def fmt(v, dec=1, unit=""):
+    try:
+      f = float(v)
+      if np.isnan(f):
+        return "ND"
+      if dec == 0:
+        return f"{f:.0f}{unit}"
+      return f"{f:.{dec}f}{unit}"
+    except Exception:
+      return "ND"
+
+  def add(label, value, threshold, why, mechanism, target_ms, severity="alterada"):
+    if len(alerts) >= 9:
+      return
+    idx = _nearest_index_for_time_ms(t_values, target_ms)
+    try:
+      t_ms = float(np.asarray(t_values, dtype=float)[idx])
+    except Exception:
+      t_ms = target_ms if target_ms is not None else 0
+    alerts.append({
+      "idx": int(idx),
+      "t_ms": round(float(t_ms), 1) if t_ms is not None and not np.isnan(float(t_ms)) else 0,
+      "label": safe_text(label),
+      "value": safe_text(value),
+      "threshold": safe_text(threshold),
+      "why": safe_text(why),
+      "mechanism": safe_text(mechanism),
+      "severity": safe_text(severity),
+    })
+
+  try:
+    pas_c = to_float(row.get("pas_central"))
+    pad_c = to_float(row.get("pad_central"))
+    pp_c = to_float(row.get("pp_central"))
+    pas_r = to_float(row.get("pas_radial"))
+    pp_r = to_float(row.get("pp_radial"))
+    iau = to_float(row.get("iau"))
+    au = to_float(row.get("au"))
+    rm = to_float(sep_metrics.get("rm"))
+    ri = to_float(sep_metrics.get("ri"))
+    tref = to_float(sep_metrics.get("tref_ms"))
+    rvse_calc = to_float(sep_metrics.get("rvse_calculado_%"))
+    t_peak = to_float(sep_metrics.get("t_pico_ms"))
+    t_ref = tref if not np.isnan(tref) else to_float(sep_metrics.get("t_ej_fin_ms"))
+    t_ej_fin = to_float(sep_metrics.get("t_ej_fin_ms"))
+    if np.isnan(t_peak):
+      try:
+        t_peak = float(sep_df.loc[pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").idxmax(), "tiempo_ms"])
+      except Exception:
+        t_peak = 250.0
+    if np.isnan(t_ref):
+      t_ref = t_peak + 120.0
+    if np.isnan(t_ej_fin):
+      t_ej_fin = min(t_peak + 220.0, 650.0)
+
+    saha_ref = get_saha_central_sbp_reference(row)
+    hta_status = central_hypertension_status(row)
+    if saha_ref.get("ok") and hta_status.get("tiene_hta_central"):
+      add(
+        "PAS central / hipertensión central",
+        fmt(pas_c, 0, " mmHg"),
+        f"límite diagnóstico P90 SAHA {saha_ref['p90']:.1f} mmHg",
+        "La PAS central alcanza o supera el percentilo 90 ajustado por edad, sexo y calibración.",
+        "Se expresa en el pico sistólico central: mayor presión transmitida a aorta y ventrículo izquierdo.",
+        t_peak,
+        "diagnóstica",
+      )
+
+    if not np.isnan(pp_c):
+      if pp_c >= 60:
+        add(
+          "Presión de pulso central elevada",
+          fmt(pp_c, 0, " mmHg"),
+          "desviación relevante si ≥60 mmHg",
+          "La diferencia PAS-PAD central es amplia y aumenta la carga pulsátil central.",
+          "Se produce por mayor amplitud de la onda central, menor amortiguación arterial y/o mayor retorno reflejo.",
+          t_peak,
+          "alta",
+        )
+      elif pp_c >= 50:
+        add(
+          "Presión de pulso central aumentada",
+          fmt(pp_c, 0, " mmHg"),
+          "alterada si ≥50 mmHg",
+          "La amplitud pulsátil central está aumentada.",
+          "Refleja mayor carga pulsátil sobre aorta y ventrículo; debe integrarse con VOP, AIx y Pf/Pb.",
+          t_peak,
+          "relevante",
+        )
+
+    saha_aix = get_saha_aix75_reference(row)
+    if saha_aix.get("ok") and saha_aix.get("alterada"):
+      add(
+        "IAu/AIx central aumentado",
+        fmt(iau, 1, "%"),
+        f"aumentado si ≥P90 LEAD {saha_aix['p90']:.1f}%",
+        "El índice de aumentación supera el límite esperado para edad y sexo.",
+        "Suele producirse cuando la onda reflejada se suma precozmente a la sístole central y eleva el hombro sistólico.",
+        t_ref,
+        "relevante",
+      )
+    elif np.isnan(saha_aix.get("p90", np.nan)) and not np.isnan(iau) and iau >= 35:
+      add(
+        "IAu central alto",
+        fmt(iau, 1, "%"),
+        "umbral operativo ≥35%",
+        "El índice de aumentación es alto por criterio operativo de respaldo.",
+        "Sugiere mayor contribución de la onda reflejada al componente sistólico central.",
+        t_ref,
+        "relevante",
+      )
+
+    if not np.isnan(au) and au > 0:
+      add(
+        "Aumentación aórtica positiva",
+        fmt(au, 1, " mmHg"),
+        "alterada si positiva y clínicamente relevante",
+        "Existe incremento sistólico adicional sobre la onda central.",
+        "Se interpreta como suma de componente reflejado/augmentación sobre la presión sistólica central.",
+        t_ref,
+        "relevante",
+      )
+
+    ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
+    if not np.isnan(ppa) and ppa < 1.30:
+      add(
+        "Amplificación central-periférica reducida",
+        fmt(ppa, 2, ""),
+        "reducida si PPA <1.30; franca si <1.20",
+        "La presión de pulso periférica no se amplifica lo esperable respecto de la central.",
+        "Puede expresar menor amortiguación arterial y transmisión central más directa de la carga pulsátil.",
+        t_peak,
+        "relevante" if ppa >= 1.20 else "alta",
+      )
+
+    if not np.isnan(rm) and rm >= 0.50:
+      add(
+        "RM Pb/Pf elevada",
+        fmt(rm, 2, ""),
+        "elevada si ≥0.50",
+        "La magnitud de la onda retrógrada es alta en relación con la anterógrada.",
+        "Se produce por mayor reflexión periférica y/o retorno temporal más cercano a la sístole.",
+        t_ref,
+        "alta",
+      )
+
+    if not np.isnan(ri) and ri >= 0.35:
+      add(
+        "Índice de reflexión aumentado",
+        fmt(ri, 2, ""),
+        "aumentado si ≥0.35",
+        "La contribución relativa de Pb al total Pf+Pb está aumentada.",
+        "Indica mayor peso de la onda reflejada sobre la morfología de la presión central.",
+        t_ref,
+        "relevante",
+      )
+
+    if not np.isnan(tref) and tref < 320:
+      add(
+        "Tref retorno reflejo precoz",
+        fmt(tref, 0, " ms"),
+        "precoz si <320 ms",
+        "La onda reflejada aparece temprano dentro del ciclo cardíaco.",
+        "Cuando el retorno ocurre durante la sístole, puede aumentar PAS central, AIx/IAu y poscarga ventricular.",
+        tref,
+        "relevante",
+      )
+
+    if not np.isnan(rvse_calc) and rvse_calc < 120:
+      add(
+        "RVSE/SEVR calculado reducido",
+        fmt(rvse_calc, 1, "%"),
+        "reducido si <120%",
+        "La relación área diastólica/área sistólica es baja.",
+        "Se produce por menor predominio relativo del área diastólica de perfusión frente al área sistólica de demanda.",
+        t_ej_fin,
+        "alta",
+      )
+
+    e_high = np.nan
+    e1 = np.nan
+    try:
+      if hdf is not None and len(hdf):
+        e = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
+        if len(e) > 0:
+          e1 = e[0]
+        if len(e) > 4:
+          e_high = float(np.nansum(e[3:]))
+    except Exception:
+      pass
+    if not np.isnan(e_high) and e_high >= 25:
+      add(
+        "Armónicos superiores elevados",
+        fmt(e_high, 1, "%"),
+        "alto si energía H4+ ≥25%",
+        "La onda central concentra una proporción relevante de energía en componentes de frecuencia más alta.",
+        "Esto refleja una morfología más abrupta o compleja; puede acompañar reflexión, menor amortiguación o artefactos si la curva no es limpia.",
+        t_peak,
+        "relevante",
+      )
+    if not np.isnan(e1) and e1 < 35:
+      add(
+        "Primer armónico poco predominante",
+        fmt(e1, 1, "%"),
+        "desviación relevante si H1 <35%",
+        "La onda fundamental domina menos de lo esperado.",
+        "Sugiere mayor participación relativa de componentes medios/altos y una forma de onda menos redondeada.",
+        t_peak,
+        "relevante",
+      )
+
+    # Evitar pausas repetidas excesivas en el mismo instante: fusionar métricas próximas.
+    alerts = sorted(alerts, key=lambda a: (a.get("idx", 0), -len(a.get("label", ""))))
+    fused = []
+    for al in alerts:
+      if fused and abs(al["idx"] - fused[-1]["idx"]) <= 2:
+        fused[-1]["label"] += " + " + al["label"]
+        fused[-1]["value"] += " | " + al["value"]
+        fused[-1]["threshold"] += " | " + al["threshold"]
+        fused[-1]["why"] += " " + al["why"]
+        fused[-1]["mechanism"] += " " + al["mechanism"]
+        if al.get("severity") in ("diagnóstica", "alta"):
+          fused[-1]["severity"] = al.get("severity")
+      else:
+        fused.append(al)
+    return fused[:7]
+  except Exception:
+    return alerts[:7]
+
 def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=760):
   """Animación HTML/SVG de aorta con presión real, separación Pf/Pb y armónicos.
 
@@ -2813,6 +3066,8 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
     aix_ref = get_saha_aix75_reference(row)
     aix_p90 = aix_ref.get("p90", np.nan) if aix_ref.get("ok") else np.nan
 
+    pause_alerts = _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t)
+
     payload = {
       "t": t,
       "p": p,
@@ -2823,6 +3078,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
       "freqs": freqs,
       "amps": amps,
       "phases": phases,
+      "alerts": pause_alerts,
       "metrics": {
         "pas": _safe_metric_value(pas, 0, " mmHg"),
         "pad": _safe_metric_value(pad, 0, " mmHg"),
@@ -2872,8 +3128,17 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
   .dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:-1px; }}
   .controls {{ margin-top:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
   button {{ border:0; background:#12355b; color:#fff; border-radius:999px; padding:9px 14px; font-weight:700; cursor:pointer; }}
+  .toggle {{ display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12px; background:#f5f9fd; border:1px solid var(--line); border-radius:999px; padding:7px 10px; }}
+  .toggle input {{ accent-color:#12355b; }}
   input[type=range] {{ flex:1 1 320px; accent-color:#12355b; }}
   .timebox {{ color:var(--muted); font-variant-numeric:tabular-nums; min-width:86px; text-align:right; }}
+  .alertCard {{ margin-top:10px; border:1px solid #f3c37a; background:#fff8eb; border-radius:16px; padding:11px 13px; display:none; box-shadow:0 8px 18px rgba(135,86,10,.08); }}
+  .alertCard.show {{ display:block; }}
+  .alertHead {{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:5px; }}
+  .alertTitle {{ color:#7a3d00; font-weight:900; font-size:14px; }}
+  .alertPill {{ background:#7a3d00; color:#fff; border-radius:999px; padding:3px 8px; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; }}
+  .alertLine {{ font-size:12px; color:#48311a; line-height:1.35; margin-top:3px; }}
+  .alertLine b {{ color:#2a1d0f; }}
   .grid2 {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
   .small {{ font-size:12px; color:var(--muted); line-height:1.35; }}
   .barbg {{ fill:#e8f0f7; }}
@@ -2986,7 +3251,14 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=7
         </g>
       </svg>
       <div class="legend"><span><i class="dot" style="background:#111"></i>Presión central</span><span><i class="dot" style="background:#168038"></i>Pf</span><span><i class="dot" style="background:#ef6c00"></i>Pb</span><span><i class="dot" style="background:#6a1b9a"></i>Flujo estimado</span></div>
-      <div class="controls"><button id="playBtn">Pausar</button><input id="slider" type="range" min="0" max="0" value="0" step="1"><span class="timebox" id="timeBox">0 ms</span></div>
+      <div class="controls"><button id="playBtn">Pausar</button><label class="toggle"><input id="smartPause" type="checkbox" checked> Pausar en métricas alteradas</label><input id="slider" type="range" min="0" max="0" value="0" step="1"><span class="timebox" id="timeBox">0 ms</span></div>
+      <div class="alertCard" id="alertBox">
+        <div class="alertHead"><span class="alertTitle" id="alertTitle">Métrica alterada</span><span class="alertPill" id="alertSeverity">ALERTA</span></div>
+        <div class="alertLine"><b>Valor:</b> <span id="alertValue"></span></div>
+        <div class="alertLine"><b>Criterio:</b> <span id="alertThreshold"></span></div>
+        <div class="alertLine"><b>Por qué se marca:</b> <span id="alertWhy"></span></div>
+        <div class="alertLine"><b>Mecanismo didáctico:</b> <span id="alertMechanism"></span></div>
+      </div>
     </div>
 
     <div class="panel">
@@ -3014,7 +3286,38 @@ let i = 0, playing = true;
 const minP = Math.min(...data.p), maxP = Math.max(...data.p);
 const maxPf = Math.max(...data.pf, 1e-6), maxPb = Math.max(...data.pb, 1e-6), maxQ = Math.max(...data.q, 1e-6);
 const slider = document.getElementById('slider'); slider.max = Math.max(N-1,0);
+const smartPause = document.getElementById('smartPause');
+const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+let shownAlerts = new Set();
 function fmt(x,d=0) {{ if(!Number.isFinite(x)) return 'ND'; return x.toFixed(d); }}
+function alertKey(a) {{ return String(a.idx || 0) + '|' + String(a.label || ''); }}
+function showMetricAlert(a) {{
+  const box = document.getElementById('alertBox');
+  if(!box || !a) return;
+  document.getElementById('alertTitle').textContent = a.label || 'Métrica alterada';
+  document.getElementById('alertSeverity').textContent = a.severity || 'ALERTA';
+  document.getElementById('alertValue').textContent = a.value || 'ND';
+  document.getElementById('alertThreshold').textContent = a.threshold || 'criterio no disponible';
+  document.getElementById('alertWhy').textContent = a.why || 'La métrica supera el límite definido.';
+  document.getElementById('alertMechanism').textContent = a.mechanism || 'Interpretar de forma integrada con la curva central y el resto de métricas.';
+  box.classList.add('show');
+}}
+function checkSmartPause(idx) {{
+  if(!smartPause || !smartPause.checked || !alerts.length) return;
+  const hit = alerts.find(a => Math.abs((a.idx || 0) - idx) <= 1 && !shownAlerts.has(alertKey(a)));
+  if(hit) {{
+    shownAlerts.add(alertKey(hit));
+    playing = false;
+    const btn = document.getElementById('playBtn');
+    if(btn) btn.textContent = 'Continuar';
+    showMetricAlert(hit);
+  }}
+}}
+if(smartPause && !alerts.length) {{
+  smartPause.checked = false;
+  smartPause.disabled = true;
+  smartPause.parentElement.title = 'No se detectaron métricas alteradas o desviaciones relevantes para pausar automáticamente.';
+}}
 function sx(idx) {{ return (data.t[idx] - data.t[0]) / Math.max(data.t[N-1]-data.t[0], 1e-6) * 630; }}
 function sy(v) {{ return 130 - (v - minP) / Math.max(maxP-minP, 1e-6) * 110; }}
 function syComp(v) {{ return 130 - v / Math.max(maxP-minP, 1e-6) * 95; }}
@@ -3113,6 +3416,7 @@ function update(idx) {{
   document.getElementById('instQ').textContent = fmt(q,0)+' mL/s';
   document.getElementById('instPfPb').textContent = fmt(pf,1)+' / '+fmt(pb,1);
   updateHarmonicBars(i);
+  checkSmartPause(i);
 }}
 function loop() {{ if(playing) update((i+1)%N); window.setTimeout(loop, 45); }}
 document.getElementById('playBtn').onclick = () => {{ playing=!playing; document.getElementById('playBtn').textContent = playing?'Pausar':'Reproducir'; }};
