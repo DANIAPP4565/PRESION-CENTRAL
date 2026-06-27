@@ -2,7 +2,7 @@
 # App Streamlit para informe de Presión Aórtica Central (PAC)
 # Importa PDF tipo MODELO PAC, extrae variables, genera historial Excel y PDF médico integrado.
 
-import io, re, math, tempfile, json
+import io, re, math, tempfile, json, textwrap
 from datetime import datetime
 from pathlib import Path
 
