@@ -2791,7 +2791,10 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
       return "ND"
 
   def add(label, value, threshold, why, mechanism, target_ms, severity="alterada"):
-    if len(alerts) >= 9:
+    # Permitir varias pausas didácticas en el mismo ciclo.
+    # Antes se limitaba a pocas alertas y luego se fusionaban, lo que hacía
+    # que se vieran solo una o dos pausas aunque hubiese más métricas alteradas.
+    if len(alerts) >= 14:
       return
     idx = _nearest_index_for_time_ms(t_values, target_ms)
     try:
@@ -2990,23 +2993,42 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
         "relevante",
       )
 
-    # Evitar pausas repetidas excesivas en el mismo instante: fusionar métricas próximas.
-    alerts = sorted(alerts, key=lambda a: (a.get("idx", 0), -len(a.get("label", ""))))
-    fused = []
+    # Pausas secuenciales por métrica:
+    # No se fusionan alertas cercanas. Si varias métricas pertenecen al mismo
+    # momento fisiológico —por ejemplo pico sistólico o retorno reflejo— se
+    # separan unos cuadros para que cada una tenga su propia pausa didáctica.
+    n_frames = max(1, len(t_values) if t_values is not None else 1)
+    t_arr = np.asarray(t_values, dtype=float) if t_values is not None else np.asarray([0.0])
+    severity_rank = {"diagnóstica": 0, "alta": 1, "relevante": 2, "alterada": 3}
+    alerts = sorted(alerts, key=lambda a: (a.get("idx", 0), severity_rank.get(a.get("severity", "alterada"), 9), a.get("label", "")))
+
+    groups = []
     for al in alerts:
-      if fused and abs(al["idx"] - fused[-1]["idx"]) <= 2:
-        fused[-1]["label"] += " + " + al["label"]
-        fused[-1]["value"] += " | " + al["value"]
-        fused[-1]["threshold"] += " | " + al["threshold"]
-        fused[-1]["why"] += " " + al["why"]
-        fused[-1]["mechanism"] += " " + al["mechanism"]
-        if al.get("severity") in ("diagnóstica", "alta"):
-          fused[-1]["severity"] = al.get("severity")
+      if groups and abs(al.get("idx", 0) - groups[-1]["base_idx"]) <= 2:
+        groups[-1]["items"].append(al)
       else:
-        fused.append(al)
-    return fused[:7]
+        groups.append({"base_idx": int(al.get("idx", 0)), "items": [al]})
+
+    sequential = []
+    min_gap = max(4, n_frames // 40)  # separación visual breve dentro del mismo evento fisiológico
+    for group in groups:
+      base_idx = int(group["base_idx"])
+      for j, al in enumerate(group["items"]):
+        new_idx = min(n_frames - 1, max(0, base_idx + j * min_gap))
+        al["idx_original"] = int(al.get("idx", new_idx))
+        al["idx"] = int(new_idx)
+        try:
+          al["t_ms"] = round(float(t_arr[new_idx]), 1)
+        except Exception:
+          pass
+        al["pause_order"] = len(sequential) + 1
+        sequential.append(al)
+
+    # Si el corrimiento de un grupo se acerca demasiado al siguiente, conservar orden
+    # y dejar que el motor JS use pause_order para no saltear ninguna alerta.
+    return sequential[:12]
   except Exception:
-    return alerts[:7]
+    return alerts[:12]
 
 def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1080):
   """Animación HTML/SVG de aorta con presión real, separación Pf/Pb y armónicos.
@@ -3290,7 +3312,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1
         </g>
       </svg>
       <div class="legend"><span><i class="dot" style="background:#111"></i>Presión central</span><span><i class="dot" style="background:#168038"></i>Pf</span><span><i class="dot" style="background:#ef6c00"></i>Pb</span><span><i class="dot" style="background:#6a1b9a"></i>Flujo estimado</span></div>
-      <div class="controls"><button id="playBtn">Pausar</button><label class="toggle"><input id="smartPause" type="checkbox" checked> Pausar en métricas alteradas</label><input id="slider" type="range" min="0" max="0" value="0" step="1"><span class="timebox" id="timeBox">0 ms</span></div>
+      <div class="controls"><button id="playBtn">Pausar</button><label class="toggle"><input id="smartPause" type="checkbox" checked> Pausa didáctica secuencial</label><input id="slider" type="range" min="0" max="0" value="0" step="1"><span class="timebox" id="timeBox">0 ms</span></div>
       <div class="alertCard" id="alertBox">
         <div class="alertHead"><span class="alertTitle" id="alertTitle">Métrica alterada</span><span class="alertPill" id="alertSeverity">ALERTA</span></div>
         <div class="alertLine"><b>Valor:</b> <span id="alertValue"></span></div>
@@ -3326,10 +3348,23 @@ const minP = Math.min(...data.p), maxP = Math.max(...data.p);
 const maxPf = Math.max(...data.pf, 1e-6), maxPb = Math.max(...data.pb, 1e-6), maxQ = Math.max(...data.q, 1e-6);
 const slider = document.getElementById('slider'); slider.max = Math.max(N-1,0);
 const smartPause = document.getElementById('smartPause');
-const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+const alerts = Array.isArray(data.alerts) ? data.alerts.slice().sort((a,b)=>(a.pause_order||0)-(b.pause_order||0)) : [];
 let shownAlerts = new Set();
+let lastIdx = 0;
+let currentCycle = 1;
 function fmt(x,d=0) {{ if(!Number.isFinite(x)) return 'ND'; return x.toFixed(d); }}
-function alertKey(a) {{ return String(a.idx || 0) + '|' + String(a.label || ''); }}
+function alertKey(a) {{ return 'cycle' + currentCycle + '|' + String(a.pause_order || 0) + '|' + String(a.label || ''); }}
+function resetSmartPauseCycleIfNeeded(idx) {{
+  // Al completar un nuevo ciclo cardíaco, las pausas didácticas vuelven a quedar disponibles.
+  // Esto evita que la animación corra libremente después de haber mostrado una vez las alertas.
+  if(idx < lastIdx) {{
+    currentCycle += 1;
+    shownAlerts = new Set();
+    const box = document.getElementById('alertBox');
+    if(box) box.classList.remove('show');
+  }}
+  lastIdx = idx;
+}}
 function showMetricAlert(a) {{
   const box = document.getElementById('alertBox');
   if(!box || !a) return;
@@ -3344,7 +3379,11 @@ function showMetricAlert(a) {{
 }}
 function checkSmartPause(idx) {{
   if(!smartPause || !smartPause.checked || !alerts.length) return;
-  const hit = alerts.find(a => Math.abs((a.idx || 0) - idx) <= 1 && !shownAlerts.has(alertKey(a)));
+  resetSmartPauseCycleIfNeeded(idx);
+  // Buscar la próxima alerta no mostrada de este ciclo. El margen permite no saltearla
+  // si el navegador pierde un cuadro. Como las alertas se separan por pause_order,
+  // cada métrica alterada se muestra en una pausa propia.
+  const hit = alerts.find(a => Math.abs((a.idx || 0) - idx) <= 2 && !shownAlerts.has(alertKey(a)));
   if(hit) {{
     shownAlerts.add(alertKey(hit));
     playing = false;
@@ -3357,6 +3396,8 @@ if(smartPause && !alerts.length) {{
   smartPause.checked = false;
   smartPause.disabled = true;
   smartPause.parentElement.title = 'No se detectaron métricas alteradas o desviaciones relevantes para pausar automáticamente.';
+}} else if(smartPause && alerts.length) {{
+  smartPause.parentElement.title = 'Modo didáctico secuencial: pausa una vez por cada métrica alterada y reinicia las pausas en cada nuevo ciclo cardíaco.';
 }}
 function sx(idx) {{ return (data.t[idx] - data.t[0]) / Math.max(data.t[N-1]-data.t[0], 1e-6) * 630; }}
 function sy(v) {{ return 130 - (v - minP) / Math.max(maxP-minP, 1e-6) * 110; }}
@@ -3465,7 +3506,15 @@ function update(idx) {{
   checkSmartPause(i);
 }}
 function loop() {{ if(playing) update((i+1)%N); window.setTimeout(loop, 45); }}
-document.getElementById('playBtn').onclick = () => {{ playing=!playing; document.getElementById('playBtn').textContent = playing?'Pausar':'Reproducir'; }};
+document.getElementById('playBtn').onclick = () => {{
+  playing = !playing;
+  document.getElementById('playBtn').textContent = playing ? 'Pausar' : 'Reproducir';
+  if(playing && alerts.length && smartPause && smartPause.checked) {{
+    const box = document.getElementById('alertBox');
+    if(box) box.classList.remove('show');
+    update(Math.min(N-1, i+1));
+  }}
+}};
 slider.oninput = (e) => {{ playing=false; document.getElementById('playBtn').textContent='Reproducir'; update(parseInt(e.target.value)); }};
 update(0); loop();
 </script>
