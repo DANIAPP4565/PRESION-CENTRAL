@@ -2498,6 +2498,206 @@ def plot_rvse_area(sep_df, sep_metrics):
   return fig_to_png(fig)
 
 
+
+def _bezier_points(p0, p1, p2, p3, n=60):
+  """Puntos de una curva cúbica de Bézier para dibujar una aorta anatómica didáctica."""
+  p0 = np.asarray(p0, dtype=float); p1 = np.asarray(p1, dtype=float)
+  p2 = np.asarray(p2, dtype=float); p3 = np.asarray(p3, dtype=float)
+  u = np.linspace(0, 1, int(n))[:, None]
+  pts = (1-u)**3*p0 + 3*(1-u)**2*u*p1 + 3*(1-u)*u**2*p2 + u**3*p3
+  return pts[:, 0], pts[:, 1]
+
+
+def _aorta_centerline_xy(n=220):
+  """Centro anatómico simplificado: raíz, ascendente, arco y descendente."""
+  segs = [
+    ((0.23, 0.20), (0.25, 0.36), (0.27, 0.56), (0.35, 0.70)),
+    ((0.35, 0.70), (0.43, 0.86), (0.62, 0.86), (0.71, 0.72)),
+    ((0.71, 0.72), (0.78, 0.60), (0.75, 0.40), (0.69, 0.16)),
+  ]
+  xs, ys = [], []
+  per = max(25, int(n/len(segs)))
+  for j, seg in enumerate(segs):
+    x, y = _bezier_points(*seg, n=per)
+    if j > 0:
+      x, y = x[1:], y[1:]
+    xs.extend(x.tolist()); ys.extend(y.tolist())
+  return np.asarray(xs), np.asarray(ys)
+
+
+def _point_on_polyline(xs, ys, frac):
+  """Devuelve punto interpolado sobre una polilínea según fracción de longitud."""
+  frac = float(np.clip(frac, 0, 1))
+  xs = np.asarray(xs, dtype=float); ys = np.asarray(ys, dtype=float)
+  if len(xs) < 2:
+    return float(xs[0]) if len(xs) else 0.5, float(ys[0]) if len(ys) else 0.5
+  dist = np.r_[0, np.cumsum(np.sqrt(np.diff(xs)**2 + np.diff(ys)**2))]
+  total = dist[-1] if dist[-1] > 0 else 1.0
+  target = frac * total
+  x = np.interp(target, dist, xs)
+  y = np.interp(target, dist, ys)
+  return float(x), float(y)
+
+
+def _nearest_index_for_time(times, target_ms):
+  t = np.asarray(times, dtype=float)
+  ok = np.isfinite(t)
+  if not np.any(ok):
+    return 0
+  t_ok = t[ok]
+  idx_ok = np.where(ok)[0]
+  return int(idx_ok[np.argmin(np.abs(t_ok - float(target_ms)))])
+
+
+def _harmonic_live_values(hdf, t_ms, max_harmonics=6):
+  """Contribución instantánea de armónicos por amplitud y fase FFT."""
+  vals = []
+  try:
+    if hdf is None or len(hdf) == 0:
+      return vals
+    for _, r in hdf.head(max_harmonics).iterrows():
+      amp = float(r.get("amplitud", 0) or 0)
+      freq = float(r.get("frecuencia_hz", 0) or 0)
+      phase = float(r.get("fase_rad", 0) or 0)
+      vals.append(amp * math.cos(2 * math.pi * freq * float(t_ms) / 1000.0 + phase))
+  except Exception:
+    return []
+  return vals
+
+
+def _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=None):
+  """Dibuja una captura fija de la animación con anatomía, Pf/Pb, curva y armónicos."""
+  t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+  p = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
+  pf = pd.to_numeric(sep_df.get("onda_anterograda_pf", pd.Series(np.zeros(len(sep_df)))), errors="coerce").to_numpy(dtype=float)
+  pb = pd.to_numeric(sep_df.get("onda_retrograda_pb", pd.Series(np.zeros(len(sep_df)))), errors="coerce").to_numpy(dtype=float)
+  q = pd.to_numeric(sep_df.get("flujo_aortico_estimado_ml_s", pd.Series(np.zeros(len(sep_df)))), errors="coerce").to_numpy(dtype=float)
+  ok = np.isfinite(t) & np.isfinite(p)
+  if not np.any(ok):
+    ax.axis("off")
+    ax.text(0.5, 0.5, "Captura no disponible", ha="center", va="center")
+    return
+  t, p = t[ok], p[ok]
+  pf = pf[ok] if len(pf) == len(ok) else np.zeros_like(t)
+  pb = pb[ok] if len(pb) == len(ok) else np.zeros_like(t)
+  q = q[ok] if len(q) == len(ok) else np.zeros_like(t)
+
+  idx = _nearest_index_for_time(t, frame["time_ms"])
+  ti = float(t[idx]); pi = float(p[idx]); pfi = float(max(pf[idx], 0)); pbi = float(max(pb[idx], 0)); qi = float(max(q[idx], 0))
+  min_p, max_p = float(np.nanmin(p)), float(np.nanmax(p))
+  norm = (pi - min_p) / max(max_p - min_p, 1e-6)
+
+  ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.axis("off")
+  ax.add_patch(plt.Rectangle((0.01, 0.01), 0.98, 0.98, facecolor="#FFFFFF", edgecolor="#CFD8DC", linewidth=0.9))
+  ax.add_patch(plt.Rectangle((0.01, 0.86), 0.98, 0.13, facecolor="#F3F8FC", edgecolor="none"))
+  ax.text(0.035, 0.945, frame["title"], fontsize=8.6, fontweight="bold", color="#12355B", ha="left", va="center")
+  ax.text(0.035, 0.895, frame["subtitle"], fontsize=6.8, color="#455A64", ha="left", va="center")
+
+  # Silueta cardíaca y raíz.
+  heart = plt.Circle((0.18, 0.17), 0.075, color="#F8D7DA", alpha=0.80, ec="#C62828", lw=0.6)
+  ax.add_patch(heart)
+  ax.text(0.18, 0.17, "VI", ha="center", va="center", fontsize=6, color="#8E1B1B", fontweight="bold")
+
+  xs, ys = _aorta_centerline_xy()
+  outer_lw = 20 + 6.5 * norm
+  inner_lw = 11 + 4.3 * norm
+  ax.plot(xs, ys, color="#B23A48", linewidth=outer_lw, solid_capstyle="round", alpha=0.86, zorder=2)
+  ax.plot(xs, ys, color="#FAD4D8", linewidth=inner_lw, solid_capstyle="round", alpha=0.97, zorder=3)
+  ax.plot(xs, ys, color="#7F1D2D", linewidth=1.0, alpha=0.40, zorder=4)
+
+  # Ramas supraaórticas.
+  branches = [
+    ((0.44,0.79), (0.41,0.93)),
+    ((0.53,0.82), (0.53,0.96)),
+    ((0.62,0.78), (0.69,0.93)),
+  ]
+  for (x0,y0),(x1,y1) in branches:
+    ax.plot([x0,x1], [y0,y1], color="#B23A48", linewidth=8+2*norm, solid_capstyle="round", alpha=0.86, zorder=2)
+    ax.plot([x0,x1], [y0,y1], color="#FAD4D8", linewidth=4+1.3*norm, solid_capstyle="round", alpha=0.97, zorder=3)
+  ax.text(0.42, 0.965, "TBC", fontsize=5.4, color="#546E7A", ha="center")
+  ax.text(0.535, 0.985, "CCI", fontsize=5.4, color="#546E7A", ha="center")
+  ax.text(0.70, 0.945, "SCI", fontsize=5.4, color="#546E7A", ha="center")
+
+  # Ondas anterógrada y retrógrada sobre trayecto anatómico.
+  frac = (ti - float(np.nanmin(t))) / max(float(np.nanmax(t) - np.nanmin(t)), 1e-6)
+  xpf, ypf = _point_on_polyline(xs, ys, frac)
+  xpb, ypb = _point_on_polyline(xs, ys, 1.0 - frac)
+  max_pf = max(float(np.nanmax(pf)) if np.any(np.isfinite(pf)) else 1, 1e-6)
+  max_pb = max(float(np.nanmax(pb)) if np.any(np.isfinite(pb)) else 1, 1e-6)
+  ax.add_patch(plt.Circle((xpf, ypf), 0.022 + 0.030*np.sqrt(pfi/max_pf), color="#1B8E3F", alpha=0.82, ec="white", lw=0.7, zorder=5))
+  ax.add_patch(plt.Circle((xpb, ypb), 0.020 + 0.030*np.sqrt(pbi/max_pb), color="#EF6C00", alpha=0.82, ec="white", lw=0.7, zorder=5))
+  ax.text(xpf, min(0.98, ypf+0.058), "Pf", fontsize=6.5, color="#1B5E20", fontweight="bold", ha="center", zorder=6)
+  ax.text(xpb, min(0.98, ypb+0.058), "Pb", fontsize=6.5, color="#E65100", fontweight="bold", ha="center", zorder=6)
+
+  # Curva miniatura y cursor temporal.
+  gx0, gy0, gw, gh = 0.06, 0.035, 0.45, 0.145
+  ax.add_patch(plt.Rectangle((gx0, gy0), gw, gh, facecolor="#FBFCFE", edgecolor="#CFD8DC", linewidth=0.5, zorder=1))
+  xx = gx0 + (t - float(np.nanmin(t))) / max(float(np.nanmax(t)-np.nanmin(t)), 1e-6) * gw
+  yy = gy0 + (p - min_p) / max(max_p - min_p, 1e-6) * gh
+  ax.plot(xx, yy, color="#111111", linewidth=1.1, zorder=5)
+  xcur = gx0 + frac * gw
+  ax.plot([xcur, xcur], [gy0, gy0+gh], color="#C62828", linewidth=1.1, zorder=6)
+  ax.scatter([xcur], [gy0 + norm*gh], s=14, color="#C62828", zorder=7)
+  ax.text(gx0, gy0+gh+0.012, "Curva central real", fontsize=5.6, color="#37474F", ha="left")
+
+  # Barras armónicas sincronizadas.
+  vals = _harmonic_live_values(hdf, ti, max_harmonics=6)
+  hx0, hy0, hw, hh = 0.62, 0.05, 0.31, 0.22
+  ax.add_patch(plt.Rectangle((hx0, hy0), hw, hh, facecolor="#FBFCFE", edgecolor="#CFD8DC", linewidth=0.5))
+  ax.text(hx0, hy0+hh+0.014, "Armónicos FFT sincronizados", fontsize=5.7, color="#37474F", ha="left")
+  if vals:
+    vmax = max(max(abs(v) for v in vals), 1e-6)
+    baseline = hy0 + hh*0.52
+    ax.plot([hx0+0.015, hx0+hw-0.015], [baseline, baseline], color="#B0BEC5", linewidth=0.45)
+    bar_w = hw / (len(vals)*1.45)
+    for j, val in enumerate(vals):
+      x = hx0 + 0.025 + j * (hw-0.06) / max(len(vals)-1, 1)
+      h = abs(val) / vmax * hh*0.38
+      y = baseline if val >= 0 else baseline - h
+      c = "#1565C0" if val >= 0 else "#C62828"
+      ax.add_patch(plt.Rectangle((x-bar_w/2, y), bar_w, h, facecolor=c, edgecolor="none", alpha=0.82))
+      ax.text(x, hy0+0.006, f"H{j+1}", fontsize=5.1, color="#546E7A", ha="center")
+  else:
+    ax.text(hx0+hw/2, hy0+hh/2, "Sin datos FFT", fontsize=6, color="#78909C", ha="center", va="center")
+
+  ax.text(0.57, 0.39, f"t {ti:.0f} ms", fontsize=7.1, color="#17365D", fontweight="bold")
+  ax.text(0.57, 0.345, f"P {pi:.0f} mmHg | Q {qi:.0f} mL/s", fontsize=6.4, color="#263238")
+  ax.text(0.57, 0.305, f"Pf {pfi:.1f} / Pb {pbi:.1f} mmHg", fontsize=6.4, color="#263238")
+  if vals:
+    ax.text(0.57, 0.265, f"H1 {vals[0]:+.2f}, H2 {vals[1] if len(vals)>1 else 0:+.2f}, H3 {vals[2] if len(vals)>2 else 0:+.2f}", fontsize=5.9, color="#263238")
+
+
+def _animation_keyframe_definitions(sep_metrics):
+  """Elige cuatro momentos clínicamente relevantes para capturas fijas del ciclo."""
+  t_pie = float(sep_metrics.get("t_pie_ms", 80) if not np.isnan(sep_metrics.get("t_pie_ms", np.nan)) else 80)
+  t_peak = float(sep_metrics.get("t_pico_ms", 220) if not np.isnan(sep_metrics.get("t_pico_ms", np.nan)) else 220)
+  t_ref = float(sep_metrics.get("tref_ms", 380) if not np.isnan(sep_metrics.get("tref_ms", np.nan)) else 380)
+  t_ej_fin = float(sep_metrics.get("t_ej_fin_ms", 420) if not np.isnan(sep_metrics.get("t_ej_fin_ms", np.nan)) else 420)
+  t_dia = float(np.clip(t_ej_fin + 0.38 * (1000 - t_ej_fin), t_ej_fin + 70, 850))
+  return [
+    {"title": "1. Inicio de eyección", "subtitle": "Apertura valvular y salida anterógrada inicial", "time_ms": t_pie},
+    {"title": "2. Pico sistólico central", "subtitle": "Máxima distensión pulsátil de la aorta", "time_ms": t_peak},
+    {"title": "3. Retorno de onda reflejada", "subtitle": "Contribución retrógrada Pb y carga pulsátil", "time_ms": t_ref},
+    {"title": "4. Diástole / perfusión", "subtitle": "Descenso de presión y relación con área diastólica-SEVR", "time_ms": t_dia},
+  ]
+
+
+def plot_aortic_animation_keyframes(row, sep_df, sep_metrics, hdf):
+  """Genera cuatro capturas didácticas de la animación para incluir en el PDF integrado."""
+  frames = _animation_keyframe_definitions(sep_metrics)
+  fig, axes = plt.subplots(2, 2, figsize=(11.4, 7.6))
+  fig.patch.set_facecolor("white")
+  for ax, frame in zip(axes.ravel(), frames):
+    _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=row)
+  fig.suptitle("Capturas didácticas de la animación hemodinámica de la aorta", fontsize=12.5, fontweight="bold", color="#12355B", y=0.995)
+  fig.text(0.5, 0.012, "Las capturas usan la curva central real, Pf/Pb, flujo estimado y armónicos FFT sincronizados. La distensión aórtica es una representación didáctica proporcional a la presión pulsátil, no una medición anatómica directa de diámetro.", ha="center", fontsize=7.4, color="#455A64")
+  fig.tight_layout(rect=[0.01, 0.035, 0.99, 0.965], pad=1.2)
+  buf = io.BytesIO()
+  fig.savefig(buf, format="png", dpi=210, bbox_inches="tight", facecolor="white")
+  plt.close(fig)
+  buf.seek(0)
+  return buf
+
 def plot_harmonics(hdf):
   fig, ax = plt.subplots(figsize=(7.6, 4.2))
   ax.bar(range(1, len(hdf)+1), hdf["energia_relativa_%"], color="#455A64")
@@ -3924,14 +4124,30 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
     styles["SmallPAC"]
   ))
 
+  # Capturas fijas de la animación para el informe médico integrado.
+  try:
+    keyframes_png = plot_aortic_animation_keyframes(row, sep_df, sep_metrics, hdf)
+    story.append(PageBreak())
+    story.append(_section("5. Capturas didácticas de la animación hemodinámica"))
+    story.append(Spacer(1, 2*mm))
+    story.append(Image(keyframes_png, width=188*mm, height=126*mm))
+    story.append(Spacer(1, 1.4*mm))
+    story.append(Paragraph(
+      "Secuencia interpretativa: inicio de eyección, pico sistólico central, retorno de onda reflejada y fase diastólica/SEVR. Cada cuadro conserva el mismo tiempo del ciclo para aorta, Pf/Pb, curva central, flujo estimado y barras armónicas FFT.",
+      styles["SmallPAC"]
+    ))
+  except Exception as e:
+    story.append(Spacer(1, 1.2*mm))
+    story.append(Paragraph(pdf_text(f"No se pudieron generar las capturas didácticas de la animación: {e}"), styles["SmallPAC"]))
+
   if screenshot_png:
     story.append(PageBreak())
-    story.append(_section("5. Captura pantalla de mediciones"))
+    story.append(_section("6. Captura pantalla de mediciones"))
     story.append(Spacer(1, 2*mm))
     story.append(Image(io.BytesIO(screenshot_png), width=182*mm, height=215*mm))
 
   story.append(Spacer(1, 3*mm))
-  story.append(_section("6. Referencias bibliográficas"))
+  story.append(_section("7. Referencias bibliográficas"))
   refs = [
     ("Agabiti-Rosei E, et al. Central blood pressure measurements and "
      "antihypertensive therapy. Hypertension. 2007."),
@@ -4143,6 +4359,13 @@ if wave_df is not None:
     components.html(animation_html, height=780, scrolling=False)
   else:
     st.warning("No fue posible construir la animación con los datos disponibles.")
+
+  st.markdown("### Capturas didácticas para el informe médico integrado")
+  st.caption("Estas cuatro imágenes se incorporan al PDF: inicio de eyección, pico sistólico, retorno reflejo y diástole/SEVR, sincronizadas con los datos reales.")
+  try:
+    st.image(plot_aortic_animation_keyframes(row, sep_df_preview, sep_metrics_preview, hdf), caption="Cuatro cuadros relevantes de la animación hemodinámica", use_container_width=True)
+  except Exception as e:
+    st.warning(f"No se pudieron generar las capturas didácticas: {e}")
 
   st.markdown("### Conclusiones clínicas diagnósticas")
   for title, body in conclusion_blocks_preview:
