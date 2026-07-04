@@ -64,20 +64,42 @@ if _MISSING:
     )
     st.stop()
 
-# Lector de PDF (para importar archivos PDF; TXT no requiere librerías adicionales)
+# LECTORES DE PDF (cascada robusta; TXT no requiere librerías adicionales)
+# Se importan de forma INDEPENDIENTE para que, si un lector falla al abrir un PDF,
+# la app pueda intentar automáticamente con el siguiente.
+_PDFPLUMBER_OK = False
+_PYPDF_OK = False
+_PYPDF2_OK = False
+_PdfReaderPypdf = None
+_PdfReaderPyPDF2 = None
+
 try:
     import pdfplumber  # type: ignore
+    _PDFPLUMBER_OK = True
+except Exception:
+    pdfplumber = None  # type: ignore
+
+try:
+    from pypdf import PdfReader as _PdfReaderPypdf  # type: ignore
+    _PYPDF_OK = True
+except Exception:
+    _PdfReaderPypdf = None
+
+try:
+    from PyPDF2 import PdfReader as _PdfReaderPyPDF2  # type: ignore
+    _PYPDF2_OK = True
+except Exception:
+    _PdfReaderPyPDF2 = None
+
+# Compatibilidad con el resto del código existente.
+if _PDFPLUMBER_OK:
     _PDF_BACKEND = "pdfplumber"
-except ImportError:
-    try:
-        from pypdf import PdfReader  # type: ignore
-        _PDF_BACKEND = "pypdf"
-    except ImportError:
-        try:
-            from PyPDF2 import PdfReader  # type: ignore
-            _PDF_BACKEND = "pypdf2"
-        except ImportError:
-            _PDF_BACKEND = None
+elif _PYPDF_OK:
+    _PDF_BACKEND = "pypdf"
+elif _PYPDF2_OK:
+    _PDF_BACKEND = "pypdf2"
+else:
+    _PDF_BACKEND = None
 
 # Captura opcional de imagen desde PDF (curva carotídeo-femoral)
 try:
@@ -86,6 +108,11 @@ try:
 except Exception:
     fitz = None  # type: ignore
     _FITZ_OK = False
+
+# Disponibilidad real de lectura PDF: PyMuPDF también extrae texto y cuenta como lector.
+_PDF_READER_AVAILABLE = bool(
+    _PDFPLUMBER_OK or _PYPDF_OK or _PYPDF2_OK or _FITZ_OK
+)
 
 try:
     from PIL import Image  # type: ignore
@@ -545,6 +572,16 @@ class GenericReportParser:
 
     @staticmethod
     def extraer_texto(file_obj) -> str:
+        """Extrae texto con lectores PDF en cascada.
+
+        Orden de intento:
+        1) pdfplumber (mejor para tablas)
+        2) pypdf
+        3) PyPDF2
+        4) PyMuPDF/fitz
+
+        Un fallo de un backend NO bloquea la importación: se prueba el siguiente.
+        """
         file_obj.seek(0)
         nombre = getattr(file_obj, "name", "") or ""
         es_txt = nombre.lower().endswith(".txt")
@@ -559,28 +596,90 @@ class GenericReportParser:
                 return GenericReportParser._limpiar_texto(raw.decode("utf-8", errors="ignore"))
             return GenericReportParser._limpiar_texto(str(raw))
 
-        if _PDF_BACKEND is None:
-            raise RuntimeError("Instale 'pdfplumber' o 'pypdf' para leer PDFs. Los archivos TXT no requieren librerías adicionales.")
+        if not _PDF_READER_AVAILABLE:
+            raise RuntimeError(
+                "No hay lector PDF disponible. Instale al menos uno: "
+                "pdfplumber, pypdf o PyMuPDF. "
+                "Ejemplo: pip install pdfplumber pypdf PyMuPDF"
+            )
+
+        # Leer una sola vez para poder reintentar con varios backends.
         file_obj.seek(0)
-        txt = ""
-        if _PDF_BACKEND == "pdfplumber":
-            with pdfplumber.open(file_obj) as pdf:
-                for p in pdf.pages:
-                    txt += (p.extract_text(x_tolerance=2, y_tolerance=3) or "") + "\n"
-                    # Muchas veces los valores están en tablas y extract_text los separa mal.
-                    try:
-                        for table in p.extract_tables() or []:
-                            for row in table or []:
-                                vals = [str(c).strip() for c in row if c not in (None, "")]
-                                if vals:
-                                    txt += " | ".join(vals) + "\n"
-                    except Exception:
-                        pass
-        else:
-            r = PdfReader(file_obj)
-            for p in r.pages:
-                txt += (p.extract_text() or "") + "\n"
-        return GenericReportParser._limpiar_texto(txt)
+        raw_pdf = file_obj.read()
+        if not isinstance(raw_pdf, (bytes, bytearray)):
+            raw_pdf = bytes(raw_pdf)
+
+        errores = []
+
+        # 1) pdfplumber: prioriza texto y tablas.
+        if _PDFPLUMBER_OK:
+            try:
+                txt = ""
+                with pdfplumber.open(BytesIO(raw_pdf)) as pdf:
+                    for p in pdf.pages:
+                        txt += (p.extract_text(x_tolerance=2, y_tolerance=3) or "") + "\n"
+                        try:
+                            for table in p.extract_tables() or []:
+                                for row in table or []:
+                                    vals = [str(c).strip() for c in row if c not in (None, "")]
+                                    if vals:
+                                        txt += " | ".join(vals) + "\n"
+                        except Exception:
+                            pass
+                if txt.strip():
+                    return GenericReportParser._limpiar_texto(txt)
+            except Exception as e:
+                errores.append(f"pdfplumber: {e}")
+
+        # 2) pypdf.
+        if _PYPDF_OK and _PdfReaderPypdf is not None:
+            try:
+                txt = ""
+                r = _PdfReaderPypdf(BytesIO(raw_pdf))
+                for p in r.pages:
+                    txt += (p.extract_text() or "") + "\n"
+                if txt.strip():
+                    return GenericReportParser._limpiar_texto(txt)
+            except Exception as e:
+                errores.append(f"pypdf: {e}")
+
+        # 3) PyPDF2.
+        if _PYPDF2_OK and _PdfReaderPyPDF2 is not None:
+            try:
+                txt = ""
+                r = _PdfReaderPyPDF2(BytesIO(raw_pdf))
+                for p in r.pages:
+                    txt += (p.extract_text() or "") + "\n"
+                if txt.strip():
+                    return GenericReportParser._limpiar_texto(txt)
+            except Exception as e:
+                errores.append(f"PyPDF2: {e}")
+
+        # 4) PyMuPDF/fitz: excelente respaldo en Streamlit Cloud.
+        if _FITZ_OK:
+            doc = None
+            try:
+                txt = ""
+                doc = fitz.open(stream=raw_pdf, filetype="pdf")
+                for p in doc:
+                    txt += (p.get_text("text") or "") + "\n"
+                # En PDFs escaneados puede no existir capa de texto; devolver cadena vacía
+                # permite igualmente que el módulo gráfico intente capturar la curva.
+                return GenericReportParser._limpiar_texto(txt)
+            except Exception as e:
+                errores.append(f"PyMuPDF: {e}")
+            finally:
+                try:
+                    if doc is not None:
+                        doc.close()
+                except Exception:
+                    pass
+
+        detalle = "; ".join(errores[-4:]) if errores else "sin detalle"
+        raise RuntimeError(
+            "No se pudo leer el PDF con los lectores disponibles. "
+            f"Detalle: {detalle}"
+        )
 
     @classmethod
     def _extraer_pa(cls, texto):
@@ -1739,8 +1838,12 @@ def main():
                                       key="importacion_upload")
             if pdf_in is not None:
                 es_txt = str(getattr(pdf_in, "name", "")).lower().endswith(".txt")
-                if _PDF_BACKEND is None and not es_txt:
-                    st.error("Falta lector de PDF. Instale: `pip install pdfplumber`. Los archivos TXT pueden importarse sin lector PDF.")
+                if not _PDF_READER_AVAILABLE and not es_txt:
+                    st.error(
+                        "Falta lector de PDF. Instale al menos uno de estos paquetes: "
+                        "`pip install pdfplumber pypdf PyMuPDF`. "
+                        "Los archivos TXT pueden importarse sin lector PDF."
+                    )
                 else:
                     try:
                         # Solo parsear si es un archivo nuevo (cambio de file_id)
