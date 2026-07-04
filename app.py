@@ -1103,36 +1103,102 @@ def _normalize_central_metric_text(txt):
 
 
 def _extract_central_metric_value(txt, metric):
-  """Extrae el valor principal de Au/APC y otros parámetros centrales.
+  """Extrae parámetros centrales con separación ESTRICTA entre Au e IAu.
 
-  Tolera unidad opcional, ':', '=', paréntesis y una tolerancia posterior '+/-'.
-  Siempre toma el primer valor asociado a la etiqueta, no la DE/tolerancia.
+  Reglas críticas:
+  - Au = presión de aumentación en mmHg. Nunca se obtiene desde IAu/AIx.
+  - IAu = índice de aumentación en %. Nunca se usa como respaldo de Au.
+  - APC admite relación decimal (p. ej. 1,08) o porcentaje (108%), que se
+    normaliza a relación dividiendo por 100.
+  - Se toleran etiquetas partidas por PDF/OCR: A u, I Au, A P C, A.P.C.
   """
   t = _normalize_central_metric_text(txt)
   metric = str(metric or "").lower()
   num = r"([-+]?\d+(?:[\.,]\d+)?)"
+
+  # Blindaje absoluto: para buscar Au se enmascara IAu completo antes de cualquier regex.
+  if metric == "au":
+    t_search = re.sub(r"(?i)\bIAu\b", "__INDICE_AUMENTACION__", t)
+  else:
+    t_search = t
+
   patterns = {
     "apc": [
-      rf"\bAPC\b\s*(?::|=)?\s*[\(\[]?\s*{num}",
-      rf"Amplificaci[oó]n\s+Perif[eé]rico[- ]?Central\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"\bAPC\b\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"Amplificaci[oó]n\s+(?:de\s+)?(?:Presi[oó]n\s+)?Perif[eé]rico[- ]?Central\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"Amplificaci[oó]n\s+Perif[eé]rica\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
     ],
     "au": [
-      rf"(?<!I)\bAu\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
-      rf"(?:Presi[oó]n|Onda)?\s*de\s+Aumentaci[oó]n\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      # Prioridad máxima: Au independiente y unidad mmHg.
+      rf"(?<![A-Za-z])Au(?![A-Za-z])\s*(?:\(?\s*)?mmHg\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      # Respaldo: Au independiente seguido directamente del valor.
+      rf"(?<![A-Za-z])Au(?![A-Za-z])\s*(?::|=)\s*[\(\[]?\s*{num}",
+      rf"(?:Presi[oó]n\s+de\s+Aumentaci[oó]n|Augmentation\s+Pressure)\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
       rf"Aumentaci[oó]n\s+A[oó]rtica(?:\s+Central)?\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
     ],
-    "iau": [rf"\bIAu\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+    "iau": [
+      rf"\bIAu\b\s*(?:%|porcentaje)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"(?:[ÍI]ndice\s+de\s+Aumentaci[oó]n|Augmentation\s+Index|AIx)\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+    ],
     "rvse": [rf"\bRVSE\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
     "pe": [rf"\bPE\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
     "pas_central": [rf"\bPAS\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
     "pp_central": [rf"\bPP\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
   }
-  for pat in patterns.get(metric, []):
-    matches = list(re.finditer(pat, t, flags=re.I))
-    if matches:
-      # En texto global, la última aparición suele ser la tabla central real.
-      return to_float(matches[-1].group(1))
-  return np.nan
+
+  candidates = []
+  for priority, pat in enumerate(patterns.get(metric, [])):
+    for m in re.finditer(pat, t_search, flags=re.I):
+      v = to_float(m.group(1))
+      if np.isnan(v):
+        continue
+      candidates.append((priority, m.start(), v))
+
+  if not candidates:
+    return np.nan
+
+  # Menor priority = patrón más específico. Entre iguales, la última aparición suele
+  # corresponder a la tabla central real y no a una leyenda previa.
+  best_priority = min(c[0] for c in candidates)
+  selected = [c for c in candidates if c[0] == best_priority][-1]
+  value = float(selected[2])
+
+  if metric == "apc":
+    # APC se informa como relación o como porcentaje. Normalizar siempre a relación.
+    if 20 <= abs(value) <= 350:
+      value = value / 100.0
+    if not (0.2 <= value <= 3.5):
+      return np.nan
+  elif metric == "au":
+    # Rango clínico amplio pero propio de presión de aumentación, no de porcentaje.
+    if not (-80 <= value <= 100):
+      return np.nan
+  elif metric == "iau":
+    if not (-100 <= value <= 150):
+      return np.nan
+  return value
+
+
+def _metric_label_regex(metric):
+  """Regex de etiqueta estricta para impedir cruces Au/IAu."""
+  metric = str(metric or "").lower()
+  if metric == "au":
+    return r"(?<![A-Za-z])Au(?![A-Za-z])"
+  if metric == "iau":
+    return r"\bIAu\b"
+  if metric == "apc":
+    return r"\bAPC\b"
+  return rf"\b{re.escape(metric)}\b"
+
+
+def _normalize_apc_value(v):
+  """Normaliza APC decimal o porcentual a relación."""
+  x = to_float(v)
+  if np.isnan(x):
+    return np.nan
+  if 20 <= abs(x) <= 350:
+    x = x / 100.0
+  return x if 0.2 <= x <= 3.5 else np.nan
 
 
 def _extract_layout_fields_from_pdf(pdf_bytes):
@@ -1423,11 +1489,11 @@ def _extract_patient_top_right_by_coordinates(pdf_bytes):
 
 
 def _extract_tables_by_coordinates(pdf_bytes):
-  """Extrae Radial/Central y parámetros centrales por coordenadas visuales.
+  """Extrae tablas PAC por coordenadas con Au/IAu estrictamente separados.
 
-  Diseñado para el formato mostrado: segunda hoja, tabla Radial/Central y bloque
-  'Parámetros hemodinámicos centrales'. Evita que PAM y PP se intercambien y
-  recupera Au/IAu/RVSE/PE aunque el texto plano se parta por columnas.
+  Au se toma solo desde su propia etiqueta independiente y, preferentemente, su fila
+  con unidad mmHg. IAu se toma desde IAu/AIx y %. APC se busca en la misma fila o en
+  filas vecinas cercanas, porque algunos PDFs separan etiqueta y valor.
   """
   out = {}
   rows, meta = _page_words_grouped_rows(pdf_bytes, page_index=1, y_tol=5.5)
@@ -1455,7 +1521,6 @@ def _extract_tables_by_coordinates(pdf_bytes):
         if re.fullmatch(lab, first, re.I):
           nums = _numbers_from_row_words(words, x_min=words[0][2])
           if len(nums) >= 2:
-            # Asignar por cercanía a los centros de las columnas Radial/Central.
             nr = min(nums, key=lambda z: abs(z[0]-radial_x))[1]
             nc = min(nums, key=lambda z: abs(z[0]-central_x))[1]
             out[kr] = nr; out[kc] = nc
@@ -1468,87 +1533,193 @@ def _extract_tables_by_coordinates(pdf_bytes):
   param_y = None
   for row in rows:
     if re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales", row["text"], re.I):
-      param_y = row["y"]; break
-  param_labels = {"PAS":"pas_central", "PP":"pp_central", "Au":"au", "IAu":"iau", "RVSE":"rvse", "PE":"pe", "APC":"apc"}
-  for row in rows:
-    if param_y is not None:
-      if not (param_y < row["y"] < param_y + 0.30*H):
-        continue
-    else:
-      if not (row["y"] > 0.55*H and min(w[0] for w in row["words"]) > 0.25*W):
-        continue
-    words = row["words"]
-    text = _normalize_central_metric_text(row["text"])
-    # Tomar etiqueta como primera palabra o cerca del inicio de la fila.
-    lab = None
-    for cand in ["IAu", "RVSE", "APC", "PAS", "PP", "Au", "PE"]:
-      if re.search(rf"(^|\s){cand}(\s|$)", text, re.I):
-        lab = cand; break
-    if not lab:
-      continue
-    # Buscar primer número situado después de la etiqueta y después de unidad; evita capturar tolerancias +/-.
-    label_x1 = None
-    for w in words:
-      wt = _normalize_central_metric_text(w[4])
-      if re.fullmatch(lab, wt, re.I) or (lab == "IAu" and re.fullmatch(r"I?Au", wt, re.I)):
-        label_x1 = w[2]; break
-    if label_x1 is None:
-      label_x1 = min(w[0] for w in words)
-    nums = _numbers_from_row_words(words, x_min=label_x1)
-    if nums:
-      # En filas con '+/-', el primer número tras etiqueta/unidad es el valor principal.
-      out[param_labels[lab]] = nums[0][1]
+      param_y = row["y"]
+      break
 
-  # APC del recuadro: tolera 'APC: (1.08)', 'A P C', 'A.P.C.' y valor en token separado.
+  def in_param_block(row):
+    if param_y is not None:
+      return param_y < row["y"] < param_y + 0.34*H
+    return row["y"] > 0.50*H
+
+  def row_value_after_label(row, metric):
+    """Primer número a la derecha de la etiqueta exacta en esa fila."""
+    text_norm = _normalize_central_metric_text(row["text"])
+    label_pat = _metric_label_regex(metric)
+    if not re.search(label_pat, text_norm, re.I):
+      return np.nan
+
+    # Si buscamos Au, una fila que solo contiene IAu no es candidata.
+    if metric == "au":
+      masked = re.sub(r"(?i)\bIAu\b", "", text_norm)
+      if not re.search(_metric_label_regex("au"), masked, re.I):
+        return np.nan
+
+    # Intento textual exacto primero.
+    v = _extract_central_metric_value(text_norm, metric)
+    if not np.isnan(v):
+      return v
+
+    # Ubicar x final de la etiqueta usando secuencias de tokens.
+    words = row["words"]
+    label_x1 = None
+    token_texts = [str(w[4]) for w in words]
+    norm_tokens = [_normalize_central_metric_text(t) for t in token_texts]
+    for i, wt in enumerate(norm_tokens):
+      if metric == "au" and re.fullmatch(r"Au", wt, re.I):
+        # No aceptar Au si está precedido inmediatamente por token I.
+        prev = norm_tokens[i-1] if i > 0 else ""
+        if re.fullmatch(r"I", prev, re.I):
+          continue
+        label_x1 = words[i][2]; break
+      if metric == "iau" and re.fullmatch(r"IAu", wt, re.I):
+        label_x1 = words[i][2]; break
+      if metric == "apc" and re.fullmatch(r"APC", wt, re.I):
+        label_x1 = words[i][2]; break
+
+    # Etiquetas partidas en varios tokens: A u / I A u / A P C.
+    if label_x1 is None:
+      compact = [re.sub(r"[^A-Za-z]", "", t) for t in token_texts]
+      for i in range(len(compact)):
+        if metric == "au" and i+1 < len(compact) and compact[i].upper() == "A" and compact[i+1].lower() == "u":
+          if i > 0 and compact[i-1].upper() == "I":
+            continue
+          label_x1 = words[i+1][2]; break
+        if metric == "iau" and i+2 < len(compact) and compact[i].upper() == "I" and compact[i+1].upper() == "A" and compact[i+2].lower() == "u":
+          label_x1 = words[i+2][2]; break
+        if metric == "apc" and i+2 < len(compact) and compact[i].upper() == "A" and compact[i+1].upper() == "P" and compact[i+2].upper() == "C":
+          label_x1 = words[i+2][2]; break
+
+    if label_x1 is None:
+      return np.nan
+    nums = _numbers_from_row_words(words, x_min=label_x1)
+    if not nums:
+      return np.nan
+    val = nums[0][1]
+    if metric == "apc":
+      return _normalize_apc_value(val)
+    return val
+
+  # Extraer Au e IAu en pasadas separadas: jamás una sirve de respaldo de la otra.
   for row in rows:
-    rowtxt = _normalize_central_metric_text(row["text"])
-    if re.search(r"\bAPC\b", rowtxt, re.I):
-      vtxt = _extract_central_metric_value(rowtxt, "apc")
-      if not np.isnan(vtxt) and 0.2 <= vtxt <= 3.5:
-        out["apc"] = vtxt
-        break
-      nums = _numbers_from_row_words(row["words"])
-      if nums:
-        valid = [v for _, v in nums if 0.2 <= v <= 3.5]
-        if valid:
-          out["apc"] = valid[0]
+    if not in_param_block(row):
+      continue
+    v = row_value_after_label(row, "au")
+    if not np.isnan(v):
+      out["au"] = v
+      break
+
+  for row in rows:
+    if not in_param_block(row):
+      continue
+    v = row_value_after_label(row, "iau")
+    if not np.isnan(v):
+      out["iau"] = v
+      break
+
+  # Otros parámetros centrales.
+  for metric, key in [("rvse","rvse"), ("pe","pe")]:
+    for row in rows:
+      if not in_param_block(row):
+        continue
+      text_norm = _normalize_central_metric_text(row["text"])
+      if re.search(_metric_label_regex(metric), text_norm, re.I):
+        v = _extract_central_metric_value(text_norm, metric)
+        if np.isnan(v):
+          nums = _numbers_from_row_words(row["words"])
+          if nums: v = nums[0][1]
+        if not np.isnan(v):
+          out[key] = v
           break
+
+  # APC: misma fila y luego filas vecinas cercanas / misma columna.
+  for i, row in enumerate(rows):
+    rowtxt = _normalize_central_metric_text(row["text"])
+    if not re.search(_metric_label_regex("apc"), rowtxt, re.I):
+      continue
+    v = row_value_after_label(row, "apc")
+    if not np.isnan(v):
+      out["apc"] = v
+      break
+
+    # x aproximada de la etiqueta APC.
+    label_x = min((w[0] for w in row["words"]), default=0)
+    for w in row["words"]:
+      if re.search(r"(?i)APC|A\.?P\.?C", str(w[4])):
+        label_x = w[2]
+        break
+
+    neighbor_candidates = []
+    for j in range(max(0, i-2), min(len(rows), i+3)):
+      if j == i: continue
+      r2 = rows[j]
+      if abs(r2["y"] - row["y"]) > 0.06*H:
+        continue
+      for x, val in _numbers_from_row_words(r2["words"]):
+        if x >= label_x - 0.05*W:
+          nv = _normalize_apc_value(val)
+          if not np.isnan(nv):
+            neighbor_candidates.append((abs(r2["y"]-row["y"]) + abs(x-label_x)/max(W,1), nv))
+    if neighbor_candidates:
+      neighbor_candidates.sort(key=lambda z: z[0])
+      out["apc"] = neighbor_candidates[0][1]
+      break
+
   return out
 
-def _extract_central_params_global(flat_text):
-  """Extrae Au/IAu/RVSE/PE/APC con tolerancia a texto partido u OCR.
 
-  Corrige variantes frecuentes del PDF: A P C, A.P.C., APC:(1.08),
-  A u mmHg +8 +/-1, I Au, signos Unicode y etiquetas separadas por columnas.
+def _extract_central_params_global(flat_text):
+  """Extracción global estricta de parámetros centrales.
+
+  Au e IAu se procesan por canales independientes. El texto IAu se enmascara antes
+  de cualquier búsqueda de Au para impedir que el índice sea importado como presión.
+  APC admite valor decimal o porcentaje normalizado a relación.
   """
   out = {}
   txt = _normalize_central_metric_text(flat_text)
 
-  for key in ("apc", "au", "iau", "rvse", "pe", "pas_central", "pp_central"):
+  # IAu primero, con etiqueta propia.
+  v_iau = _extract_central_metric_value(txt, "iau")
+  if not np.isnan(v_iau):
+    out["iau"] = v_iau
+
+  # Au sobre texto con IAu enmascarado de forma explícita.
+  txt_au = re.sub(r"(?i)\bIAu\b", "__INDICE_AUMENTACION__", txt)
+  v_au = _extract_central_metric_value(txt_au, "au")
+  if not np.isnan(v_au):
+    out["au"] = v_au
+
+  for key in ("apc", "rvse", "pe", "pas_central", "pp_central"):
     v = _extract_central_metric_value(txt, key)
     if not np.isnan(v):
       out[key] = v
 
-  # Respaldo especial APC: buscar ventanas cortas alrededor de la etiqueta para no
-  # perder el valor cuando pdfplumber intercala texto de otra columna.
+  # APC: ventana corta hasta la siguiente etiqueta conocida; evita tomar cualquier
+  # número lejano de otra métrica o de una tolerancia.
   if "apc" not in out:
     for m in re.finditer(r"\bAPC\b", txt, re.I):
-      win = txt[m.start():m.start()+100]
-      nums = _numeric_values_in_text(win)
-      plaus = [x for x in nums if 0.2 <= x <= 3.5]
-      if plaus:
-        out["apc"] = plaus[0]
+      tail = txt[m.end():m.end()+120]
+      tail = re.split(r"\b(?:PAS|PP|Au|IAu|RVSE|PE|FC|PAD|PAM)\b", tail, maxsplit=1, flags=re.I)[0]
+      nums = _numeric_values_in_text(tail)
+      for x in nums:
+        nv = _normalize_apc_value(x)
+        if not np.isnan(nv):
+          out["apc"] = nv
+          break
+      if "apc" in out:
         break
 
-  # Respaldo especial Au: ventana posterior a Au, excluyendo IAu.
+  # Au: respaldo solo tras etiqueta Au independiente y antes de la próxima etiqueta.
   if "au" not in out:
-    for m in re.finditer(r"(?<!I)\bAu\b", txt, re.I):
-      win = txt[m.start():m.start()+100]
-      nums = _numeric_values_in_text(win)
-      plaus = [x for x in nums if -80 <= x <= 100]
-      if plaus:
-        out["au"] = plaus[0]
-        break
+    masked = re.sub(r"(?i)\bIAu\b", "__INDICE_AUMENTACION__", txt)
+    for m in re.finditer(r"(?<![A-Za-z])Au(?![A-Za-z])", masked, re.I):
+      tail = masked[m.end():m.end()+80]
+      tail = re.split(r"\b(?:IAu|RVSE|PE|APC|PAS|PP|FC|PAD|PAM)\b", tail, maxsplit=1, flags=re.I)[0]
+      nums = _numeric_values_in_text(tail)
+      if nums:
+        x = nums[0]
+        if -80 <= x <= 100:
+          out["au"] = x
+          break
   return out
 
 
@@ -1636,11 +1807,16 @@ def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
         if not np.isnan(fv):
           data[k] = fv
 
-    # 3) Aumentaciones y parámetros centrales desde texto global, más robusto que líneas partidas.
+    # 3) Aumentaciones y parámetros centrales desde texto global.
+    # Para Au/IAu/APC, las coordenadas tienen prioridad y el texto global solo completa faltantes.
     flat = _collapse_spaces(fallback_text or "")
-    for k, v in _extract_central_params_global(flat).items():
-      if not np.isnan(to_float(v)):
-        data[k] = v
+    global_params = _extract_central_params_global(flat)
+    for k, v in global_params.items():
+      if np.isnan(to_float(v)):
+        continue
+      if k in ("au", "iau", "apc") and not np.isnan(to_float(coord_vars.get(k, np.nan))):
+        continue
+      data[k] = v
 
     # 4) Reaplicar coordenadas al final: tienen prioridad sobre texto plano mezclado.
     for k, v in coord_vars.items():
@@ -1963,6 +2139,20 @@ def _validate_and_repair_pac_data(data):
   pas_r, pad_r = to_float(data.get("pas_radial")), to_float(data.get("pad_radial"))
   if (np.isnan(data.get("pp_radial", np.nan)) or data.get("pp_radial", 0) == 0) and not np.isnan(pas_r) and not np.isnan(pad_r) and pas_r > pad_r:
     data["pp_radial"] = pas_r - pad_r
+
+  # Separación final Au / IAu: nunca completar uno desde el otro.
+  # Si solo existe IAu, Au queda vacío; si solo existe Au, IAu queda vacío.
+  # No se copian ni se igualan valores entre ambas métricas.
+  au_v = to_float(data.get("au"))
+  iau_v = to_float(data.get("iau"))
+  if not np.isnan(au_v):
+    data["au"] = au_v
+  if not np.isnan(iau_v):
+    data["iau"] = iau_v
+
+  # APC puede venir como porcentaje; normalizar a relación antes de validar.
+  apc_v = _normalize_apc_value(data.get("apc"))
+  data["apc"] = apc_v if not np.isnan(apc_v) else np.nan
 
   # Rango fisiológico/administrativo: si falla, dejar editable como vacío en la interfaz.
   for k, lo, hi in [
