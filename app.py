@@ -2743,6 +2743,10 @@ def estimate_wave_separation(wave_df, row):
     "t_ej_inicio_ms": ej_start,
     "t_ej_fin_ms": ej_end,
   }
+  # Auditoría de sincronización gráfico-animación sobre la misma serie Pf/Pb.
+  sync = _wave_sync_landmarks(sep_df, metrics)
+  metrics["t_pb_inicio_ms"] = sync.get("t_pb_onset_ms", np.nan)
+  metrics["t_cruce_pf_pb_ms"] = sync.get("t_cross_ms", np.nan)
   return sep_df, metrics
 
 def interpret_wave_separation(sep_metrics):
@@ -2793,8 +2797,8 @@ def plot_waveform(wave_df):
   return fig_to_png(fig)
 
 
-def plot_wave_separation(sep_df):
-  """Gráfico clínico integrado: presión aórtica central + Pf/Pb superpuestas."""
+def plot_wave_separation(sep_df, sep_metrics=None):
+  """Gráfico clínico integrado: presión central + Pf/Pb y landmarks de sincronización."""
   t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
   p_total = pd.to_numeric(sep_df["presion_total_mmHg"], errors="coerce").to_numpy(dtype=float)
   pf_abs = pd.to_numeric(sep_df.get("onda_anterograda_pf_abs", sep_df["onda_anterograda_pf"]), errors="coerce").to_numpy(dtype=float)
@@ -2802,6 +2806,7 @@ def plot_wave_separation(sep_df):
   ok = np.isfinite(t) & np.isfinite(p_total) & np.isfinite(pf_abs) & np.isfinite(pb_abs)
   t, p_total, pf_abs, pb_abs = t[ok], p_total[ok], pf_abs[ok], pb_abs[ok]
   pad_base = float(np.nanmin(p_total)) if len(p_total) else 0.0
+  sync = _wave_sync_landmarks(sep_df, sep_metrics or {})
 
   fig, ax = plt.subplots(figsize=(8.8, 4.9))
   ax.plot(t, p_total, color="#111111", linewidth=3.0, label="Presión aórtica central completa", zorder=5)
@@ -2810,8 +2815,15 @@ def plot_wave_separation(sep_df):
   ax.fill_between(t, pad_base, pf_abs, alpha=0.07, color="#168038", zorder=2)
   ax.fill_between(t, pad_base, pb_abs, alpha=0.08, color="#EF6C00", zorder=2)
   ax.axhline(pad_base, color="#78909C", linewidth=0.9, alpha=0.8)
+  # El cruce marcado es exactamente el usado por la animación.
+  tc = sync.get("t_cross_ms", np.nan)
+  ton = sync.get("t_pb_onset_ms", np.nan)
+  if not np.isnan(ton):
+    ax.axvline(ton, color="#EF6C00", linewidth=1.0, linestyle=":", alpha=0.75, label="Inicio material de Pb")
+  if not np.isnan(tc):
+    ax.axvline(tc, color="#6A1B9A", linewidth=1.25, linestyle="-.", alpha=0.85, label="Cruce Pf = Pb (sincroniza animación)")
   _apply_professional_axes(ax, "Separación de ondas superpuesta a la presión aórtica central", "Tiempo (ms)", "Presión / componentes sobre PAD (mmHg)")
-  ax.legend(fontsize=8, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
+  ax.legend(fontsize=7.4, loc="upper right", frameon=True, facecolor="white", edgecolor="#CFD8DC")
   ax.margins(x=0.01)
   return fig_to_png(fig)
 
@@ -2905,6 +2917,137 @@ def _nearest_index_for_time(times, target_ms):
   t_ok = t[ok]
   idx_ok = np.where(ok)[0]
   return int(idx_ok[np.argmin(np.abs(t_ok - float(target_ms)))])
+
+
+def _wave_sync_landmarks(sep_df, sep_metrics=None):
+  """Landmarks temporales comunes para gráfico y animación Pf/Pb.
+
+  La animación usa exactamente la misma serie temporal de ``sep_df`` que el gráfico.
+  El cruce se define como el primer cambio Pf-Pb de positivo a no positivo dentro de
+  la ventana sistólica útil; se evitan falsos cruces basales donde ambas ondas valen 0.
+  La posición anatómica sigue siendo didáctica: el tiempo está medido/derivado de la
+  curva, pero el punto espacial de encuentro no es una localización anatómica medida.
+  """
+  sep_metrics = sep_metrics or {}
+  try:
+    t = pd.to_numeric(sep_df["tiempo_ms"], errors="coerce").to_numpy(dtype=float)
+    pf = pd.to_numeric(sep_df.get("onda_anterograda_pf", pd.Series(np.zeros(len(sep_df)))), errors="coerce").to_numpy(dtype=float)
+    pb = pd.to_numeric(sep_df.get("onda_retrograda_pb", pd.Series(np.zeros(len(sep_df)))), errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(t) & np.isfinite(pf) & np.isfinite(pb)
+    t, pf, pb = t[ok], pf[ok], pb[ok]
+    if len(t) < 3:
+      raise ValueError("serie insuficiente")
+    order = np.argsort(t)
+    t, pf, pb = t[order], pf[order], pb[order]
+
+    total = np.clip(pf + pb, 0, None)
+    max_total = max(float(np.nanmax(total)), 1e-6)
+    max_pb = max(float(np.nanmax(pb)), 1e-6)
+
+    def metric_time(key, default=np.nan):
+      v = to_float(sep_metrics.get(key))
+      return float(v) if not np.isnan(v) else float(default)
+
+    t_min, t_max = float(t[0]), float(t[-1])
+    t_foot = metric_time("t_pie_ms")
+    if np.isnan(t_foot):
+      cand = np.where(total >= 0.04 * max_total)[0]
+      t_foot = float(t[cand[0]]) if len(cand) else t_min
+
+    t_peak = metric_time("t_pico_ms")
+    if np.isnan(t_peak):
+      t_peak = float(t[int(np.nanargmax(total))])
+
+    t_ej_end = metric_time("t_ej_fin_ms", t_max)
+    t_ej_end = float(np.clip(t_ej_end, t_peak, t_max))
+
+    # Inicio visible de Pb: primer aporte material, no el ruido basal.
+    onset_mask = (
+      (t >= t_foot)
+      & (pb >= max(0.08 * max_pb, 0.025 * max_total))
+      & (total >= 0.05 * max_total)
+    )
+    onset_idx = np.where(onset_mask)[0]
+    t_pb_onset = float(t[onset_idx[0]]) if len(onset_idx) else metric_time("tref_ms", t_peak)
+
+    # Cruce real Pf=Pb sobre la MISMA serie del gráfico. Se exige amplitud material.
+    cross_mask = (
+      (t >= max(t_foot, t_peak))
+      & (t <= t_ej_end)
+      & (total >= 0.08 * max_total)
+    )
+    idxs = np.where(cross_mask)[0]
+    d = pf - pb
+    cross_idx = None
+    if len(idxs) >= 2:
+      for a, b in zip(idxs[:-1], idxs[1:]):
+        if d[a] > 0 and d[b] <= 0:
+          cross_idx = b
+          break
+      if cross_idx is None:
+        cross_idx = int(idxs[np.nanargmin(np.abs(d[idxs]))])
+    else:
+      cross_idx = int(np.nanargmin(np.abs(d)))
+    t_cross = float(t[cross_idx])
+
+    # Tref clínico/operativo ya calculado desde Pb; se mantiene en la misma línea temporal.
+    t_ref = metric_time("tref_ms", t_cross)
+    t_ref = float(np.clip(t_ref, t_min, t_max))
+
+    # Coherencia temporal: Pb debe aparecer antes o, como máximo, en el cruce.
+    if t_pb_onset >= t_cross:
+      t_pb_onset = float(max(t_foot, t_cross - max(20.0, 0.12 * max(t_cross - t_foot, 1.0))))
+
+    return {
+      "t_min_ms": t_min,
+      "t_max_ms": t_max,
+      "t_foot_ms": float(t_foot),
+      "t_peak_ms": float(t_peak),
+      "t_pb_onset_ms": float(t_pb_onset),
+      "t_cross_ms": float(t_cross),
+      "t_ref_ms": float(t_ref),
+      "t_ej_end_ms": float(t_ej_end),
+      # Punto anatómico didáctico fijo; no representa sitio de reflexión medido.
+      "meet_frac": 0.62,
+    }
+  except Exception:
+    return {
+      "t_min_ms": 0.0, "t_max_ms": 1000.0, "t_foot_ms": 0.0,
+      "t_peak_ms": 250.0, "t_pb_onset_ms": 300.0, "t_cross_ms": 500.0,
+      "t_ref_ms": 500.0, "t_ej_end_ms": 650.0, "meet_frac": 0.62,
+    }
+
+
+def _wave_position_fractions(ti, sync):
+  """Fracciones espaciales Pf/Pb sincronizadas por el cruce real de sep_df."""
+  ti = float(ti)
+  t0 = float(sync.get("t_min_ms", 0.0))
+  t1 = float(sync.get("t_max_ms", 1000.0))
+  foot = float(sync.get("t_foot_ms", t0))
+  pb_on = float(sync.get("t_pb_onset_ms", foot))
+  cross = float(sync.get("t_cross_ms", (t0+t1)/2))
+  meet = float(np.clip(sync.get("meet_frac", 0.62), 0.20, 0.85))
+
+  def prog(x, a, b):
+    if b <= a:
+      return 1.0 if x >= b else 0.0
+    return float(np.clip((x-a)/(b-a), 0.0, 1.0))
+
+  # Pf nace en raíz y llega al punto de encuentro exactamente en t_cross.
+  if ti <= cross:
+    pf_frac = meet * prog(ti, foot, cross)
+  else:
+    pf_frac = meet + (1.0-meet) * prog(ti, cross, t1)
+
+  # Pb no viaja antes de su inicio material; parte distal y llega al mismo punto en t_cross.
+  pb_visible = ti >= pb_on
+  if ti <= cross:
+    pb_frac = 1.0 - (1.0-meet) * prog(ti, pb_on, cross)
+  else:
+    pb_frac = meet * (1.0 - prog(ti, cross, t1))
+
+  pf_visible = ti >= foot
+  return float(np.clip(pf_frac, 0, 1)), float(np.clip(pb_frac, 0, 1)), bool(pf_visible), bool(pb_visible)
 
 
 def _harmonic_live_values(hdf, t_ms, max_harmonics=6):
@@ -3077,16 +3220,19 @@ def _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=None):
   ax.text(0.535, 0.985, "CCI", fontsize=5.4, color="#546E7A", ha="center")
   ax.text(0.70, 0.945, "SCI", fontsize=5.4, color="#546E7A", ha="center")
 
-  # Ondas anterógrada y retrógrada sobre trayecto anatómico.
-  frac = (ti - float(np.nanmin(t))) / max(float(np.nanmax(t) - np.nanmin(t)), 1e-6)
-  xpf, ypf = _point_on_polyline(xs, ys, frac)
-  xpb, ypb = _point_on_polyline(xs, ys, 1.0 - frac)
+  # Ondas Pf/Pb sincronizadas con la MISMA línea temporal del gráfico de descomposición.
+  sync = _wave_sync_landmarks(sep_df, sep_metrics)
+  pf_frac, pb_frac, pf_visible, pb_visible = _wave_position_fractions(ti, sync)
+  xpf, ypf = _point_on_polyline(xs, ys, pf_frac)
+  xpb, ypb = _point_on_polyline(xs, ys, pb_frac)
   max_pf = max(float(np.nanmax(pf)) if np.any(np.isfinite(pf)) else 1, 1e-6)
   max_pb = max(float(np.nanmax(pb)) if np.any(np.isfinite(pb)) else 1, 1e-6)
-  ax.add_patch(plt.Circle((xpf, ypf), 0.022 + 0.030*np.sqrt(pfi/max_pf), color="#1B8E3F", alpha=0.82, ec="white", lw=0.7, zorder=5))
-  ax.add_patch(plt.Circle((xpb, ypb), 0.020 + 0.030*np.sqrt(pbi/max_pb), color="#EF6C00", alpha=0.82, ec="white", lw=0.7, zorder=5))
-  ax.text(xpf, min(0.98, ypf+0.058), "Pf", fontsize=6.5, color="#1B5E20", fontweight="bold", ha="center", zorder=6)
-  ax.text(xpb, min(0.98, ypb+0.058), "Pb", fontsize=6.5, color="#E65100", fontweight="bold", ha="center", zorder=6)
+  if pf_visible:
+    ax.add_patch(plt.Circle((xpf, ypf), 0.022 + 0.030*np.sqrt(pfi/max_pf), color="#1B8E3F", alpha=0.82, ec="white", lw=0.7, zorder=5))
+    ax.text(xpf, min(0.98, ypf+0.058), "Pf", fontsize=6.5, color="#1B5E20", fontweight="bold", ha="center", zorder=6)
+  if pb_visible:
+    ax.add_patch(plt.Circle((xpb, ypb), 0.020 + 0.030*np.sqrt(pbi/max_pb), color="#EF6C00", alpha=0.82, ec="white", lw=0.7, zorder=5))
+    ax.text(xpb, min(0.98, ypb+0.058), "Pb", fontsize=6.5, color="#E65100", fontweight="bold", ha="center", zorder=6)
 
   # Curva miniatura y cursor temporal.
   gx0, gy0, gw, gh = 0.06, 0.035, 0.45, 0.145
@@ -3094,6 +3240,7 @@ def _plot_single_aorta_keyframe(ax, sep_df, sep_metrics, hdf, frame, row=None):
   xx = gx0 + (t - float(np.nanmin(t))) / max(float(np.nanmax(t)-np.nanmin(t)), 1e-6) * gw
   yy = gy0 + (p - min_p) / max(max_p - min_p, 1e-6) * gh
   ax.plot(xx, yy, color="#111111", linewidth=1.1, zorder=5)
+  frac = (ti - float(np.nanmin(t))) / max(float(np.nanmax(t) - np.nanmin(t)), 1e-6)
   xcur = gx0 + frac * gw
   ax.plot([xcur, xcur], [gy0, gy0+gh], color="#C62828", linewidth=1.1, zorder=6)
   ax.scatter([xcur], [gy0 + norm*gh], s=14, color="#C62828", zorder=7)
@@ -3586,6 +3733,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1
     aix_p90 = aix_ref.get("p90", np.nan) if aix_ref.get("ok") else np.nan
 
     pause_alerts = _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t)
+    sync = _wave_sync_landmarks(sep_df, sep_metrics)
 
     payload = {
       "t": t,
@@ -3598,6 +3746,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1
       "amps": amps,
       "phases": phases,
       "alerts": pause_alerts,
+      "sync": {k: round(float(v), 4) for k, v in sync.items()},
       "metrics": {
         "pas": _safe_metric_value(pas, 0, " mmHg"),
         "pad": _safe_metric_value(pad, 0, " mmHg"),
@@ -3705,7 +3854,7 @@ def render_aortic_real_metrics_animation(row, sep_df, sep_metrics, hdf, height=1
   <div class="top">
     <div class="title">
       <h2>Animación hemodinámica central con datos reales</h2>
-      <div class="sub">Integra la curva central real digitalizada/importada, separación de ondas Pf/Pb, flujo aórtico estimado y armónicos por FFT. El cambio de calibre visible es una representación didáctica proporcional a la presión pulsátil real, no una medición anatómica del diámetro aórtico.</div>
+      <div class="sub">Integra la curva central real digitalizada/importada, separación de ondas Pf/Pb, flujo aórtico estimado y armónicos por FFT. Pf/Pb se mueven con la misma línea temporal de la descomposición: inicio material de Pb y cruce Pf=Pb están sincronizados. La posición anatómica del encuentro es didáctica y no un sitio de reflexión medido.</div>
     </div>
     <div class="cards">
       <div class="card"><div class="k">Diagnóstico</div><div class="v" id="mHTA"></div></div>
@@ -3907,12 +4056,29 @@ function linePath(vals, mode) {{
 document.getElementById('pressurePath').setAttribute('d', linePath(data.p, 'p'));
 document.getElementById('pfPath').setAttribute('d', linePath(data.pf, 'comp'));
 document.getElementById('pbPath').setAttribute('d', linePath(data.pb, 'comp'));
+// Landmarks temporales idénticos a los usados para mover Pf/Pb en la aorta.
+(function drawSyncLandmarks() {{
+  const graph = document.getElementById('pressurePath').parentNode;
+  const t0 = data.t[0], t1 = data.t[N-1];
+  const marks = [
+    {{id:'pbOnsetMark', t:data.sync.t_pb_onset_ms, color:'#ef6c00', dash:'2 4'}},
+    {{id:'crossMark', t:data.sync.t_cross_ms, color:'#6a1b9a', dash:'6 4'}}
+  ];
+  marks.forEach(m => {{
+    if(!Number.isFinite(m.t)) return;
+    const x = (m.t-t0)/Math.max(t1-t0,1e-6)*630;
+    const ln = document.createElementNS('http://www.w3.org/2000/svg','line');
+    ln.setAttribute('x1',x); ln.setAttribute('x2',x); ln.setAttribute('y1',8); ln.setAttribute('y2',132);
+    ln.setAttribute('stroke',m.color); ln.setAttribute('stroke-width','1.1'); ln.setAttribute('stroke-dasharray',m.dash); ln.setAttribute('opacity','.78');
+    graph.insertBefore(ln, graph.firstChild);
+  }});
+}})();
 document.getElementById('mHTA').textContent = data.metrics.hta;
 document.getElementById('mPASPAD').textContent = data.metrics.pas.replace(' mmHg','') + '/' + data.metrics.pad.replace(' mmHg','');
 document.getElementById('mRM').textContent = data.metrics.rm;
 document.getElementById('mTref').textContent = data.metrics.tref;
 document.getElementById('mRVSE').textContent = data.metrics.rvse_calc;
-document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref retorno reflejo '+data.metrics.tref+'; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
+document.getElementById('detailBox').innerHTML = 'PAS central '+data.metrics.pas+'; PAD central '+data.metrics.pad+'; PP '+data.metrics.pp+'; P90 SAHA '+data.metrics.p90+'. IAu/AIx '+data.metrics.iau+'; P90 IAu/AIx '+data.metrics.iau_p90+'; Au '+data.metrics.au+'. Tfor '+data.metrics.tfor+'; Tref '+data.metrics.tref+'; inicio material Pb '+fmt(data.sync.t_pb_onset_ms,0)+' ms; cruce Pf=Pb '+fmt(data.sync.t_cross_ms,0)+' ms; PE estimado '+data.metrics.pe+'; Qp '+data.metrics.qp+'. Firma morfológica: <b>'+data.metrics.curve_id+'</b>.';
 const bars = document.getElementById('bars');
 const maxE = Math.max(...data.energies, 1e-6);
 const maxAmp = Math.max(...data.amps.map(v => Math.abs(v)), 1e-6);
@@ -3976,13 +4142,31 @@ function update(idx) {{
   if(valve) valve.setAttribute('transform', 'rotate(28 279 199) scale('+pulse.toFixed(3)+')');
   const centerPath = document.getElementById('aortaCenter');
   const totalLen = centerPath.getTotalLength();
-  const frac = (data.t[i]-data.t[0]) / Math.max(data.t[N-1]-data.t[0], 1e-6);
-  const pfPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, frac*totalLen)));
-  const pbPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, (1-frac)*totalLen)));
+  const ti = data.t[i];
+  const sync = data.sync || {{}};
+  const foot = Number.isFinite(sync.t_foot_ms) ? sync.t_foot_ms : data.t[0];
+  const pbOn = Number.isFinite(sync.t_pb_onset_ms) ? sync.t_pb_onset_ms : foot;
+  const cross = Number.isFinite(sync.t_cross_ms) ? sync.t_cross_ms : (data.t[0]+data.t[N-1])/2;
+  const meet = Number.isFinite(sync.meet_frac) ? Math.max(.20, Math.min(.85, sync.meet_frac)) : .62;
+  const tEnd = data.t[N-1];
+  function prog(x,a,b) {{ if(b<=a) return x>=b?1:0; return Math.max(0,Math.min(1,(x-a)/(b-a))); }}
+  // Misma línea temporal que el gráfico: ambas ondas ocupan el mismo punto en t_cross.
+  let pfFrac = ti<=cross ? meet*prog(ti,foot,cross) : meet+(1-meet)*prog(ti,cross,tEnd);
+  let pbFrac = ti<=cross ? 1-(1-meet)*prog(ti,pbOn,cross) : meet*(1-prog(ti,cross,tEnd));
+  const pfPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, pfFrac*totalLen)));
+  const pbPt = centerPath.getPointAtLength(Math.max(0, Math.min(totalLen, pbFrac*totalLen)));
   const pfG = document.getElementById('pfWave');
   const pbG = document.getElementById('pbWave');
-  if(pfG) {{ pfG.setAttribute('transform', 'translate('+pfPt.x.toFixed(1)+' '+pfPt.y.toFixed(1)+')'); pfG.querySelector('circle').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13); }}
-  if(pbG) {{ pbG.setAttribute('transform', 'translate('+pbPt.x.toFixed(1)+' '+pbPt.y.toFixed(1)+')'); pbG.querySelector('circle').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12); }}
+  if(pfG) {{
+    pfG.setAttribute('transform', 'translate('+pfPt.x.toFixed(1)+' '+pfPt.y.toFixed(1)+')');
+    pfG.style.opacity = ti>=foot ? '1' : '0';
+    pfG.querySelector('circle').setAttribute('r', 9 + Math.sqrt(Math.max(pf,0)/maxPf)*13);
+  }}
+  if(pbG) {{
+    pbG.setAttribute('transform', 'translate('+pbPt.x.toFixed(1)+' '+pbPt.y.toFixed(1)+')');
+    pbG.style.opacity = ti>=pbOn ? '1' : '0';
+    pbG.querySelector('circle').setAttribute('r', 8 + Math.sqrt(Math.max(pb,0)/maxPb)*12);
+  }}
   document.getElementById('liveP').textContent = fmt(p,0)+' mmHg';
   const qOverlay = document.getElementById('liveQOverlay');
   if(qOverlay) qOverlay.textContent = fmt(q,0)+' mL/s';
@@ -5126,7 +5310,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
   story.append(Spacer(1, 1.5*mm))
   story.append(KeepTogether([
     Paragraph("Presión aórtica central con ondas Pf/Pb superpuestas", styles["H3PAC"]),
-    Image(plot_wave_separation(sep_df), width=188*mm, height=88*mm)
+    Image(plot_wave_separation(sep_df, sep_metrics), width=188*mm, height=88*mm)
   ]))
   story.append(Spacer(1, 1.5*mm))
 
@@ -5487,7 +5671,7 @@ if wave_df is not None:
 
   st.markdown("---")
   st.markdown("### Gráficos")
-  st.image(plot_wave_separation(sep_df_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas", use_container_width=True)
+  st.image(plot_wave_separation(sep_df_preview, sep_metrics_preview), caption="Presión aórtica central real con onda anterógrada Pf y retrógrada Pb superpuestas y sincronizadas", use_container_width=True)
 
   g1, g2 = st.columns(2)
   with g1:
