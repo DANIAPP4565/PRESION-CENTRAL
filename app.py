@@ -4868,6 +4868,67 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
 
 
 
+
+def _componente_seguro_nombre_archivo(valor, fallback="SD"):
+  """Limpia un componente del nombre de archivo para Windows/macOS/Linux."""
+  s = safe_text(valor)
+  if not s:
+    s = fallback
+  s = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '-', s)
+  s = re.sub(r'\s+', ' ', s).strip(' .,-_')
+  return s or fallback
+
+
+def _fecha_estudio_para_archivo(valor):
+  """Normaliza la fecha del estudio a DD-MM-AAAA cuando es reconocible."""
+  s = safe_text(valor)
+  if not s:
+    return "SD"
+  formatos = (
+    "%d/%m/%Y", "%d-%m-%Y",
+    "%d/%m/%y", "%d-%m-%y",
+    "%Y/%m/%d", "%Y-%m-%d",
+  )
+  for formato in formatos:
+    try:
+      return datetime.strptime(s, formato).strftime("%d-%m-%Y")
+    except Exception:
+      pass
+  return _componente_seguro_nombre_archivo(s, "SD")
+
+
+def _apellido_nombre_para_archivo(valor):
+  """Devuelve (apellido, nombre) para el nombre del PDF PAC."""
+  s = re.sub(r'\s+', ' ', safe_text(valor)).strip(' ,')
+  if not s:
+    return "SD", "SD"
+
+  if "," in s:
+    apellido, nombres = s.split(",", 1)
+    apellido = _componente_seguro_nombre_archivo(apellido, "SD")
+    nombres = _componente_seguro_nombre_archivo(nombres, "SD")
+    return apellido, nombres
+
+  partes = s.split()
+  if len(partes) == 1:
+    return _componente_seguro_nombre_archivo(partes[0], "SD"), "SD"
+
+  apellido = partes[-1]
+  nombres = " ".join(partes[:-1])
+  return (
+    _componente_seguro_nombre_archivo(apellido, "SD"),
+    _componente_seguro_nombre_archivo(nombres, "SD"),
+  )
+
+
+def nombre_archivo_informe_pac(row):
+  """APELLIDO, NOMBRE, FECHA DEL ESTUDIO, PAC, OBRA SOCIAL.pdf"""
+  apellido, nombres = _apellido_nombre_para_archivo(row.get("paciente", ""))
+  fecha = _fecha_estudio_para_archivo(row.get("fecha", ""))
+  obra_social = _componente_seguro_nombre_archivo(row.get("obra_social", ""), "SD")
+  return f"{apellido}, {nombres}, {fecha}, PAC, {obra_social}.pdf"
+
+
 def save_history(row):
   """Guarda el registro actual en historial Excel de forma robusta.
 
@@ -4967,12 +5028,12 @@ sello_png = read_uploaded_image_bytes(sello_file)
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
+fields = ["paciente","estudio","fecha","hora","obra_social","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
 row = {}
 for i, f in enumerate(fields):
   with cols[i%4]:
     val = base.get(f, "")
-    if f in ["paciente","estudio","fecha","hora","sexo","medicacion","diagnostico_previo"]:
+    if f in ["paciente","estudio","fecha","hora","obra_social","sexo","medicacion","diagnostico_previo"]:
       row[f] = st.text_input(f, value="" if pd.isna(val) else str(val))
     else:
       vnum = to_float(val)
@@ -5112,6 +5173,6 @@ else:
     st.download_button(
       "Generar y descargar PDF médico integrado",
       data=pdf_download_bytes,
-      file_name=f"PAC_IA_{str(row.get('paciente','paciente')).replace(' ','_')}.pdf",
+      file_name=nombre_archivo_informe_pac(row),
       mime="application/pdf"
     )
