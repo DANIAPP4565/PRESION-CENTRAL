@@ -1108,8 +1108,10 @@ def _extract_central_metric_value(txt, metric):
   Reglas críticas:
   - Au = presión de aumentación en mmHg. Nunca se obtiene desde IAu/AIx.
   - IAu = índice de aumentación en %. Nunca se usa como respaldo de Au.
-  - APC admite relación decimal (p. ej. 1,08) o porcentaje (108%), que se
-    normaliza a relación dividiendo por 100.
+  - APC = amplificación periférico-central en mmHg. El valor principal es la
+    diferencia periférico-central informada por el equipo (p. ej. 16 mmHg).
+    La cifra entre paréntesis (p. ej. 1,11) es una relación secundaria y nunca
+    debe reemplazar al APC en mmHg.
   - Se toleran etiquetas partidas por PDF/OCR: A u, I Au, A P C, A.P.C.
   """
   t = _normalize_central_metric_text(txt)
@@ -1124,9 +1126,13 @@ def _extract_central_metric_value(txt, metric):
 
   patterns = {
     "apc": [
-      rf"\bAPC\b\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
-      rf"Amplificaci[oó]n\s+(?:de\s+)?(?:Presi[oó]n\s+)?Perif[eé]rico[- ]?Central\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
-      rf"Amplificaci[oó]n\s+Perif[eé]rica\s*(?:relaci[oó]n|ratio|%)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      # Prioridad máxima: APC principal seguido/precedido por unidad mmHg.
+      rf"\bAPC\b\s*(?::|=)?\s*{num}\s*mmHg\b",
+      rf"\bAPC\b\s*(?:mmHg)\s*(?::|=)?\s*{num}",
+      rf"Amplificaci[oó]n\s+(?:de\s+)?(?:Presi[oó]n\s+)?Perif[eé]rico[- ]?Central\s*(?:\(mmHg\)|mmHg)?\s*(?::|=)?\s*{num}",
+      rf"Amplificaci[oó]n\s+Perif[eé]rica[- ]?Central\s*(?:\(mmHg\)|mmHg)?\s*(?::|=)?\s*{num}",
+      # Respaldo: APC + número; la consistencia final con PAS radial-central decide.
+      rf"\bAPC\b\s*(?::|=)?\s*{num}(?!\s*[%])",
     ],
     "au": [
       # Prioridad máxima: Au independiente y unidad mmHg.
@@ -1164,10 +1170,9 @@ def _extract_central_metric_value(txt, metric):
   value = float(selected[2])
 
   if metric == "apc":
-    # APC se informa como relación o como porcentaje. Normalizar siempre a relación.
-    if 20 <= abs(value) <= 350:
-      value = value / 100.0
-    if not (0.2 <= value <= 3.5):
+    # APC del informe Exxer = amplificación periférico-central en mmHg.
+    # NO convertir a relación y NO usar la cifra parentética (p. ej. 1,11).
+    if not (-100 <= value <= 150):
       return np.nan
   elif metric == "au":
     # Rango clínico amplio pero propio de presión de aumentación, no de porcentaje.
@@ -1192,13 +1197,62 @@ def _metric_label_regex(metric):
 
 
 def _normalize_apc_value(v):
-  """Normaliza APC decimal o porcentual a relación."""
+  """Valida APC como amplificación periférico-central en mmHg.
+
+  Importante: el valor entre paréntesis del equipo (p. ej. 1,11) es la razón
+  PAS periférica/PAS central y no debe almacenarse en ``apc``.
+  """
   x = to_float(v)
   if np.isnan(x):
     return np.nan
-  if 20 <= abs(x) <= 350:
-    x = x / 100.0
-  return x if 0.2 <= x <= 3.5 else np.nan
+  return x if -100 <= x <= 150 else np.nan
+
+
+def _derived_apc_mmhg(data):
+  """APC esperado en mmHg = PAS radial - PAS central."""
+  pr = to_float((data or {}).get("pas_radial"))
+  pc = to_float((data or {}).get("pas_central"))
+  if np.isnan(pr) or np.isnan(pc):
+    return np.nan
+  d = pr - pc
+  return float(d) if -100 <= d <= 150 else np.nan
+
+
+def _derived_apc_ratio(data):
+  """Relación secundaria mostrada entre paréntesis por el equipo."""
+  pr = to_float((data or {}).get("pas_radial"))
+  pc = to_float((data or {}).get("pas_central"))
+  if np.isnan(pr) or np.isnan(pc) or pc == 0:
+    return np.nan
+  r = pr / pc
+  return float(r) if 0.5 <= r <= 2.5 else np.nan
+
+
+def _repair_apc_semantics(data):
+  """Impide confundir APC mmHg con la relación parentética.
+
+  Cuando existen PAS radial y central reales, la diferencia es el control de
+  consistencia del APC. Si el valor importado parece una razón (≈0,5-2,5) o no
+  concuerda con la diferencia, se reemplaza por PAS radial - PAS central.
+  """
+  expected = _derived_apc_mmhg(data)
+  raw = to_float((data or {}).get("apc"))
+  ratio = _derived_apc_ratio(data)
+  if not np.isnan(ratio):
+    data["apc_ratio"] = ratio
+  if not np.isnan(expected):
+    # La captura real muestra APC 16 mmHg y, separado, (1,11).
+    ratio_like = (not np.isnan(raw) and 0.5 <= abs(raw) <= 2.5 and abs(expected) >= 4)
+    discordant = (not np.isnan(raw) and abs(raw - expected) > max(3.0, 0.20 * max(abs(expected), 1.0)))
+    if np.isnan(raw) or ratio_like or discordant:
+      data["apc"] = expected
+    else:
+      data["apc"] = raw
+  elif not np.isnan(raw) and -100 <= raw <= 150:
+    data["apc"] = raw
+  else:
+    data["apc"] = np.nan
+  return data
 
 
 def _extract_layout_fields_from_pdf(pdf_bytes):
@@ -1312,9 +1366,17 @@ def _extract_layout_fields_from_pdf(pdf_bytes):
           vals = _numeric_values_in_text(txt)
           if vals:
             if key == "apc":
-              plaus = [x for x in vals if 0.2 <= x <= 3.5]
+              # APC primario es mmHg. Si PAS radial/central ya están disponibles,
+              # escoger el candidato más cercano a su diferencia; no la razón 1,11.
+              plaus = [x for x in vals if -100 <= x <= 150]
+              expected = _derived_apc_mmhg(out)
               if plaus:
-                out[key] = plaus[0]
+                if not np.isnan(expected):
+                  out[key] = min(plaus, key=lambda x: abs(x - expected))
+                else:
+                  # Preferir magnitud en mmHg sobre candidatos tipo razón.
+                  non_ratio = [x for x in plaus if abs(x) > 3.5]
+                  out[key] = (non_ratio or plaus)[0]
             else:
               out[key] = vals[0]
   return out
@@ -1575,6 +1637,10 @@ def _extract_tables_by_coordinates(pdf_bytes):
         label_x1 = words[i][2]; break
       if metric == "apc" and re.fullmatch(r"APC", wt, re.I):
         label_x1 = words[i][2]; break
+      if metric == "pe" and re.fullmatch(r"PE", wt, re.I):
+        label_x1 = words[i][2]; break
+      if metric == "rvse" and re.fullmatch(r"RVSE", wt, re.I):
+        label_x1 = words[i][2]; break
 
     # Etiquetas partidas en varios tokens: A u / I A u / A P C.
     if label_x1 is None:
@@ -1588,16 +1654,35 @@ def _extract_tables_by_coordinates(pdf_bytes):
           label_x1 = words[i+2][2]; break
         if metric == "apc" and i+2 < len(compact) and compact[i].upper() == "A" and compact[i+1].upper() == "P" and compact[i+2].upper() == "C":
           label_x1 = words[i+2][2]; break
+        if metric == "pe" and i+1 < len(compact) and compact[i].upper() == "P" and compact[i+1].upper() == "E":
+          label_x1 = words[i+1][2]; break
+        if metric == "rvse" and i+3 < len(compact) and compact[i].upper() == "R" and compact[i+1].upper() == "V" and compact[i+2].upper() == "S" and compact[i+3].upper() == "E":
+          label_x1 = words[i+3][2]; break
 
     if label_x1 is None:
       return np.nan
-    nums = _numbers_from_row_words(words, x_min=label_x1)
+    # Limitar a números próximos a la derecha de la etiqueta para no capturar
+    # ticks de gráficos/zonas de referencia de otras columnas.
+    nums = _numbers_from_row_words(words, x_min=label_x1, x_max=label_x1 + 0.28*W)
     if not nums:
       return np.nan
-    val = nums[0][1]
+    values = [v for _, v in nums]
     if metric == "apc":
-      return _normalize_apc_value(val)
-    return val
+      expected = _derived_apc_mmhg(out)
+      plaus = [v for v in values if -100 <= v <= 150]
+      if not plaus:
+        return np.nan
+      if not np.isnan(expected):
+        return min(plaus, key=lambda x: abs(x - expected))
+      non_ratio = [v for v in plaus if abs(v) > 3.5]
+      return (non_ratio or plaus)[0]
+    if metric == "pe":
+      plaus = [v for v in values if 5 <= v <= 80]
+      return plaus[0] if plaus else np.nan
+    if metric == "rvse":
+      plaus = [v for v in values if 0 <= v <= 300]
+      return plaus[0] if plaus else np.nan
+    return values[0]
 
   # Extraer Au e IAu en pasadas separadas: jamás una sirve de respaldo de la otra.
   for row in rows:
@@ -1616,20 +1701,16 @@ def _extract_tables_by_coordinates(pdf_bytes):
       out["iau"] = v
       break
 
-  # Otros parámetros centrales.
+  # Otros parámetros centrales: extracción geométrica estricta por la fila propia.
+  # Esto corrige PE 32,0% que antes podía quedar vacío/0 por mezcla con el gráfico.
   for metric, key in [("rvse","rvse"), ("pe","pe")]:
     for row in rows:
       if not in_param_block(row):
         continue
-      text_norm = _normalize_central_metric_text(row["text"])
-      if re.search(_metric_label_regex(metric), text_norm, re.I):
-        v = _extract_central_metric_value(text_norm, metric)
-        if np.isnan(v):
-          nums = _numbers_from_row_words(row["words"])
-          if nums: v = nums[0][1]
-        if not np.isnan(v):
-          out[key] = v
-          break
+      v = row_value_after_label(row, metric)
+      if not np.isnan(v):
+        out[key] = v
+        break
 
   # APC: misma fila y luego filas vecinas cercanas / misma columna.
   for i, row in enumerate(rows):
@@ -1658,7 +1739,14 @@ def _extract_tables_by_coordinates(pdf_bytes):
         if x >= label_x - 0.05*W:
           nv = _normalize_apc_value(val)
           if not np.isnan(nv):
-            neighbor_candidates.append((abs(r2["y"]-row["y"]) + abs(x-label_x)/max(W,1), nv))
+            expected = _derived_apc_mmhg(out)
+            # Penalizar candidatos de tipo relación (1,11) si se espera una diferencia mmHg.
+            semantic_penalty = 0.0
+            if not np.isnan(expected):
+              semantic_penalty = abs(nv - expected) / max(abs(expected), 1.0)
+            elif abs(nv) <= 2.5:
+              semantic_penalty = 2.0
+            neighbor_candidates.append((abs(r2["y"]-row["y"]) + abs(x-label_x)/max(W,1) + semantic_penalty, nv))
     if neighbor_candidates:
       neighbor_candidates.sort(key=lambda z: z[0])
       out["apc"] = neighbor_candidates[0][1]
@@ -1672,7 +1760,7 @@ def _extract_central_params_global(flat_text):
 
   Au e IAu se procesan por canales independientes. El texto IAu se enmascara antes
   de cualquier búsqueda de Au para impedir que el índice sea importado como presión.
-  APC admite valor decimal o porcentaje normalizado a relación.
+  APC se interpreta como amplificación periférico-central en mmHg; la relación parentética se mantiene separada.
   """
   out = {}
   txt = _normalize_central_metric_text(flat_text)
@@ -1693,8 +1781,8 @@ def _extract_central_params_global(flat_text):
     if not np.isnan(v):
       out[key] = v
 
-  # APC: ventana corta hasta la siguiente etiqueta conocida; evita tomar cualquier
-  # número lejano de otra métrica o de una tolerancia.
+  # APC: ventana corta hasta la siguiente etiqueta conocida. El valor principal
+  # es mmHg; la relación parentética se descarta/queda separada.
   if "apc" not in out:
     for m in re.finditer(r"\bAPC\b", txt, re.I):
       tail = txt[m.end():m.end()+120]
@@ -1830,6 +1918,7 @@ def parse_model_pac_from_pdf(pdf_bytes, fallback_text=""):
     data = _repair_swapped_pam_pp(data)
     data = _validate_and_repair_pac_data(data)
     data = _repair_swapped_pam_pp(data)
+    data = _repair_apc_semantics(data)
     data = _validate_and_repair_pac_data(data)
   except Exception:
     data = _validate_and_repair_pac_data(data)
@@ -2150,16 +2239,16 @@ def _validate_and_repair_pac_data(data):
   if not np.isnan(iau_v):
     data["iau"] = iau_v
 
-  # APC puede venir como porcentaje; normalizar a relación antes de validar.
-  apc_v = _normalize_apc_value(data.get("apc"))
-  data["apc"] = apc_v if not np.isnan(apc_v) else np.nan
+  # APC = amplificación periférico-central en mmHg. Controlar contra PAS radial-central
+  # para no importar la relación parentética (1,11) ni números del gráfico.
+  data = _repair_apc_semantics(data)
 
   # Rango fisiológico/administrativo: si falla, dejar editable como vacío en la interfaz.
   for k, lo, hi in [
     ("edad", 1, 120), ("peso", 20, 250), ("altura", 80, 230), ("imc", 10, 80), ("sc", 0.5, 3.5),
     ("pas_radial", 50, 260), ("pad_radial", 30, 160), ("pam_radial", 40, 200), ("pp_radial", 10, 120),
     ("pas_central", 50, 260), ("pad_central", 30, 160), ("pam_central", 40, 200), ("pp_central", 10, 120),
-    ("fc", 25, 180), ("au", -80, 100), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 10, 60), ("apc", 0.2, 3.5)
+    ("fc", 25, 180), ("au", -80, 100), ("iau", -80, 100), ("rvse", 0, 300), ("pe", 5, 80), ("apc", -100, 150)
   ]:
     v = to_float(data.get(k))
     if np.isnan(v) or not (lo <= v <= hi):
@@ -4986,7 +5075,7 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
       ["RVSE equipo", "", _fmt(row.get("rvse")), "%"],
       ["RVSE calculado", "", _fmt(sep_metrics.get("rvse_calculado_%")), "%"],
       ["PE", "", _fmt(row.get("pe")), "%"],
-      ["APC", "", _fmt(row.get("apc")), "relación"],
+      ["APC", "", _fmt(row.get("apc")), "mmHg"],
       ["SAHA P90 edad/sexo", "", saha_p90, "mmHg"],
       ["SAHA z / percentil", "", saha_zpct, ""],
       ["LEAD IAu P90 edad/sexo", "", saha_aix_p90, "%"],
@@ -5297,7 +5386,7 @@ sello_png = read_uploaded_image_bytes(sello_file)
 
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
-fields = ["paciente","estudio","fecha","hora","obra_social","edad","sexo","peso","altura","imc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
+fields = ["paciente","estudio","fecha","hora","obra_social","edad","sexo","peso","altura","imc","sc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
 row = {}
 for i, f in enumerate(fields):
   with cols[i%4]:
