@@ -1079,7 +1079,60 @@ def _layout_lines_from_pdf(pdf_bytes, preferred_page_index=1):
 
 
 def _numeric_values_in_text(txt):
+  # Tolera signo menos Unicode y números entre paréntesis, habituales en PDFs PAC.
+  txt = safe_text(txt).replace("−", "-").replace("–", "-").replace("—", "-")
   return [to_float(x) for x in re.findall(r"[-+]?\d+(?:[\.,]\d+)?", txt)]
+
+
+def _normalize_central_metric_text(txt):
+  """Normaliza etiquetas PAC partidas por el motor PDF/OCR.
+
+  Ejemplos recuperados: A P C, A.P.C., A-P-C, I Au, I A u, A u, R V S E.
+  La normalización de Au evita convertir IAu en Au.
+  """
+  t = safe_text(txt)
+  t = t.replace("−", "-").replace("–", "-").replace("—", "-")
+  # Etiquetas compuestas: primero las más largas para evitar colisiones.
+  t = re.sub(r"(?i)(?<![A-Za-z])A\s*[.\-]?\s*P\s*[.\-]?\s*C\.?(?![A-Za-z])", "APC", t)
+  t = re.sub(r"(?i)(?<![A-Za-z])I\s*[.\-]?\s*A\s*[.\-]?\s*u(?![A-Za-z])", "IAu", t)
+  t = re.sub(r"(?i)(?<![A-Za-z])R\s*[.\-]?\s*V\s*[.\-]?\s*S\s*[.\-]?\s*E(?![A-Za-z])", "RVSE", t)
+  t = re.sub(r"(?i)(?<![A-Za-z])P\s*[.\-]?\s*E(?![A-Za-z])", "PE", t)
+  # Au aislado / partido. El lookbehind impide tomar la parte 'Au' de IAu.
+  t = re.sub(r"(?i)(?<![A-Za-z])A\s*[.\-]?\s*u\.?(?![A-Za-z])", "Au", t)
+  return _collapse_spaces(t)
+
+
+def _extract_central_metric_value(txt, metric):
+  """Extrae el valor principal de Au/APC y otros parámetros centrales.
+
+  Tolera unidad opcional, ':', '=', paréntesis y una tolerancia posterior '+/-'.
+  Siempre toma el primer valor asociado a la etiqueta, no la DE/tolerancia.
+  """
+  t = _normalize_central_metric_text(txt)
+  metric = str(metric or "").lower()
+  num = r"([-+]?\d+(?:[\.,]\d+)?)"
+  patterns = {
+    "apc": [
+      rf"\bAPC\b\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"Amplificaci[oó]n\s+Perif[eé]rico[- ]?Central\s*(?::|=)?\s*[\(\[]?\s*{num}",
+    ],
+    "au": [
+      rf"(?<!I)\bAu\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"(?:Presi[oó]n|Onda)?\s*de\s+Aumentaci[oó]n\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+      rf"Aumentaci[oó]n\s+A[oó]rtica(?:\s+Central)?\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}",
+    ],
+    "iau": [rf"\bIAu\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+    "rvse": [rf"\bRVSE\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+    "pe": [rf"\bPE\b\s*(?:%)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+    "pas_central": [rf"\bPAS\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+    "pp_central": [rf"\bPP\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*{num}"],
+  }
+  for pat in patterns.get(metric, []):
+    matches = list(re.finditer(pat, t, flags=re.I))
+    if matches:
+      # En texto global, la última aparición suele ser la tabla central real.
+      return to_float(matches[-1].group(1))
+  return np.nan
 
 
 def _extract_layout_fields_from_pdf(pdf_bytes):
@@ -1172,21 +1225,32 @@ def _extract_layout_fields_from_pdf(pdf_bytes):
         out["fc"] = vals[0]
         break
 
-  # 4) Parámetros hemodinámicos centrales / aumentaciones. Buscar filas específicas.
+  # 4) Parámetros hemodinámicos centrales / aumentaciones.
+  # Normalización reforzada para PDFs que separan letras: A P C, A.P.C., A u, I Au.
   central_map = {
     "PAS": "pas_central", "PP": "pp_central", "Au": "au", "IAu": "iau",
     "RVSE": "rvse", "PE": "pe", "APC": "apc"
   }
   for ln in lines:
-    txt = ln["text"]
+    txt = _normalize_central_metric_text(ln["text"])
     for lab, key in central_map.items():
-      if re.match(rf"^\s*{lab}\b", txt, flags=re.I):
-        # Las filas centrales suelen traer unidad y/o +/-: 'Au mmHg +8 +/-1'
-        if lab in ["Au", "IAu", "RVSE", "PE", "APC"] or re.search(r"mmHg|%|\+/-", txt, flags=re.I):
+      # La etiqueta puede no quedar al inicio visual por columnas o unidades.
+      label_pat = r"(?<!I)\bAu\b" if lab == "Au" else rf"\b{re.escape(lab)}\b"
+      if re.search(label_pat, txt, flags=re.I):
+        v = _extract_central_metric_value(txt, key)
+        if not np.isnan(v):
+          out[key] = v
+        else:
+          # Respaldo por números de la misma fila: el primero es el valor principal,
+          # los posteriores suelen ser tolerancia +/-.
           vals = _numeric_values_in_text(txt)
           if vals:
-            # Para PAS/PP central, no pisar si la tabla radial/central ya extrajo lo correcto salvo que sea sección central con unidad.
-            out[key] = vals[0]
+            if key == "apc":
+              plaus = [x for x in vals if 0.2 <= x <= 3.5]
+              if plaus:
+                out[key] = plaus[0]
+            else:
+              out[key] = vals[0]
   return out
 
 
@@ -1309,8 +1373,11 @@ def _numbers_from_row_words(rowwords, x_min=None, x_max=None):
       continue
     if x_max is not None and x0 > x_max:
       continue
-    if re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?", str(txt).strip()):
-      vals.append((x0, to_float(txt)))
+    token = str(txt).strip().replace("−", "-").replace("–", "-").replace("—", "-")
+    # El equipo puede exportar APC como '(1.08)' o '[1,08]'.
+    token = token.strip("()[]{}:;=")
+    if re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?", token):
+      vals.append((x0, to_float(token)))
   return vals
 
 
@@ -1411,7 +1478,7 @@ def _extract_tables_by_coordinates(pdf_bytes):
       if not (row["y"] > 0.55*H and min(w[0] for w in row["words"]) > 0.25*W):
         continue
     words = row["words"]
-    text = row["text"].replace("I Au", "IAu")
+    text = _normalize_central_metric_text(row["text"])
     # Tomar etiqueta como primera palabra o cerca del inicio de la fila.
     lab = None
     for cand in ["IAu", "RVSE", "APC", "PAS", "PP", "Au", "PE"]:
@@ -1422,7 +1489,8 @@ def _extract_tables_by_coordinates(pdf_bytes):
     # Buscar primer número situado después de la etiqueta y después de unidad; evita capturar tolerancias +/-.
     label_x1 = None
     for w in words:
-      if re.fullmatch(lab, w[4], re.I) or (lab == "IAu" and re.fullmatch(r"I?Au", w[4], re.I)):
+      wt = _normalize_central_metric_text(w[4])
+      if re.fullmatch(lab, wt, re.I) or (lab == "IAu" and re.fullmatch(r"I?Au", wt, re.I)):
         label_x1 = w[2]; break
     if label_x1 is None:
       label_x1 = min(w[0] for w in words)
@@ -1431,12 +1499,16 @@ def _extract_tables_by_coordinates(pdf_bytes):
       # En filas con '+/-', el primer número tras etiqueta/unidad es el valor principal.
       out[param_labels[lab]] = nums[0][1]
 
-  # APC del recuadro: 'APC:' '(1.08)' suele estar en el panel de curva superior izquierdo.
+  # APC del recuadro: tolera 'APC: (1.08)', 'A P C', 'A.P.C.' y valor en token separado.
   for row in rows:
-    if re.search(r"\bAPC\b", row["text"], re.I):
+    rowtxt = _normalize_central_metric_text(row["text"])
+    if re.search(r"\bAPC\b", rowtxt, re.I):
+      vtxt = _extract_central_metric_value(rowtxt, "apc")
+      if not np.isnan(vtxt) and 0.2 <= vtxt <= 3.5:
+        out["apc"] = vtxt
+        break
       nums = _numbers_from_row_words(row["words"])
       if nums:
-        # suele ser decimal 1.08; preferir valor entre 0.2 y 3.5
         valid = [v for _, v in nums if 0.2 <= v <= 3.5]
         if valid:
           out["apc"] = valid[0]
@@ -1444,26 +1516,39 @@ def _extract_tables_by_coordinates(pdf_bytes):
   return out
 
 def _extract_central_params_global(flat_text):
-  """Extrae Au/IAu/RVSE/PE/APC y corrige PAS/PP centrales con patrones globales robustos."""
-  out={}
-  txt=_collapse_spaces(flat_text).replace("I Au", "IAu").replace("R V S E", "RVSE").replace("P E", "PE")
-  # APC aparece en el recuadro superior: APC: (1.08)
-  m=re.search(r"\bAPC\b\s*:?\s*\(?\s*([-+]?\d+(?:[\.,]\d+)?)", txt, re.I)
-  if m: out["apc"] = to_float(m.group(1))
-  # Parámetros centrales: usar aparición con unidad y +/- para evitar tabla radial/central
-  patterns={
-    "pas_central": r"\bPAS\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
-    "pp_central": r"\bPP\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
-    "au": r"(?<!I)\bAu\b\s*mmHg\s*([-+]?\d+(?:[\.,]\d+)?)",
-    "iau": r"\bIAu\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
-    "rvse": r"\bRVSE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
-    "pe": r"\bPE\b\s*%\s*([-+]?\d+(?:[\.,]\d+)?)",
-  }
-  for k,pat in patterns.items():
-    ms=list(re.finditer(pat, txt, re.I))
-    if ms:
-      # tomar la última suele corresponder a la tabla de parámetros, no a leyenda
-      out[k]=to_float(ms[-1].group(1))
+  """Extrae Au/IAu/RVSE/PE/APC con tolerancia a texto partido u OCR.
+
+  Corrige variantes frecuentes del PDF: A P C, A.P.C., APC:(1.08),
+  A u mmHg +8 +/-1, I Au, signos Unicode y etiquetas separadas por columnas.
+  """
+  out = {}
+  txt = _normalize_central_metric_text(flat_text)
+
+  for key in ("apc", "au", "iau", "rvse", "pe", "pas_central", "pp_central"):
+    v = _extract_central_metric_value(txt, key)
+    if not np.isnan(v):
+      out[key] = v
+
+  # Respaldo especial APC: buscar ventanas cortas alrededor de la etiqueta para no
+  # perder el valor cuando pdfplumber intercala texto de otra columna.
+  if "apc" not in out:
+    for m in re.finditer(r"\bAPC\b", txt, re.I):
+      win = txt[m.start():m.start()+100]
+      nums = _numeric_values_in_text(win)
+      plaus = [x for x in nums if 0.2 <= x <= 3.5]
+      if plaus:
+        out["apc"] = plaus[0]
+        break
+
+  # Respaldo especial Au: ventana posterior a Au, excluyendo IAu.
+  if "au" not in out:
+    for m in re.finditer(r"(?<!I)\bAu\b", txt, re.I):
+      win = txt[m.start():m.start()+100]
+      nums = _numeric_values_in_text(win)
+      plaus = [x for x in nums if -80 <= x <= 100]
+      if plaus:
+        out["au"] = plaus[0]
+        break
   return out
 
 
@@ -1745,47 +1830,41 @@ def pair_from_block(block, label):
 def _parse_central_parameters(flat_text, data):
   """Extrae parámetros centrales con tolerancia a tablas partidas del PDF.
 
-  Incluye PAS, PP, Au, IAu, RVSE, PE y APC si está disponible.
-  La prioridad es la sección 'Parámetros hemodinámicos centrales'.
+  Incluye PAS, PP, Au, IAu, RVSE, PE y APC. Usa normalización de etiquetas
+  partidas y un respaldo global para APC/Au fuera de la sección central.
   """
-  msec = re.search(r"Par[aá]metros\s+hemodin[aá]micos\s+centrales(.*?)(?:Conclusiones|Conclusi[oó]n|PAS\s+Presi[oó]n|Pulso|$)", flat_text, re.I)
-  sec = msec.group(1) if msec else flat_text
-  sec = _collapse_spaces(sec)
+  text_norm = _normalize_central_metric_text(flat_text)
+  msec = re.search(
+    r"Par[aá]metros\s+hemodin[aá]micos\s+centrales(.*?)(?:Conclusiones|Conclusi[oó]n|PAS\s+Presi[oó]n|Pulso|$)",
+    text_norm, re.I
+  )
+  sec = msec.group(1) if msec else text_norm
+  sec = _normalize_central_metric_text(sec)
 
-  def val(label, aliases=()):
-    labels = [label] + list(aliases)
-    for lab in labels:
-      # Label seguido opcionalmente de unidad y valor con signo. Evita que Au capture IAu usando lookbehind negativo.
-      if lab.lower() == "au":
-        pat = re.compile(r"(?<!I)\bAu\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
-      else:
-        pat = re.compile(rf"\b{lab}\b\s*(?:mmHg|%|lpm|m/s)?\s*([-+]?\d+(?:[\.,]\d+)?)", re.I)
-      mm = pat.search(sec)
-      if mm:
-        return to_float(mm.group(1))
-    return np.nan
+  mapping = {}
+  for key in ("pas_central", "pp_central", "au", "iau", "rvse", "pe", "apc"):
+    v = _extract_central_metric_value(sec, key)
+    if np.isnan(v):
+      # APC suele estar fuera de la tabla central; Au puede quedar mezclado por columnas.
+      v = _extract_central_metric_value(text_norm, key)
+    mapping[key] = v
 
-  mapping = {
-    "pas_central": val("PAS"),
-    "pp_central": val("PP"),
-    "au": val("Au", aliases=[r"Aumentaci[oó]n\s+A[oó]rtica\s+Central"]),
-    "iau": val("IAu", aliases=[r"Indice\s+de\s+Aumentaci[oó]n\s+Central", r"Índice\s+de\s+Aumentaci[oó]n\s+Central"]),
-    "rvse": val("RVSE", aliases=[r"Relaci[oó]n\s+de\s+Viabilidad\s+Sub\s*Endoc[aá]rdica"]),
-    "pe": val("PE", aliases=[r"Periodo\s+Eyectivo", r"Per[ií]odo\s+Eyectivo"]),
-    "apc": val("APC", aliases=[r"Amplificaci[oó]n\s+Perif[eé]rico\s*Central"]),
-  }
-
-  # Respaldo por patrón posicional de la tabla central en la captura:
-  # PAS mmHg 119 +/-1 PP mmHg 31 +/-2 Au mmHg +8 +/-1 IAu % +25 +/-3 RVSE % 180 +/-3 PE % 32.8
-  positional = re.findall(r"\b(PAS|PP|Au|IAu|RVSE|PE|APC)\b\s*(?:mmHg|%)?\s*([-+]?\d+(?:[\.,]\d+)?)", sec, flags=re.I)
-  for lab, num in positional:
+  # Respaldo posicional de filas centrales, incluyendo etiquetas partidas ya normalizadas.
+  positional = re.findall(
+    r"(?<!I)\b(Au)\b\s*(?:mmHg)?\s*(?::|=)?\s*[\(\[]?\s*([-+]?\d+(?:[\.,]\d+)?)"
+    r"|\b(IAu|RVSE|PE|APC|PAS|PP)\b\s*(?:mmHg|%)?\s*(?::|=)?\s*[\(\[]?\s*([-+]?\d+(?:[\.,]\d+)?)",
+    sec, flags=re.I
+  )
+  for au_lab, au_num, lab2, num2 in positional:
+    lab = au_lab or lab2
+    num = au_num or num2
     key = {"pas":"pas_central", "pp":"pp_central", "au":"au", "iau":"iau", "rvse":"rvse", "pe":"pe", "apc":"apc"}.get(lab.lower())
     if key and np.isnan(to_float(mapping.get(key, np.nan))):
       mapping[key] = to_float(num)
 
   for k, v in mapping.items():
-    if not np.isnan(v):
-      data[k] = v
+    if not np.isnan(to_float(v)):
+      data[k] = to_float(v)
 
 
 def _is_bad_patient_value(v):
