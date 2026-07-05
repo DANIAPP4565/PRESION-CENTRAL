@@ -2634,33 +2634,80 @@ def make_waveform(row, n=512):
   p = cDBP + (p - p.min()) * (cSBP - cDBP) / max(p.max() - p.min(), 1e-6)
   return pd.DataFrame({"tiempo_ms": t * 1000, "presion_central_mmHg": p})
 
-def harmonic_analysis(wave_df):
-  """Análisis armónico de la onda central real.
+def harmonic_analysis(wave_df, max_display_harmonics=10):
+  """Análisis armónico FFT de la onda central real.
 
-  Además de frecuencia, amplitud y energía relativa, conserva la fase de cada
-  componente de la FFT. Esa fase permite reconstruir la contribución instantánea
-  de cada armónico durante la animación, sincronizada con la curva central real.
+  La tabla devuelta conserva H1-H10 (o menos si la señal no alcanza) para una
+  visualización compacta. Las métricas globales HD y H4+ se calculan, en cambio,
+  sobre TODO el espectro positivo disponible (excluido DC) y se guardan en
+  ``DataFrame.attrs``. Así se evita llamar H4+ o HD a una suma truncada en H10.
+
+  Además de frecuencia, amplitud y energía relativa, se conserva la fase de cada
+  componente mostrada para reconstrucción/animación sincronizada con la curva real.
   """
-  y = wave_df.iloc[:,1].astype(float).to_numpy()
-  t = wave_df.iloc[:,0].astype(float).to_numpy()
+  if wave_df is None or len(wave_df) < 4:
+    return pd.DataFrame(columns=["armónico", "frecuencia_hz", "amplitud", "fase_rad", "energia_relativa_%"])
+
+  y = pd.to_numeric(wave_df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
+  t = pd.to_numeric(wave_df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
+  ok = np.isfinite(y) & np.isfinite(t)
+  y, t = y[ok], t[ok]
+  if len(y) < 4:
+    return pd.DataFrame(columns=["armónico", "frecuencia_hz", "amplitud", "fase_rad", "energia_relativa_%"])
+
+  order = np.argsort(t)
+  y, t = y[order], t[order]
+  dt_ms = np.diff(t)
+  dt_ms = dt_ms[np.isfinite(dt_ms) & (dt_ms > 0)]
+  if len(dt_ms) == 0:
+    return pd.DataFrame(columns=["armónico", "frecuencia_hz", "amplitud", "fase_rad", "energia_relativa_%"])
+  dt_s = float(np.median(dt_ms)) / 1000.0
+  if not np.isfinite(dt_s) or dt_s <= 0:
+    return pd.DataFrame(columns=["armónico", "frecuencia_hz", "amplitud", "fase_rad", "energia_relativa_%"])
+
   y0 = y - np.mean(y)
   fft = np.fft.rfft(y0)
-  amp = np.abs(fft) / len(y0) * 2
-  freq = np.fft.rfftfreq(len(y0), d=np.mean(np.diff(t))/1000.0)
+  amp = np.abs(fft) / len(y0) * 2.0
+  freq = np.fft.rfftfreq(len(y0), d=dt_s)
   phase = np.angle(fft)
-  harmonic_index = np.arange(len(freq), dtype=int)
-  total_energy = np.sum(amp[1:]**2) if len(amp) > 1 else np.sum(amp**2)
+
+  # Espectro positivo sin DC: H1 corresponde al primer bin positivo del ciclo.
+  pos_amp = amp[1:]
+  pos_freq = freq[1:]
+  pos_phase = phase[1:]
+  if len(pos_amp) == 0:
+    return pd.DataFrame(columns=["armónico", "frecuencia_hz", "amplitud", "fase_rad", "energia_relativa_%"])
+
+  pos_energy = np.square(pos_amp)
+  total_energy = float(np.nansum(pos_energy))
   if not np.isfinite(total_energy) or total_energy <= 0:
-    total_energy = np.sum(amp**2) if np.sum(amp**2) > 0 else 1.0
+    total_energy = 1.0
+  pos_energy_pct = pos_energy / total_energy * 100.0
+
+  n_show = int(max(1, min(int(max_display_harmonics), len(pos_amp))))
   df = pd.DataFrame({
-    "armónico": harmonic_index,
-    "frecuencia_hz": freq,
-    "amplitud": amp,
-    "fase_rad": phase,
+    "armónico": np.arange(1, n_show + 1, dtype=int),
+    "frecuencia_hz": pos_freq[:n_show],
+    "amplitud": pos_amp[:n_show],
+    "fase_rad": pos_phase[:n_show],
+    "energia_relativa_%": pos_energy_pct[:n_show],
   })
-  df["energia_relativa_%"] = (df["amplitud"]**2) / total_energy * 100
-  df = df.iloc[1:11].reset_index(drop=True)
-  df["armónico"] = np.arange(1, len(df)+1, dtype=int)
+
+  fundamental_energy = float(pos_energy[0]) if len(pos_energy) > 0 else np.nan
+  higher_energy = float(np.nansum(pos_energy[1:])) if len(pos_energy) > 1 else 0.0
+  hd_ratio_full = higher_energy / fundamental_energy if np.isfinite(fundamental_energy) and fundamental_energy > 0 else np.nan
+  h4plus_full = float(np.nansum(pos_energy_pct[3:])) if len(pos_energy_pct) > 3 else 0.0
+  dom_i = int(np.nanargmax(pos_energy_pct)) if np.any(np.isfinite(pos_energy_pct)) else 0
+
+  # Metadatos globales: no dependen del truncado visual H1-H10.
+  df.attrs.update({
+    "full_spectrum_harmonics": int(len(pos_amp)),
+    "frequency_resolution_hz": float(pos_freq[0]) if len(pos_freq) else np.nan,
+    "hd_ratio_full": float(hd_ratio_full) if np.isfinite(hd_ratio_full) else np.nan,
+    "hd_percent_full": float(hd_ratio_full * 100.0) if np.isfinite(hd_ratio_full) else np.nan,
+    "h4plus_energy_percent_full": h4plus_full,
+    "dominant_frequency_hz_full": float(pos_freq[dom_i]) if len(pos_freq) > dom_i else np.nan,
+  })
   return df
 
 
@@ -2682,11 +2729,12 @@ HARMONIC_LONGITUDINAL_MDC_PCT = {
 
 
 def harmonic_distortion_metrics(hdf):
-  """Métricas armónicas descriptivas y HD energético.
+  """Métricas armónicas continuas y HD energético.
 
-  Importante: HD, H1, H4+ y frecuencia dominante se consideran métricas de
-  investigación/morfología. No se convierten en diagnóstico de rigidez ni complejidad
-  patológica mediante cortes universales.
+  HD y H4+ usan el espectro positivo completo cuando ``harmonic_analysis`` dejó
+  esos metadatos disponibles. La tabla/gráfico puede seguir mostrando solo H1-H10.
+  No se convierten estas métricas en diagnóstico de rigidez ni en fenotipo mediante
+  puntos de corte universales.
   """
   out = {
     "ok": False,
@@ -2697,7 +2745,8 @@ def harmonic_distortion_metrics(hdf):
     "h4plus_energy_percent": np.nan,
     "dominant_frequency_hz": np.nan,
     "distance_to_3_5_hz": np.nan,
-    "classification": "experimental / sin corte clínico universal",
+    "spectrum_harmonics_analyzed": 0,
+    "classification": "métricas continuas cuantificadas / sin corte clínico universal",
   }
   try:
     if hdf is None or len(hdf) == 0:
@@ -2705,23 +2754,41 @@ def harmonic_distortion_metrics(hdf):
     amp = pd.to_numeric(hdf.get("amplitud"), errors="coerce").to_numpy(dtype=float)
     ene = pd.to_numeric(hdf.get("energia_relativa_%"), errors="coerce").to_numpy(dtype=float)
     fre = pd.to_numeric(hdf.get("frecuencia_hz"), errors="coerce").to_numpy(dtype=float)
-    ok_amp = np.isfinite(amp)
-    if len(amp) < 1 or not np.any(ok_amp) or not np.isfinite(amp[0]) or abs(amp[0]) <= 1e-12:
+    if len(amp) < 1 or not np.isfinite(amp[0]) or abs(amp[0]) <= 1e-12:
       return out
-    fundamental_energy = float(amp[0] ** 2)
-    higher_energy = float(np.nansum(np.square(amp[1:]))) if len(amp) > 1 else 0.0
-    hd_ratio = higher_energy / fundamental_energy if fundamental_energy > 0 else np.nan
-    dom_i = int(np.nanargmax(ene)) if len(ene) and np.any(np.isfinite(ene)) else 0
-    dom_freq = float(fre[dom_i]) if len(fre) > dom_i and np.isfinite(fre[dom_i]) else np.nan
+
+    attrs = getattr(hdf, "attrs", {}) or {}
+    hd_ratio = to_float(attrs.get("hd_ratio_full"))
+    if np.isnan(hd_ratio):
+      fundamental_energy = float(amp[0] ** 2)
+      higher_energy = float(np.nansum(np.square(amp[1:]))) if len(amp) > 1 else 0.0
+      hd_ratio = higher_energy / fundamental_energy if fundamental_energy > 0 else np.nan
+
+    h4plus = to_float(attrs.get("h4plus_energy_percent_full"))
+    if np.isnan(h4plus):
+      h4plus = float(np.nansum(ene[3:])) if len(ene) > 3 else 0.0
+
+    dom_freq = to_float(attrs.get("dominant_frequency_hz_full"))
+    if np.isnan(dom_freq):
+      dom_i = int(np.nanargmax(ene)) if len(ene) and np.any(np.isfinite(ene)) else 0
+      dom_freq = float(fre[dom_i]) if len(fre) > dom_i and np.isfinite(fre[dom_i]) else np.nan
+
+    n_spec = attrs.get("full_spectrum_harmonics", len(amp))
+    try:
+      n_spec = int(n_spec)
+    except Exception:
+      n_spec = int(len(amp))
+
     out.update({
       "ok": True,
       "hd_ratio": hd_ratio,
       "hd_percent": hd_ratio * 100.0 if np.isfinite(hd_ratio) else np.nan,
       "h1_energy_percent": float(ene[0]) if len(ene) > 0 and np.isfinite(ene[0]) else np.nan,
       "h2_energy_percent": float(ene[1]) if len(ene) > 1 and np.isfinite(ene[1]) else np.nan,
-      "h4plus_energy_percent": float(np.nansum(ene[3:])) if len(ene) > 3 else np.nan,
+      "h4plus_energy_percent": h4plus,
       "dominant_frequency_hz": dom_freq,
       "distance_to_3_5_hz": abs(dom_freq - HARMONIC_RESONANCE_REFERENCE_HZ) if np.isfinite(dom_freq) else np.nan,
+      "spectrum_harmonics_analyzed": n_spec,
     })
     return out
   except Exception:
@@ -4524,8 +4591,8 @@ def interpret_harmonic_profile(hdf):
       f"El análisis armónico muestra H1 {h1:.1f}%, H2 {h2:.1f}% y energía acumulada desde H4 {h4p:.1f}%. "
       f"La distorsión armónica energética (HD = energía por encima de la fundamental / energía fundamental) es {hd:.1f}%. "
       f"La frecuencia dominante es {domf:.2f} Hz. La referencia cercana a 3,5 Hz se conserva solo como contexto mecanístico, "
-      "no como límite normal/patológico. H1, H4+ y HD se informan como métricas de investigación y morfología, sin aplicar "
-      "los antiguos cortes H1 <35% o H4+ >=25% ni un umbral clínico universal de HD."
+      "no como límite normal/patológico. HD, H1, H2, H4+ y frecuencia dominante se informan como métricas continuas "
+      "de caracterización espectral, sin aplicar los antiguos cortes H1 <35% o H4+ >=25% ni un umbral clínico universal de HD."
     )
   except Exception:
     return "El perfil armónico no pudo interpretarse en forma estable, aunque se conserva el gráfico y la tabla espectral para revisión visual."
@@ -4578,8 +4645,8 @@ def build_canonical_diagnostic_state(row, sep_metrics=None, hdf=None):
   - Reflexión: RM por percentiles de edad/método; RI complementaria.
   - Reserva subendocárdica: RVSE/SEVR calculado.
 
-  Dominio experimental:
-  - Armónicos/HD: descriptivo, nunca define por sí solo un fenotipo clínico.
+  Dominio espectral cuantificado:
+  - Armónicos/HD: métricas continuas de caracterización espectral; nunca definen por sí solas un fenotipo clínico.
   """
   sep_metrics = sep_metrics or {}
 
@@ -4766,14 +4833,19 @@ def build_canonical_diagnostic_state(row, sep_metrics=None, hdf=None):
       "RVSE/SEVR calculado conservado.", rvse, ">=120%", "normal"
     )
 
-  # 7) Armónicos: investigación; nunca alteración clínica transversal.
+  # 7) Armónicos: dominio espectral cuantificado; nunca alteración clínica transversal.
   hm = harmonic_distortion_metrics(hdf)
   if hm.get("ok"):
     harm_d = _domain(
-      "experimental", False, "Análisis armónico", "perfil armónico experimental",
-      "HD, H1, H4+ y frecuencia dominante son descriptivos; sin umbral clínico universal.",
-      hm.get("hd_percent", np.nan), "sin corte clínico universal", "experimental", True,
-      extra={"metrics": hm}
+      "cuantificado", False, "Análisis armónico", "perfil armónico cuantificado",
+      "HD, H1, H2, H4+ y frecuencia dominante se informan como métricas continuas de caracterización espectral; HD y H4+ se calculan sobre el espectro positivo completo disponible.",
+      hm.get("hd_percent", np.nan), "métricas continuas; sin umbral clínico universal", "cuantificado", False,
+      extra={
+        "metrics": hm,
+        "quantified": True,
+        "diagnostic_use": False,
+        "defines_phenotype": False,
+      }
     )
   else:
     harm_d = _domain(
@@ -4974,17 +5046,23 @@ def _didactic_grade_wave(sep_metrics, row=None):
   )
 
 def _didactic_grade_harmonics(hdf):
-  """Conclusión didáctica armónica en nivel de investigación, sin binarizar normal/anormal."""
+  """Conclusión didáctica armónica cuantificada, sin binarizar normal/anormal."""
   try:
     m = harmonic_distortion_metrics(hdf)
     if not m.get("ok"):
       raise ValueError("sin datos armónicos")
+    hd = format_optional(m.get("hd_percent"), 1)
+    h1 = format_optional(m.get("h1_energy_percent"), 1)
+    h2 = format_optional(m.get("h2_energy_percent"), 1)
+    h4p = format_optional(m.get("h4plus_energy_percent"), 1)
+    domf = format_optional(m.get("dominant_frequency_hz"), 2)
     return (
-      "El análisis armónico describe la distribución espectral y calcula HD energético sobre la curva central real. "
-      "Estas métricas se consideran exploratorias/de investigación: no se aplica un punto de corte clínico universal, "
-      "ni H1 <35% ni H4+ >=25% definen por sí solos rigidez o complejidad patológica.",
-      "perfil armónico experimental, sin clasificación diagnóstica transversal.",
-      "experimental",
+      f"El análisis armónico cuantificado sobre la curva central real muestra HD energético {hd}%, "
+      f"H1 {h1}%, H2 {h2}%, H4+ {h4p}% y frecuencia dominante {domf} Hz. "
+      "Estas métricas se interpretan como variables continuas de caracterización espectral; no se utilizan aisladamente "
+      "para clasificar normalidad/anormalidad, diagnosticar rigidez arterial ni definir el fenotipo vascular integrado.",
+      f"perfil armónico cuantificado: HD {hd}%, H1 {h1}%, H2 {h2}%, H4+ {h4p}%, frecuencia dominante {domf} Hz.",
+      "cuantificado",
     )
   except Exception:
     return (
@@ -5079,12 +5157,15 @@ def build_automatic_integrated_conclusion(row, sep_metrics=None, hdf=None):
   if not np.isnan(to_float(tref)): technical.append(f"Tref {_fmt(tref,0,' ms')} continuo")
   if not np.isnan(to_float(rvse.get("value"))): technical.append(f"RVSE {_fmt(rvse.get('value'),1,'%')}")
 
-  if harm["status"] == "experimental":
+  if harm["status"] == "cuantificado":
     hm = harm.get("metrics", {})
     harmonic_phrase = (
-      f"Análisis armónico experimental: HD {_fmt(hm.get('hd_percent'),1,'%')}, "
-      f"H1 {_fmt(hm.get('h1_energy_percent'),1,'%')}, H4+ {_fmt(hm.get('h4plus_energy_percent'),1,'%')}; "
-      "sin clasificación patológica transversal."
+      f"Análisis armónico: HD energético {_fmt(hm.get('hd_percent'),1,'%')}, "
+      f"H1 {_fmt(hm.get('h1_energy_percent'),1,'%')}, "
+      f"H2 {_fmt(hm.get('h2_energy_percent'),1,'%')}, "
+      f"H4+ {_fmt(hm.get('h4plus_energy_percent'),1,'%')}, "
+      f"frecuencia dominante {_fmt(hm.get('dominant_frequency_hz'),2,' Hz')}. "
+      "Métricas continuas de caracterización espectral, sin clasificación patológica transversal por un corte universal."
     )
   else:
     harmonic_phrase = "Análisis armónico no clasificable por datos insuficientes."
@@ -5117,7 +5198,7 @@ def build_automatic_integrated_conclusion(row, sep_metrics=None, hdf=None):
     "reflexion_alterada": d["reflexion"]["altered"],
     "rvse_alterado": d["rvse"]["altered"],
     "armonicos_alterados": False,
-    "armonicos_experimentales": d["armonicos"]["status"] == "experimental",
+    "armonicos_cuantificados": d["armonicos"]["status"] == "cuantificado",
     "cantidad_dominios_alterados": state["count_altered"],
     "frase_global": global_phrase,
     "fenotipo": phenotype,
@@ -5203,6 +5284,19 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
       valtxt = _fmt(value, 1)
     return [x["label"], x["status"], valtxt, x.get("criterion", ""), x.get("short", "")]
 
+  harm_domain = d["armonicos"]
+  harm_metrics = harm_domain.get("metrics", {}) if harm_domain.get("status") == "cuantificado" else {}
+  if harm_metrics:
+    harm_value = (
+      f"HD {_fmt(harm_metrics.get('hd_percent'),1,'%')}; "
+      f"H1 {_fmt(harm_metrics.get('h1_energy_percent'),1,'%')}; "
+      f"H2 {_fmt(harm_metrics.get('h2_energy_percent'),1,'%')}; "
+      f"H4+ {_fmt(harm_metrics.get('h4plus_energy_percent'),1,'%')}; "
+      f"fdom {_fmt(harm_metrics.get('dominant_frequency_hz'),2,' Hz')}"
+    )
+  else:
+    harm_value = "no disponible"
+
   table = [
     ["Dominio", "Estado", "Valor", "Criterio", "Conclusión"],
     _row("hta_central"),
@@ -5211,7 +5305,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     _row("aumentacion"),
     _row("reflexion"),
     _row("rvse"),
-    ["Análisis armónico", d["armonicos"]["status"], _fmt(d["armonicos"].get("value"),1,"%"), d["armonicos"].get("criterion", ""), d["armonicos"].get("short", "")],
+    ["Análisis armónico", harm_domain["status"], harm_value, harm_domain.get("criterion", ""), harm_domain.get("short", "")],
   ]
 
   altered_text = "; ".join(d[k]["short"] for k in state["altered_keys"])
@@ -5223,7 +5317,7 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     f"Dominios clínicos alterados: {altered_text}. "
     "La HTA central y la carga pulsátil se clasifican por separado; PPA, IAu/AIx, RM y RVSE conservan estados independientes. "
     "RI es complementario de RM y no se cuenta como evidencia adicional; Tref es continuo. "
-    "HD, H1, H4+ y frecuencia dominante son métricas de investigación y no generan fenotipos armónicos patológicos ni diagnóstico de rigidez. "
+    "HD, H1, H2, H4+ y frecuencia dominante son métricas continuas de caracterización espectral y no generan fenotipos armónicos patológicos ni diagnóstico de rigidez. "
     f"{longitudinal_harmonic_mdc_note()}"
   )
   return phenotype, text, table
@@ -5484,24 +5578,53 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
   story.append(graph_table)
 
   story.append(Spacer(1, 2.5*mm))
-  story.append(_section("4. Tabla de análisis armónico y fenotipo final"))
+  story.append(_section("4. Análisis armónico cuantificado y fenotipo final"))
+
+  hm_pdf = harmonic_distortion_metrics(hdf)
+  if hm_pdf.get("ok"):
+    harm_summary = [
+      ["HD energético", "H1", "H2", "H4+", "Frecuencia dominante"],
+      [
+        f"{hm_pdf.get('hd_percent', np.nan):.1f}%",
+        f"{hm_pdf.get('h1_energy_percent', np.nan):.1f}%",
+        f"{hm_pdf.get('h2_energy_percent', np.nan):.1f}%",
+        f"{hm_pdf.get('h4plus_energy_percent', np.nan):.1f}%",
+        f"{hm_pdf.get('dominant_frequency_hz', np.nan):.2f} Hz",
+      ],
+    ]
+    story.append(Table(
+      [[Paragraph(pdf_text(c), styles["SmallPAC"]) for c in rr] for rr in harm_summary],
+      colWidths=[38*mm, 30*mm, 30*mm, 30*mm, 60*mm],
+      style=_table_style("#EAF2F8", 6.8)
+    ))
+    story.append(Spacer(1, 1.2*mm))
+
   harm_table = [["Armónico", "Frecuencia (Hz)", "Amplitud", "Energía relativa (%)"]]
-  for i, r in hdf.iterrows():
-    harm_table.append([str(i+1), f"{r.get('frecuencia_hz',0):.2f}", f"{r.get('amplitud',0):.3f}", f"{r.get('energia_relativa_%',0):.1f}"])
+  for _, r in hdf.iterrows():
+    harm_table.append([
+      str(int(r.get("armónico", 0))),
+      f"{r.get('frecuencia_hz',0):.2f}",
+      f"{r.get('amplitud',0):.3f}",
+      f"{r.get('energia_relativa_%',0):.1f}",
+    ])
+  story.append(Table(
+    [[Paragraph(pdf_text(c), styles["SmallPAC"]) for c in rr] for rr in harm_table],
+    colWidths=[28*mm, 48*mm, 48*mm, 64*mm],
+    style=_table_style("#EAF2F8", 6.6)
+  ))
+  story.append(Spacer(1, 1.5*mm))
+
+  # La tabla fenotípica tiene 5 columnas: se renderiza con 5 anchos explícitos.
+  # Esto corrige el desajuste previo de 5 columnas de datos contra solo 3 colWidths.
   phenotype_rows = [[Paragraph(pdf_text(cell), styles["SmallPAC"]) for cell in row_cells] for row_cells in final_phenotype_table]
-  story.append(Table([
-    [Table(harm_table, colWidths=[18*mm, 25*mm, 24*mm, 28*mm], style=_table_style("#EAF2F8", 6.6)),
-     Table(phenotype_rows, colWidths=[31*mm, 14*mm, 42*mm], style=_table_style("#D9EAF7", 6.4))]
-  ], colWidths=[98*mm, 90*mm], style=TableStyle([
-    ("VALIGN", (0,0), (-1,-1), "TOP"),
-    ("LEFTPADDING", (0,0), (-1,-1), 0),
-    ("RIGHTPADDING", (0,0), (-1,-1), 3),
-    ("TOPPADDING", (0,0), (-1,-1), 2),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-  ])))
+  story.append(Table(
+    phenotype_rows,
+    colWidths=[34*mm, 20*mm, 42*mm, 48*mm, 44*mm],
+    style=_table_style("#D9EAF7", 6.2)
+  ))
   story.append(Spacer(1, 1.5*mm))
   story.append(Paragraph(
-    "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. RM se clasifica por percentiles de edad y método (P90 como límite diagnóstico; P95 como aumento marcado); RI es complemento proporcional sin doble conteo. Tref y Tfor/Tref se informan como variables continuas sin corte universal. El análisis armónico calcula HD energético y distribución H1-Hn como métricas experimentales: no se aplican H1 <35%, H4+ >=25%, Eh 1158 N/m ni Zc 675/1103 como umbrales clínicos. La aplicabilidad es aproximada cuando el algoritmo o método difiere de la referencia publicada.",
+    "Nota metodológica: la separación Pf/Pb es una estimación clínica no invasiva. RM se clasifica por percentiles de edad y método (P90 como límite diagnóstico; P95 como aumento marcado); RI es complemento proporcional sin doble conteo. Tref y Tfor/Tref se informan como variables continuas sin corte universal. El análisis armónico cuantifica HD energético y la distribución H1-Hn como métricas continuas de caracterización espectral; HD y H4+ se calculan sobre el espectro positivo completo disponible, aunque la tabla visual muestre solo los primeros armónicos; no se aplican H1 <35%, H4+ >=25%, Eh 1158 N/m ni Zc 675/1103 como umbrales clínicos. Estas métricas no se utilizan aisladamente para diagnosticar rigidez arterial ni definir el fenotipo vascular integrado. La aplicabilidad es aproximada cuando el algoritmo o método difiere de la referencia publicada.",
     styles["SmallPAC"]
   ))
 
@@ -5754,7 +5877,7 @@ row["metodo_referencia_rmri"] = st.selectbox(
   )
 )
 st.caption("Criterio RM: <P75 esperado; P75-<P90 relativamente elevado; P90-<P95 aumentado; ≥P95 marcadamente aumentado. RI es complementario y no suma doble evidencia diagnóstica.")
-st.caption("Tref/Tfor-Tref: variables continuas de investigación, sin corte fijo universal. Armónicos: HD/H1/H4+ descriptivos-experimentales, sin diagnóstico transversal por cortes fijos.")
+st.caption("Tref/Tfor-Tref: variables continuas sin corte fijo universal. Armónicos: HD/H1/H2/H4+ y frecuencia dominante se muestran como métricas continuas de caracterización espectral, sin diagnóstico transversal por cortes fijos.")
 
 wave_df = None
 curve_error = None
@@ -5811,11 +5934,12 @@ if wave_df is not None:
   st.caption(f"Firma morfológica de curva real: {sep_metrics_preview.get('curve_id', 'sin_firma')} | Pico: {sep_metrics_preview.get('t_pico_ms', np.nan):.0f} ms | Tref retorno reflejo: {sep_metrics_preview.get('tref_ms', np.nan):.0f} ms")
   if harmonic_metrics_preview.get("ok"):
     st.info(
-      f"Análisis armónico experimental: HD energético {harmonic_metrics_preview.get('hd_percent', np.nan):.1f}%; "
+      f"Análisis armónico: HD energético {harmonic_metrics_preview.get('hd_percent', np.nan):.1f}%; "
       f"H1 {harmonic_metrics_preview.get('h1_energy_percent', np.nan):.1f}%; "
+      f"H2 {harmonic_metrics_preview.get('h2_energy_percent', np.nan):.1f}%; "
       f"H4+ {harmonic_metrics_preview.get('h4plus_energy_percent', np.nan):.1f}%; "
       f"frecuencia dominante {harmonic_metrics_preview.get('dominant_frequency_hz', np.nan):.2f} Hz. "
-      "Sin punto de corte clínico universal; no suma puntaje diagnóstico."
+      "Métricas continuas de caracterización espectral; no se usan aisladamente para diagnosticar rigidez ni definir el fenotipo vascular."
     )
     st.caption(longitudinal_harmonic_mdc_note())
 
