@@ -2531,32 +2531,31 @@ def brachial_bp_category(pas, pad):
   return "Óptimo"
 
 def central_diagnosis(row):
-  cSBP = to_float(row.get("pas_central")); cPP = to_float(row.get("pp_central"))
-  pSBP = to_float(row.get("pas_radial")); pDBP = to_float(row.get("pad_radial"))
+  """Resumen de presión central para pantalla/PDF basado en el estado canónico único."""
+  cSBP = to_float(row.get("pas_central")); pSBP = to_float(row.get("pas_radial")); pDBP = to_float(row.get("pad_radial"))
   cat = brachial_bp_category(pSBP, pDBP)
+  state = build_canonical_diagnostic_state(row, {}, None)
+  d = state["domains"]
+  hta = d["hta_central"]; pulse = d["carga_pulsatil"]; ppa_d = d["amplificacion"]; aug = d["aumentacion"]
 
-  status = central_hypertension_status(row)
-  ref = status.get("umbral", np.nan)
+  ref = hta.get("threshold", np.nan)
   amp_sbp = pSBP - cSBP if not np.isnan(pSBP) and not np.isnan(cSBP) else np.nan
-  ppa = (to_float(row.get("pp_radial")) / cPP) if cPP and not np.isnan(cPP) and cPP != 0 else np.nan
-  dx = status.get("diagnostico", "Hipertensión central: no clasificable.")
+  ppa = ppa_d.get("value", np.nan)
 
-  risk = []
-  if status.get("ok"):
-    risk.append("con hipertensión central por el criterio seleccionado" if status.get("tiene_hta_central") else "sin hipertensión central por el criterio seleccionado")
-  if not np.isnan(ppa) and ppa < 1.30:
-    risk.append("amplificación de presión de pulso reducida (<1,30)")
-  if not np.isnan(cPP) and cPP >= 50:
-    risk.append("presión de pulso central aumentada")
-  saha_aix = get_saha_aix75_reference(row)
-  if saha_aix.get("ok"):
-    risk.append(
-      "con aumentación central aumentada por IAu/AIx según P90 edad/sexo" if saha_aix.get("alterada")
-      else "sin aumentación central aumentada por IAu/AIx según P90 edad/sexo"
-    )
-  elif not np.isnan(to_float(row.get("iau"))):
-    risk.append("IAu/AIx disponible, no clasificable sin referencia válida de edad/sexo")
-  return dx, cat, ref, amp_sbp, ppa, "; ".join(risk) if risk else "sin señales hemodinámicas mayores agregadas"
+  if hta["status"] == "alterada":
+    dx = "CON HIPERTENSIÓN CENTRAL. " + hta.get("detail", "")
+  elif hta["status"] == "normal":
+    dx = "SIN HIPERTENSIÓN CENTRAL. " + hta.get("detail", "")
+  else:
+    dx = "Hipertensión central no clasificable por datos insuficientes."
+
+  risk = [
+    hta["short"],
+    pulse["short"],
+    ppa_d["short"],
+    aug["short"],
+  ]
+  return dx, cat, ref, amp_sbp, ppa, "; ".join(risk)
 
 def _norm01_from_value(value, low, high, default=0.5):
   """Normaliza un valor clínico a 0-1 para modular la morfología de la onda."""
@@ -3767,9 +3766,10 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
     if np.isnan(t_ej_fin):
       t_ej_fin = min(t_peak + 220.0, 650.0)
 
+    canonical = build_canonical_diagnostic_state(row, sep_metrics, hdf)
+    dom = canonical["domains"]
     saha_ref = get_saha_central_sbp_reference(row)
-    hta_status = central_hypertension_status(row)
-    if saha_ref.get("ok") and hta_status.get("tiene_hta_central"):
+    if dom["hta_central"].get("altered"):
       add(
         "PAS central / hipertensión central",
         fmt(pas_c, 0, " mmHg"),
@@ -3780,8 +3780,8 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
         "diagnóstica",
       )
 
-    if not np.isnan(pp_c):
-      if pp_c >= 60:
+    if dom["carga_pulsatil"].get("altered"):
+      if dom["carga_pulsatil"].get("grade") == "alta":
         add(
           "Presión de pulso central elevada",
           fmt(pp_c, 0, " mmHg"),
@@ -3791,7 +3791,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
           t_peak,
           "alta",
         )
-      elif pp_c >= 50:
+      else:
         add(
           "Presión de pulso central aumentada",
           fmt(pp_c, 0, " mmHg"),
@@ -3803,7 +3803,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
         )
 
     saha_aix = get_saha_aix75_reference(row)
-    if saha_aix.get("ok") and saha_aix.get("alterada"):
+    if dom["aumentacion"].get("altered"):
       add(
         "IAu/AIx central aumentado",
         fmt(iau, 1, "%"),
@@ -3815,8 +3815,8 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
       )
 
 
-    ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
-    if not np.isnan(ppa) and ppa < 1.30:
+    ppa = dom["amplificacion"].get("value", np.nan)
+    if dom["amplificacion"].get("altered"):
       add(
         "Amplificación central-periférica reducida",
         fmt(ppa, 2, ""),
@@ -3828,7 +3828,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
       )
 
     rmri_ref = get_rm_ri_reference(row, sep_metrics)
-    if rmri_ref.get("ok") and rmri_ref.get("rm_clasif", {}).get("alterada"):
+    if dom["reflexion"].get("altered"):
       rmcat = rmri_ref["rm_clasif"].get("categoria", "aumentada")
       add(
         "RM Pb/Pf aumentada por percentil",
@@ -3841,7 +3841,7 @@ def _build_animation_pause_alerts(row, sep_df, sep_metrics, hdf, t_values):
       )
 
 
-    if not np.isnan(rvse_calc) and rvse_calc < 120:
+    if dom["rvse"].get("altered"):
       add(
         "RVSE/SEVR calculado reducido",
         fmt(rvse_calc, 1, "%"),
@@ -4449,38 +4449,39 @@ def plot_pressure_comparison(row):
   return fig_to_png(fig)
 
 
-def plot_clinical_gauges(row, ppa):
-  """Semaforización con referencias individualizadas cuando están disponibles."""
-  pas = to_float(row.get("pas_central")); pp = to_float(row.get("pp_central")); iau = to_float(row.get("iau"))
-  saha = get_saha_central_sbp_reference(row)
-  aix = get_saha_aix75_reference(row)
-  pas_ref = saha.get("p90", np.nan) if saha.get("ok") else 130.0
-  iau_ref = aix.get("p90", np.nan) if aix.get("ok") else np.nan
+def plot_clinical_gauges(row, ppa=None):
+  """Semaforización de pantalla derivada del mismo estado canónico del informe."""
+  state = build_canonical_diagnostic_state(row, {}, None)
+  d = state["domains"]
 
+  pas = to_float(d["hta_central"].get("value")); pp = to_float(d["carga_pulsatil"].get("value"))
+  iau = to_float(d["aumentacion"].get("value")); ppa_val = to_float(d["amplificacion"].get("value"))
+  pas_ref = to_float(d["hta_central"].get("threshold"))
+  if np.isnan(pas_ref): pas_ref = 130.0
+  iau_ref = to_float(d["aumentacion"].get("p90"))
+
+  # Índice >1 significa mayor desviación adversa respecto del límite en todos los casos.
   metrics = [
-    ("PAS central", pas, pas_ref),
-    ("PP central", pp, 50.0),
-    ("IAu/AIx", iau, iau_ref),
-    ("PPA", ppa, 1.30),
+    ("PAS central", pas / pas_ref if not np.isnan(pas) and pas_ref > 0 else np.nan),
+    ("PP central", pp / 50.0 if not np.isnan(pp) else np.nan),
+    ("IAu/AIx", iau / iau_ref if not np.isnan(iau) and not np.isnan(iau_ref) and iau_ref > 0 else np.nan),
+    ("PPA", 1.30 / ppa_val if not np.isnan(ppa_val) and ppa_val > 0 else np.nan),
   ]
-  names, score = [], []
-  for name, value, refv in metrics:
-    names.append(name)
-    if np.isnan(value) or np.isnan(refv) or refv == 0:
-      score.append(np.nan)
-    else:
-      score.append(value / refv)
+  names = [x[0] for x in metrics]
+  score = [x[1] for x in metrics]
   fig, ax = plt.subplots(figsize=(7.6,3.9))
   ax.barh(names, score, color="#546E7A")
   ax.axvline(1, linestyle="--", linewidth=1.2, color="#B71C1C")
-  _apply_professional_axes(ax, "Semaforización clínica de parámetros centrales", "Relación valor / referencia individual", "")
+  _apply_professional_axes(ax, "Semaforización clínica de parámetros centrales", "Índice de desviación respecto del límite", "")
   ax.grid(axis="x", alpha=.22)
   return fig_to_png(fig)
 
 def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
-  """Conclusión textual continua del bloque de presión central y métricas."""
+  """Conclusión textual de pantalla desde el estado canónico único."""
   pas_c = to_float(row.get("pas_central")); pad_c = to_float(row.get("pad_central")); pp_c = to_float(row.get("pp_central"))
   pam_c = to_float(row.get("pam_central")); iau = to_float(row.get("iau")); au = to_float(row.get("au")); fc = to_float(row.get("fc"))
+  state = build_canonical_diagnostic_state(row, {}, None)
+  d = state["domains"]
 
   def fmt(v, dec=1):
     try:
@@ -4490,30 +4491,20 @@ def interpret_pressure_central_metrics(row, dx, cat, ref, amp_sbp, ppa, risk):
     except Exception:
       return "no disponible"
 
-  pressure_flags = []
-  status = central_hypertension_status(row)
-  pressure_flags.append(status.get("diagnostico_breve", "Hipertensión central no clasificable."))
-  if not np.isnan(pp_c):
-    pressure_flags.append("presión de pulso central aumentada" if pp_c >= 50 else "presión de pulso central no aumentada")
-  aix_ref = get_saha_aix75_reference(row)
-  if aix_ref.get("ok"):
-    pressure_flags.append(
-      f"CON AUMENTACIÓN CENTRAL AUMENTADA por IAu/AIx >= P90 ({aix_ref['p90']:.1f}%)" if aix_ref.get("alterada")
-      else f"SIN AUMENTACIÓN CENTRAL AUMENTADA por IAu/AIx < P90 ({aix_ref['p90']:.1f}%)"
-    )
-  elif not np.isnan(iau):
-    pressure_flags.append("IAu/AIx descriptivo: no clasificable sin referencia válida de edad/sexo; no se aplica corte fijo 25/35%")
-  if not np.isnan(ppa):
-    pressure_flags.append("amplificación de presión de pulso reducida" if ppa < 1.30 else "amplificación de presión de pulso conservada")
+  synthesis = "; ".join([
+    d["hta_central"]["short"],
+    d["carga_pulsatil"]["short"],
+    d["amplificacion"]["short"],
+    d["aumentacion"]["short"],
+  ])
 
   return (
     f"El análisis de presión central muestra PAS central {fmt(pas_c,0)} mmHg, PAD central {fmt(pad_c,0)} mmHg, "
     f"PAM central {fmt(pam_c,0)} mmHg y PP central {fmt(pp_c,0)} mmHg. La categoría tensional periférica/braquial es {cat}. "
-    f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(ppa,2)}. "
+    f"La amplificación PAS periférico-central es {fmt(amp_sbp,1)} mmHg y la PPA es {fmt(d['amplificacion'].get('value'),2)}. "
     f"Au: {fmt(au,1)} mmHg (descriptivo), IAu: {fmt(iau,1)}%, FC: {fmt(fc,0)} lpm. "
-    f"Conclusión diagnóstica: {status.get('diagnostico', dx)} "
-    f"Perfil hemodinámico agregado: {risk}. "
-    f"Síntesis: {'; '.join(pressure_flags) if pressure_flags else 'sin marcadores suficientes para estratificación central completa'}."
+    f"Conclusión diagnóstica: {dx} "
+    f"Síntesis canónica: {synthesis}."
   )
 
 def interpret_harmonic_profile(hdf):
@@ -4572,160 +4563,412 @@ def interpret_rvse_profile(row, sep_metrics):
   )
 
 
-def _didactic_grade_pressure(row):
-  """Conclusión cualitativa sin métricas para presión central/carga pulsátil.
 
-  La salida está pensada para informe médico: diagnóstico binario de hipertensión
-  central y conclusión por dimensión, sin unir alternativas con "o".
+def build_canonical_diagnostic_state(row, sep_metrics=None, hdf=None):
+  """Única fuente de verdad diagnóstica para toda la app PAC.
+
+  Este diccionario canónico alimenta pantalla, PDF, conclusiones y fenotipo.
+  No usa puntajes acumulativos ni doble conteo entre dominios.
+
+  Dominios clínicos independientes:
+  - HTA central: PAS central vs referencia SAHA P90 / respaldo operativo.
+  - Carga pulsátil: PP central, independiente de la presencia de HTA central.
+  - Amplificación: PPA = PP radial / PP central.
+  - Aumentación: IAu/AIx vs P90 por edad/sexo.
+  - Reflexión: RM por percentiles de edad/método; RI complementaria.
+  - Reserva subendocárdica: RVSE/SEVR calculado.
+
+  Dominio experimental:
+  - Armónicos/HD: descriptivo, nunca define por sí solo un fenotipo clínico.
   """
+  sep_metrics = sep_metrics or {}
+
+  def _domain(status, altered, label, short, detail, value=np.nan, criterion="", grade=None, classificable=True, extra=None):
+    d = {
+      "status": status,
+      "altered": bool(altered),
+      "label": label,
+      "short": short,
+      "detail": detail,
+      "value": value,
+      "criterion": criterion,
+      "grade": grade or status,
+      "classifiable": bool(classificable),
+    }
+    if extra:
+      d.update(extra)
+    return d
+
+  # 1) HTA central: completamente separada de carga pulsátil.
+  hta = central_hypertension_status(row)
+  if hta.get("ok"):
+    if hta.get("tiene_hta_central"):
+      hta_d = _domain(
+        "alterada", True, "Hipertensión central", "con hipertensión central",
+        "PAS central por encima del límite diagnóstico aplicable.",
+        hta.get("pas_central", np.nan), hta.get("criterio", ""), "alterada",
+        extra={"threshold": hta.get("umbral", np.nan)}
+      )
+    else:
+      hta_d = _domain(
+        "normal", False, "Hipertensión central", "sin hipertensión central",
+        "PAS central por debajo del límite diagnóstico aplicable.",
+        hta.get("pas_central", np.nan), hta.get("criterio", ""), "normal",
+        extra={"threshold": hta.get("umbral", np.nan)}
+      )
+  else:
+    hta_d = _domain(
+      "sin_datos", False, "Hipertensión central", "hipertensión central no clasificable",
+      "No hay PAS central válida o referencia aplicable suficiente.",
+      np.nan, hta.get("criterio", "PAS central no disponible"), "sin_datos", False
+    )
+
+  # 2) Carga pulsátil: SOLO PP central; nunca se altera por tener HTA central.
   pp_c = to_float(row.get("pp_central"))
+  if np.isnan(pp_c):
+    pulse_d = _domain(
+      "sin_datos", False, "Carga pulsátil central", "carga pulsátil no clasificable",
+      "PP central no disponible.", np.nan, "requiere PP central", "sin_datos", False
+    )
+  elif pp_c >= 60:
+    pulse_d = _domain(
+      "alterada", True, "Carga pulsátil central", "carga pulsátil central alta",
+      "PP central alta.", pp_c, ">=60 mmHg", "alta"
+    )
+  elif pp_c >= 50:
+    pulse_d = _domain(
+      "alterada", True, "Carga pulsátil central", "carga pulsátil central aumentada",
+      "PP central aumentada.", pp_c, ">=50 y <60 mmHg", "aumentada"
+    )
+  else:
+    pulse_d = _domain(
+      "normal", False, "Carga pulsátil central", "carga pulsátil central no aumentada",
+      "PP central por debajo del umbral operativo de aumento.", pp_c, "<50 mmHg", "normal"
+    )
+
+  # 3) Amplificación periférico-central: dominio independiente.
   pp_r = to_float(row.get("pp_radial"))
   ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
+  if np.isnan(ppa):
+    ppa_d = _domain(
+      "sin_datos", False, "Amplificación periférico-central", "amplificación no clasificable",
+      "No se dispone de PP radial y PP central válidas.", np.nan,
+      "PPA = PP radial / PP central", "sin_datos", False
+    )
+  elif ppa < 1.20:
+    ppa_d = _domain(
+      "alterada", True, "Amplificación periférico-central", "amplificación marcadamente reducida",
+      "Pérdida marcada de amplificación periférico-central.", ppa, "<1,20", "marcada"
+    )
+  elif ppa < 1.30:
+    ppa_d = _domain(
+      "alterada", True, "Amplificación periférico-central", "amplificación reducida",
+      "Amplificación periférico-central reducida.", ppa, "1,20 a <1,30", "reducida"
+    )
+  else:
+    ppa_d = _domain(
+      "normal", False, "Amplificación periférico-central", "amplificación conservada",
+      "Amplificación periférico-central conservada.", ppa, ">=1,30", "normal"
+    )
 
-  status = central_hypertension_status(row)
-
-  if status.get("ok"):
-    if status.get("tiene_hta_central"):
-      pressure = "El paciente se clasifica CON HIPERTENSIÓN CENTRAL según el criterio seleccionado para el informe."
-      pressure_short = "con hipertensión central."
-      pressure_level = "alterada"
+  # 4) Aumentación: solo referencia P90 edad/sexo; Au aislado no diagnostica.
+  iau = to_float(row.get("iau")); au = to_float(row.get("au"))
+  aix = get_saha_aix75_reference(row)
+  if aix.get("ok"):
+    if aix.get("alterada"):
+      aug_d = _domain(
+        "alterada", True, "Aumentación central", "aumentación central aumentada",
+        "IAu/AIx alcanza o supera P90 para edad y sexo.", iau,
+        f">=P90 ({aix.get('p90', np.nan):.1f}%)", "alterada",
+        extra={"percentile": aix.get("percentil", np.nan), "p90": aix.get("p90", np.nan), "au": au}
+      )
     else:
-      pressure = "El paciente se clasifica SIN HIPERTENSIÓN CENTRAL según el criterio seleccionado para el informe."
-      pressure_short = "sin hipertensión central."
-      pressure_level = "normal"
+      aug_d = _domain(
+        "normal", False, "Aumentación central", "aumentación central no aumentada",
+        "IAu/AIx permanece por debajo de P90 para edad y sexo.", iau,
+        f"<P90 ({aix.get('p90', np.nan):.1f}%)", "normal",
+        extra={"percentile": aix.get("percentil", np.nan), "p90": aix.get("p90", np.nan), "au": au}
+      )
+  elif not np.isnan(iau):
+    aug_d = _domain(
+      "sin_datos", False, "Aumentación central", "aumentación central no clasificable",
+      "IAu/AIx disponible, pero sin referencia válida de edad/sexo; no se usan cortes fijos 25/35%.",
+      iau, "requiere referencia de edad/sexo", "sin_datos", False, extra={"au": au}
+    )
+  elif not np.isnan(au):
+    aug_d = _domain(
+      "sin_datos", False, "Aumentación central", "aumentación central no clasificable",
+      "Au se informa en mmHg como descriptor; no define diagnóstico aislado.",
+      au, "Au descriptivo", "sin_datos", False
+    )
   else:
-    pressure = "La hipertensión central no pudo clasificarse por ausencia de PAS central válida."
-    pressure_short = "hipertensión central: no clasificable."
-    pressure_level = "sin_datos"
+    aug_d = _domain(
+      "sin_datos", False, "Aumentación central", "aumentación central no clasificable",
+      "IAu/AIx no disponible.", np.nan, "requiere IAu/AIx", "sin_datos", False
+    )
 
-  carga_aumentada = (not np.isnan(pp_c) and pp_c >= 50) or bool(status.get("tiene_hta_central", False))
-  amplificacion_reducida = not np.isnan(ppa) and ppa < 1.30
-  hay_datos_pulso = (not np.isnan(pp_c)) or (not np.isnan(ppa)) or status.get("ok")
-
-  if not hay_datos_pulso:
-    pulse_text = "La carga pulsátil central no pudo clasificarse de forma completa por datos insuficientes."
-    pulse_short = "carga pulsátil no clasificable."
-    pulse_level = "sin_datos"
-  elif carga_aumentada and amplificacion_reducida:
-    pulse_text = "El estudio evidencia aumento de la carga pulsátil central, con menor amortiguación periférica de la onda de pulso, compatible con rigidez vascular funcional aumentada."
-    pulse_short = "aumento de la carga pulsátil central con amplificación periférica reducida."
-    pulse_level = "alterada"
-  elif carga_aumentada and not amplificacion_reducida:
-    pulse_text = "El estudio evidencia aumento de la carga pulsátil central, con amortiguación periférica de la onda de pulso relativamente conservada; el patrón sugiere sobrecarga central predominante sin pérdida franca de amplificación periférica."
-    pulse_short = "aumento de la carga pulsátil central con amplificación periférica conservada."
-    pulse_level = "alterada"
-  elif (not carga_aumentada) and amplificacion_reducida:
-    pulse_text = "El estudio evidencia amplificación periférico-central reducida, con menor amortiguación periférica de la onda de pulso, aun sin aumento franco de la carga pulsátil central."
-    pulse_short = "amplificación periférico-central reducida sin aumento franco de carga pulsátil central."
-    pulse_level = "alterada"
+  # 5) Reflexión: RM primaria percentilar; RI complementaria; Tref continuo.
+  rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan)
+  tref = sep_metrics.get("tref_ms", np.nan); ratio = sep_metrics.get("tfor_tref", np.nan)
+  rmri = get_rm_ri_reference(row, sep_metrics)
+  if rmri.get("ok") and rmri.get("rm_clasif", {}).get("ok"):
+    c = rmri["rm_clasif"]
+    grade = c.get("grado", "normal")
+    altered = bool(c.get("alterada", False))
+    status = "alterada" if altered else ("intermedia" if grade == "intermedia" else "normal")
+    short = (
+      "reflexión de onda marcadamente aumentada" if grade == "marcada" else
+      "reflexión de onda aumentada" if altered else
+      "reflexión relativamente elevada sin criterio diagnóstico" if grade == "intermedia" else
+      "reflexión de onda no aumentada"
+    )
+    reflection_d = _domain(
+      status, altered, "Reflexión de onda", short,
+      f"RM clasificada por percentiles específicos de edad y método: {c.get('categoria', grade)}.",
+      rm,
+      f"P75 {rmri['rm_ref']['p75']:.2f}; P90 {rmri['rm_ref']['p90']:.2f}; P95 {rmri['rm_ref']['p95']:.2f}",
+      grade, True,
+      extra={
+        "percentile": c.get("percentil", np.nan), "ri": ri, "tref_ms": tref,
+        "tfor_tref": ratio, "rm_reference": rmri.get("rm_ref"), "ri_reference": rmri.get("ri_ref")
+      }
+    )
+  elif not np.isnan(rm):
+    reflection_d = _domain(
+      "sin_datos", False, "Reflexión de onda", "reflexión de onda no clasificable",
+      "RM disponible, pero sin referencia válida de edad/método.", rm,
+      "requiere edad y método de referencia", "sin_datos", False,
+      extra={"ri": ri, "tref_ms": tref, "tfor_tref": ratio}
+    )
   else:
-    pulse_text = "El estudio no evidencia aumento de la carga pulsátil central y mantiene una amortiguación periférica de la onda de pulso conservada."
-    pulse_short = "carga pulsátil central no aumentada con amplificación periférica conservada."
-    pulse_level = "normal"
+    reflection_d = _domain(
+      "sin_datos", False, "Reflexión de onda", "reflexión de onda no clasificable",
+      "No hay separación Pf/Pb suficiente para clasificar RM.", np.nan,
+      "requiere RM válida", "sin_datos", False,
+      extra={"ri": ri, "tref_ms": tref, "tfor_tref": ratio}
+    )
+
+  # 6) Reserva subendocárdica: independiente; nunca suma a otro dominio.
+  rvse = sep_metrics.get("rvse_calculado_%", np.nan)
+  if np.isnan(rvse):
+    rvse_d = _domain(
+      "sin_datos", False, "Reserva subendocárdica", "reserva subendocárdica no clasificable",
+      "RVSE/SEVR calculado no disponible.", np.nan, "requiere RVSE calculado", "sin_datos", False
+    )
+  elif rvse < 120:
+    rvse_d = _domain(
+      "alterada", True, "Reserva subendocárdica", "reserva subendocárdica reducida",
+      "RVSE/SEVR calculado reducido.", rvse, "<120%", "reducida"
+    )
+  else:
+    rvse_d = _domain(
+      "normal", False, "Reserva subendocárdica", "reserva subendocárdica conservada",
+      "RVSE/SEVR calculado conservado.", rvse, ">=120%", "normal"
+    )
+
+  # 7) Armónicos: investigación; nunca alteración clínica transversal.
+  hm = harmonic_distortion_metrics(hdf)
+  if hm.get("ok"):
+    harm_d = _domain(
+      "experimental", False, "Análisis armónico", "perfil armónico experimental",
+      "HD, H1, H4+ y frecuencia dominante son descriptivos; sin umbral clínico universal.",
+      hm.get("hd_percent", np.nan), "sin corte clínico universal", "experimental", True,
+      extra={"metrics": hm}
+    )
+  else:
+    harm_d = _domain(
+      "sin_datos", False, "Análisis armónico", "análisis armónico no clasificable",
+      "FFT/HD no disponibles o inestables.", np.nan, "requiere análisis espectral válido", "sin_datos", False
+    )
+
+  domains = {
+    "hta_central": hta_d,
+    "carga_pulsatil": pulse_d,
+    "amplificacion": ppa_d,
+    "aumentacion": aug_d,
+    "reflexion": reflection_d,
+    "rvse": rvse_d,
+    "armonicos": harm_d,
+  }
+  clinical_keys = ["hta_central", "carga_pulsatil", "amplificacion", "aumentacion", "reflexion", "rvse"]
+  altered_keys = [k for k in clinical_keys if domains[k].get("altered")]
+  unclassifiable_keys = [k for k in clinical_keys if not domains[k].get("classifiable", True)]
+
+  return {
+    "domains": domains,
+    "clinical_keys": clinical_keys,
+    "altered_keys": altered_keys,
+    "unclassifiable_keys": unclassifiable_keys,
+    "count_altered": len(altered_keys),
+    "partially_classifiable": bool(unclassifiable_keys),
+  }
+
+
+def _phenotype_from_canonical_state(state):
+  """Construye un fenotipo determinista exclusivamente desde los estados canónicos."""
+  d = state.get("domains", {})
+  altered = state.get("altered_keys", [])
+
+  if not altered:
+    if state.get("partially_classifiable"):
+      return (
+        "Fenotipo vascular central sin alteraciones en los dominios clasificables",
+        "no se identifican dominios clínicos alterados entre los evaluables; existen dominios no clasificables por datos insuficientes"
+      )
+    return (
+      "Fenotipo vascular central conservado en los dominios evaluados",
+      "sin hipertensión central, sin aumento de carga pulsátil, con amplificación conservada, sin aumentación ni reflexión aumentadas y con reserva subendocárdica conservada"
+    )
+
+  isolated_map = {
+    "hta_central": ("Fenotipo de hipertensión central aislada", "hipertensión central sin otras alteraciones clínicas dominantes"),
+    "carga_pulsatil": ("Fenotipo de carga pulsátil central aumentada aislada", "PP central aumentada sin otras alteraciones clínicas dominantes"),
+    "amplificacion": ("Fenotipo de amplificación periférico-central reducida aislada", "PPA reducida sin otras alteraciones clínicas dominantes"),
+    "aumentacion": ("Fenotipo de aumentación central aumentada aislada", "IAu/AIx >= P90 sin otras alteraciones clínicas dominantes"),
+    "reflexion": ("Fenotipo reflectivo predominante aislado", "RM >= P90 para edad/método sin otras alteraciones clínicas dominantes"),
+    "rvse": ("Fenotipo con reserva subendocárdica relativa reducida aislada", "RVSE/SEVR <120% sin otras alteraciones clínicas dominantes"),
+  }
+  if len(altered) == 1:
+    return isolated_map[altered[0]]
+
+  names = {
+    "hta_central": "hipertensión central",
+    "carga_pulsatil": "carga pulsátil central aumentada",
+    "amplificacion": "amplificación periférico-central reducida",
+    "aumentacion": "aumentación central aumentada",
+    "reflexion": "reflexión de onda aumentada",
+    "rvse": "reserva subendocárdica reducida",
+  }
+  ordered = [k for k in state.get("clinical_keys", []) if k in altered]
+  components = [names[k] for k in ordered]
+
+  # Nombre principal explícito, sin inferir rigidez no medida.
+  if "reflexion" in altered and ("hta_central" in altered or "carga_pulsatil" in altered):
+    base = "Fenotipo de presión/carga central alterada con reflexión aumentada"
+  elif "hta_central" in altered and "carga_pulsatil" in altered:
+    base = "Fenotipo de hipertensión central con carga pulsátil aumentada"
+  elif "reflexion" in altered:
+    base = "Fenotipo reflectivo combinado"
+  elif "hta_central" in altered or "carga_pulsatil" in altered:
+    base = "Fenotipo de presión/carga central alterada combinado"
+  else:
+    base = "Fenotipo vascular central combinado"
+
+  modifiers = []
+  if "amplificacion" in altered: modifiers.append("amplificación reducida")
+  if "aumentacion" in altered: modifiers.append("aumentación aumentada")
+  if "rvse" in altered: modifiers.append("reserva subendocárdica reducida")
+  phenotype = base + (" con " + ", ".join(modifiers) if modifiers else "")
+  mechanism = "; ".join(components)
+  return phenotype, mechanism
+
+def _didactic_grade_pressure(row):
+  """Conclusiones de HTA central y carga pulsátil desde el estado canónico único."""
+  state = build_canonical_diagnostic_state(row, {}, None)
+  d = state["domains"]
+  hta = d["hta_central"]
+  pulse = d["carga_pulsatil"]
+  ppa = d["amplificacion"]
+
+  if hta["status"] == "alterada":
+    pressure = "El paciente se clasifica CON HIPERTENSIÓN CENTRAL según el criterio diagnóstico aplicable."
+    pressure_short, pressure_level = "con hipertensión central.", "alterada"
+  elif hta["status"] == "normal":
+    pressure = "El paciente se clasifica SIN HIPERTENSIÓN CENTRAL según el criterio diagnóstico aplicable."
+    pressure_short, pressure_level = "sin hipertensión central.", "normal"
+  else:
+    pressure = "La hipertensión central no pudo clasificarse por datos insuficientes."
+    pressure_short, pressure_level = "hipertensión central no clasificable.", "sin_datos"
+
+  if pulse["status"] == "sin_datos" and ppa["status"] == "sin_datos":
+    pulse_text = "La carga pulsátil central y la amplificación periférico-central no pudieron clasificarse por datos insuficientes."
+    pulse_short, pulse_level = "carga pulsátil y amplificación no clasificables.", "sin_datos"
+  elif pulse["altered"] and ppa["altered"]:
+    pulse_text = "El estudio evidencia aumento de la carga pulsátil central junto con amplificación periférico-central reducida."
+    pulse_short, pulse_level = "carga pulsátil central aumentada con amplificación reducida.", "alterada"
+  elif pulse["altered"]:
+    pulse_text = "El estudio evidencia aumento de la carga pulsátil central; la amplificación periférico-central no está reducida cuando es clasificable."
+    pulse_short, pulse_level = "carga pulsátil central aumentada.", "alterada"
+  elif ppa["altered"]:
+    pulse_text = "El estudio evidencia amplificación periférico-central reducida sin aumento de la carga pulsátil central."
+    pulse_short, pulse_level = "amplificación reducida sin aumento de carga pulsátil central.", "alterada"
+  elif pulse["status"] == "normal" and ppa["status"] == "normal":
+    pulse_text = "El estudio no evidencia aumento de la carga pulsátil central y mantiene amplificación periférico-central conservada."
+    pulse_short, pulse_level = "carga pulsátil no aumentada con amplificación conservada.", "normal"
+  else:
+    # Uno de los dos dominios es clasificable y normal; el otro carece de datos.
+    pulse_text = "No se evidencia alteración en el componente clasificable de carga pulsátil/amplificación, aunque la evaluación es parcial por datos insuficientes."
+    pulse_short, pulse_level = "carga pulsátil/amplificación parcialmente clasificable sin alteración demostrada.", "sin_datos"
 
   return pressure, pressure_short, pressure_level, pulse_text, pulse_short, pulse_level
 
-
 def _didactic_grade_augmentation(row):
-  """Aumentación central: clasificación solo por referencia P90 edad/sexo."""
-  iau = to_float(row.get("iau"))
-  au = to_float(row.get("au"))
-  aix_ref = get_saha_aix75_reference(row)
-
-  if aix_ref.get("ok"):
-    if bool(aix_ref.get("alterada", False)):
-      return (
-        "El estudio se clasifica CON AUMENTACIÓN CENTRAL AUMENTADA para edad y sexo (IAu/AIx >= P90), compatible con mayor contribución reflectiva al componente sistólico central.",
-        "con aumentación central aumentada para edad y sexo.",
-        "alterada",
-      )
+  """Aumentación central desde el estado canónico único."""
+  aug = build_canonical_diagnostic_state(row, {}, None)["domains"]["aumentacion"]
+  if aug["status"] == "alterada":
+    return (
+      "El estudio se clasifica CON AUMENTACIÓN CENTRAL AUMENTADA para edad y sexo (IAu/AIx >= P90).",
+      "con aumentación central aumentada para edad y sexo.",
+      "alterada",
+    )
+  if aug["status"] == "normal":
     return (
       "El estudio se clasifica SIN AUMENTACIÓN CENTRAL AUMENTADA para edad y sexo (IAu/AIx < P90).",
       "sin aumentación central aumentada para edad y sexo.",
       "normal",
     )
-
-  if not np.isnan(iau):
-    return (
-      "IAu/AIx está disponible, pero no se aplica un corte fijo de 25% o 35%. Sin referencia válida de edad y sexo, la aumentación queda como dato descriptivo no clasificable.",
-      "aumentación central no clasificable sin referencia de edad/sexo.",
-      "sin_datos",
-    )
-  if not np.isnan(au):
-    return (
-      "Au está disponible en mmHg y se informa como componente descriptivo de aumentación; su positividad aislada no se usa como diagnóstico automático.",
-      "Au descriptivo, sin clasificación diagnóstica aislada.",
-      "sin_datos",
-    )
   return (
-    "La aumentación central no pudo clasificarse por ausencia de datos válidos de IAu/AIx y referencia aplicable.",
+    aug.get("detail", "La aumentación central no pudo clasificarse."),
     "aumentación central no clasificable.",
     "sin_datos",
   )
 
 def _didactic_grade_rvse(sep_metrics):
-  rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
-  if np.isnan(rvse_calc):
-    return (
-      "La reserva subendocárdica no pudo estimarse de forma estable porque no se definieron adecuadamente las áreas de la curva.",
-      "reserva subendocárdica no clasificable.",
-      "sin_datos",
-    )
-  if rvse_calc < 120:
+  rvse = build_canonical_diagnostic_state({}, sep_metrics, None)["domains"]["rvse"]
+  if rvse["status"] == "alterada":
     return (
       "La reserva subendocárdica se interpreta como reducida, sugiriendo menor balance relativo entre perfusión diastólica y demanda sistólica.",
       "reserva subendocárdica reducida.",
       "alterada",
     )
+  if rvse["status"] == "normal":
+    return (
+      "La reserva subendocárdica se interpreta como conservada, con balance presión-tiempo globalmente favorable en la curva analizada.",
+      "reserva subendocárdica conservada.",
+      "normal",
+    )
   return (
-    "La reserva subendocárdica se interpreta como conservada, con balance presión-tiempo globalmente favorable en la curva analizada.",
-    "reserva subendocárdica conservada.",
-    "normal",
+    "La reserva subendocárdica no pudo estimarse de forma estable por datos insuficientes.",
+    "reserva subendocárdica no clasificable.",
+    "sin_datos",
   )
 
-
 def _didactic_grade_wave(sep_metrics, row=None):
-  rm = sep_metrics.get("rm", np.nan)
-  ri = sep_metrics.get("ri", np.nan)
-  tref = sep_metrics.get("tref_ms", np.nan)
-  pf = sep_metrics.get("pf_pico", np.nan)
-  pb = sep_metrics.get("pb_pico", np.nan)
+  """Separación de ondas desde el estado canónico único."""
+  ref = build_canonical_diagnostic_state(row or {}, sep_metrics, None)["domains"]["reflexion"]
+  tref = ref.get("tref_ms", np.nan)
+  extra = f" Tref {tref:.0f} ms se informa como variable continua, sin corte fijo universal." if not np.isnan(tref) else ""
 
-  if all(np.isnan(x) for x in [rm, ri, tref, pf, pb]):
+  if ref["status"] == "alterada":
     return (
-      "La separación de ondas no pudo clasificarse por datos insuficientes o por ausencia de curva válida.",
-      "separación de ondas no clasificable.",
-      "sin_datos",
-    )
-
-  ref = get_rm_ri_reference(row or {}, sep_metrics)
-  rm_altered = bool(ref.get("ok") and ref.get("rm_clasif", {}).get("alterada", False))
-  rm_intermediate = bool(ref.get("ok") and ref.get("rm_clasif", {}).get("grado") == "intermedia")
-
-  if rm_altered:
-    cat = ref.get("rm_clasif", {}).get("categoria", "aumentada")
-    extra = f" Tref {tref:.0f} ms se informa como variable continua sin corte fijo universal." if not np.isnan(tref) else ""
-    return (
-      f"La magnitud de reflexión se clasifica como {cat} por percentiles específicos de edad y método; RI se mantiene como descriptor complementario sin doble conteo.{extra}",
+      f"La magnitud de reflexión se clasifica como {ref.get('grade','aumentada')} por percentiles específicos de edad y método; RI es complementario y no suma evidencia independiente.{extra}",
       "reflexión de onda aumentada por RM percentilar.",
       "alterada",
     )
-  if rm_intermediate:
-    extra = f" Tref {tref:.0f} ms es descriptivo continuo." if not np.isnan(tref) else ""
+  if ref["status"] == "intermedia":
     return (
       "La RM se ubica entre P75 y P90: relativamente elevada para edad/método, sin alcanzar el criterio diagnóstico P90. RI es complementario." + extra,
       "reflexión relativamente elevada, sin criterio de aumento.",
       "intermedia",
     )
-  if ref.get("ok") and ref.get("rm_clasif", {}).get("ok"):
-    extra = f" Tref {tref:.0f} ms se conserva como variable continua de investigación." if not np.isnan(tref) else ""
+  if ref["status"] == "normal":
     return (
-      "La magnitud de reflexión se mantiene por debajo de P75 para edad y método, sin evidencia percentilar de reflexión aumentada; RI se informa solo como complemento." + extra,
+      "La magnitud de reflexión permanece por debajo de P75 para edad y método, sin evidencia percentilar de reflexión aumentada; RI es complementario." + extra,
       "reflexión de onda no aumentada.",
       "normal",
     )
   return (
-    "La separación Pf/Pb está disponible, pero la magnitud de reflexión no puede clasificarse sin edad y método de referencia válidos. Tref no se binariza con un corte fijo.",
+    "La separación Pf/Pb está disponible de forma insuficiente para una clasificación percentilar válida de RM. RI y Tref no generan diagnóstico independiente.",
     "reflexión de onda no clasificable por referencia.",
     "sin_datos",
   )
@@ -4751,79 +4994,54 @@ def _didactic_grade_harmonics(hdf):
     )
 
 def _didactic_phenotype_text(phenotype):
+  """Texto didáctico compatible con los fenotipos canónicos; sin fenotipos armónicos ni 'rígido-reflectivo'."""
   p = safe_text(phenotype).lower()
-  if "rígido-reflectivo con estrés subendocárdico" in p:
+  if "conservado en los dominios evaluados" in p:
     return (
-      "La integración global configura un patrón central desfavorable complejo, con sobrecarga pulsátil, reflexión aumentada, menor reserva subendocárdica y mayor complejidad morfológica.",
-      "fenotipo central rígido-reflectivo complejo con compromiso subendocárdico."
+      "La integración global no identifica alteraciones clínicas en los dominios evaluados.",
+      "fenotipo vascular central conservado en los dominios evaluados."
     )
-  if "rígido-reflectivo con rvse reducido" in p:
+  if "sin alteraciones en los dominios clasificables" in p:
     return (
-      "La integración global configura un patrón rígido-reflectivo con compromiso del balance subendocárdico, compatible con mayor exigencia hemodinámica central.",
-      "fenotipo rígido-reflectivo con reserva subendocárdica reducida."
+      "La integración global no identifica alteraciones en los dominios clasificables, aunque existen componentes no evaluables por datos insuficientes.",
+      "fenotipo sin alteraciones en los dominios clasificables."
     )
-  if "rígido-reflectivo con complejidad armónica" in p:
+  if "reserva subendocárdica relativa reducida aislada" in p:
     return (
-      "La integración global muestra sobrecarga central con reflexión aumentada y morfología de onda más compleja.",
-      "fenotipo rígido-reflectivo con complejidad armónica."
+      "La integración global identifica reducción aislada de la reserva subendocárdica relativa, sin otras alteraciones clínicas dominantes.",
+      "fenotipo con reserva subendocárdica relativa reducida aislada."
     )
-  if "rígido-reflectivo" in p:
+  if "hipertensión central aislada" in p:
+    return ("La integración global identifica hipertensión central aislada.", "fenotipo de hipertensión central aislada.")
+  if "carga pulsátil central aumentada aislada" in p:
+    return ("La integración global identifica aumento aislado de la carga pulsátil central.", "fenotipo de carga pulsátil central aumentada aislada.")
+  if "amplificación periférico-central reducida aislada" in p:
+    return ("La integración global identifica reducción aislada de la amplificación periférico-central.", "fenotipo de amplificación periférico-central reducida aislada.")
+  if "aumentación central aumentada aislada" in p:
+    return ("La integración global identifica aumentación central aumentada aislada.", "fenotipo de aumentación central aumentada aislada.")
+  if "reflectivo predominante aislado" in p:
+    return ("La integración global identifica reflexión de onda aumentada aislada por RM percentilar.", "fenotipo reflectivo predominante aislado.")
+  # Todo fenotipo combinado se describe con su denominación canónica exacta.
+  if "fenotipo" in p:
     return (
-      "La integración global muestra elevación de carga central asociada a mayor contribución de la onda reflejada.",
-      "fenotipo vascular central rígido-reflectivo."
-    )
-  if "carga central elevada con compromiso subendocárdico" in p:
-    return (
-      "La integración global sugiere presión o carga pulsátil central aumentada con menor reserva subendocárdica relativa.",
-      "fenotipo de carga central elevada con compromiso subendocárdico."
-    )
-  if "reflectivo con compromiso subendocárdico" in p:
-    return (
-      "La integración global muestra predominio de reflexión de onda asociado a menor reserva subendocárdica relativa.",
-      "fenotipo reflectivo con compromiso subendocárdico."
-    )
-  if "carga pulsátil central elevada con distorsión armónica" in p:
-    return (
-      "La integración global muestra aumento de carga pulsátil central asociado a mayor complejidad morfológica de la onda.",
-      "fenotipo de carga pulsátil central elevada con distorsión armónica."
-    )
-  if "reflectivo predominante" in p:
-    return (
-      "La integración global muestra predominio de reflexión de onda, aun sin clara sobrecarga central global.",
-      "fenotipo reflectivo predominante."
-    )
-  if "armónico complejo" in p:
-    return (
-      "La integración global muestra complejidad morfológica de la onda, sin predominio claro de sobrecarga central o reflexión severa.",
-      "fenotipo armónico complejo."
-    )
-  if "presión central elevada" in p:
-    return (
-      "La integración global muestra elevación de presión o carga central sin predominio reflectivo marcado.",
-      "fenotipo de presión central elevada no reflectivo predominante."
+      "La integración global identifica una combinación coherente de los dominios clínicos alterados consignados en la conclusión integrada.",
+      safe_text(phenotype).rstrip(".") + "."
     )
   return (
-    "La integración global configura un perfil vascular central conservado o de bajo impacto pulsátil.",
-    "fenotipo vascular central conservado o de bajo impacto pulsátil."
+    "La integración global no pudo caracterizarse de forma completa.",
+    "fenotipo vascular central no clasificable."
   )
 
 
 
 def build_automatic_integrated_conclusion(row, sep_metrics=None, hdf=None):
-  """Conclusión integrada con niveles de evidencia separados.
-
-  Diagnóstico/estratificación:
-  - PAS central: P90 SAHA por edad/sexo/calibración.
-  - IAu/AIx: P90 por edad/sexo.
-  - RM: percentiles por edad/método; RI complementaria.
-
-  Investigación/descripción:
-  - Tref y Tfor/Tref continuos, sin corte fijo universal.
-  - HD, H1, H4+ y frecuencia dominante: experimentales, sin corte clínico universal.
-  """
+  """Conclusión integrada generada exclusivamente desde el estado canónico único."""
   sep_metrics = sep_metrics or {}
+  state = build_canonical_diagnostic_state(row, sep_metrics, hdf)
+  d = state["domains"]
+  phenotype, mechanism = _phenotype_from_canonical_state(state)
 
-  def fmt(v, dec=1, unit=""):
+  def _fmt(v, dec=1, unit=""):
     try:
       f = float(v)
       if np.isnan(f): return "no disponible"
@@ -4831,120 +5049,82 @@ def build_automatic_integrated_conclusion(row, sep_metrics=None, hdf=None):
     except Exception:
       return "no disponible"
 
-  # 1) Hipertensión central.
-  hta_status = central_hypertension_status(row)
-  hta_altered = bool(hta_status.get("ok") and hta_status.get("tiene_hta_central", False))
-  if hta_status.get("ok"):
-    hta_phrase = "presencia de hipertensión central" if hta_altered else "ausencia de hipertensión central"
-    hta_detail = (
-      f"PAS central {fmt(hta_status.get('pas_central'),0,' mmHg')} frente a límite diagnóstico "
-      f"{fmt(hta_status.get('umbral'),1,' mmHg')} ({hta_status.get('criterio','criterio no especificado')})"
-    )
-  else:
-    hta_phrase = "hipertensión central no clasificable"
-    hta_detail = hta_status.get("criterio", "PAS central no disponible")
+  # Seis dominios clínicos independientes. PP/PPA/RVSE están siempre incluidos.
+  hta = d["hta_central"]
+  pulse = d["carga_pulsatil"]
+  ppa = d["amplificacion"]
+  aug = d["aumentacion"]
+  refl = d["reflexion"]
+  rvse = d["rvse"]
+  harm = d["armonicos"]
 
-  # 2) Aumentación: solo P90 edad/sexo.
-  iau = to_float(row.get("iau")); au = to_float(row.get("au"))
-  aix_ref = get_saha_aix75_reference(row)
-  aug_altered = False
-  if aix_ref.get("ok"):
-    aug_altered = bool(aix_ref.get("alterada", False))
-    aug_phrase = "con aumentación central aumentada" if aug_altered else "sin aumentación central aumentada"
-    aug_detail = (
-      f"IAu/AIx {fmt(aix_ref.get('iau'),1,'%')} frente a P90 {fmt(aix_ref.get('p90'),1,'%')} "
-      f"para {aix_ref.get('sexo','')} {aix_ref.get('edad_grupo','')} años; percentil estimado {fmt(aix_ref.get('percentil'),0)}"
-    )
-  elif not np.isnan(iau):
-    aug_phrase = "aumentación central no clasificable por referencia"
-    aug_detail = f"IAu/AIx {fmt(iau,1,'%')} descriptivo; no se aplican cortes fijos de 25% o 35% sin referencia válida de edad/sexo"
-  elif not np.isnan(au):
-    aug_phrase = "aumentación central no clasificable por IAu/AIx"
-    aug_detail = f"Au {fmt(au,1,' mmHg')} descriptivo; la positividad aislada no define diagnóstico"
-  else:
-    aug_phrase = "aumentación central no clasificable"
-    aug_detail = "IAu/AIx y Au no disponibles"
-
-  # 3) Reflexión: RM primaria; RI complementaria; Tref continuo.
-  rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan); tref = sep_metrics.get("tref_ms", np.nan)
-  ratio = sep_metrics.get("tfor_tref", np.nan)
-  rmri_ref = get_rm_ri_reference(row, sep_metrics)
-  reflection_altered = False
-  reflection_details = []
-  if rmri_ref.get("ok") and rmri_ref.get("rm_clasif", {}).get("ok"):
-    rmc = rmri_ref["rm_clasif"]
-    reflection_altered = bool(rmc.get("alterada", False))
-    reflection_details.append(
-      f"RM {fmt(rm,2)} ({rmc.get('categoria')}; P75 {fmt(rmri_ref['rm_ref']['p75'],2)}, "
-      f"P90 {fmt(rmri_ref['rm_ref']['p90'],2)}, P95 {fmt(rmri_ref['rm_ref']['p95'],2)})"
-    )
-  elif not np.isnan(rm):
-    reflection_details.append(f"RM {fmt(rm,2)} sin referencia válida de edad/método")
-  if not np.isnan(ri):
-    reflection_details.append(f"RI {fmt(ri,2)} complementario, sin doble conteo diagnóstico")
-  if not np.isnan(tref):
-    reflection_details.append(f"Tref {fmt(tref,0,' ms')} continuo, sin corte fijo universal")
-  if not np.isnan(ratio):
-    reflection_details.append(f"Tfor/Tref {fmt(ratio,2)} continuo")
-
-  if reflection_details:
-    reflection_phrase = "patrón de reflexión aumentado por RM percentilar" if reflection_altered else "patrón de reflexión sin aumento percentilar de RM"
-    reflection_detail = "; ".join(reflection_details) + ". RI es complementario; Tref no genera diagnóstico automático."
-  else:
-    reflection_phrase = "patrón de reflexión no clasificable"
-    reflection_detail = "no hay métricas suficientes de separación Pf/Pb"
-
-  # 4) Armónicos: experimental, no suma dominio alterado.
-  hm = harmonic_distortion_metrics(hdf)
-  harmonic_altered = False
-  if hm.get("ok"):
-    harmonic_phrase = "perfil armónico experimental caracterizado, sin clasificación patológica transversal"
-    harmonic_detail = (
-      f"HD energético {fmt(hm.get('hd_percent'),1,'%')}; H1 {fmt(hm.get('h1_energy_percent'),1,'%')}; "
-      f"H4+ {fmt(hm.get('h4plus_energy_percent'),1,'%')}; frecuencia dominante {fmt(hm.get('dominant_frequency_hz'),2,' Hz')}. "
-      "No se aplican H1 <35%, H4+ >=25% ni un corte universal de HD."
-    )
-  else:
-    harmonic_phrase = "distribución armónica no caracterizable"
-    harmonic_detail = "sin datos suficientes de FFT/HD"
-
-  adverse_count = sum([bool(hta_altered), bool(aug_altered), bool(reflection_altered)])
-  if adverse_count >= 3:
-    global_phrase = "perfil vascular central desfavorable en los dominios clínicos clasificables"
-  elif adverse_count == 2:
-    global_phrase = "perfil vascular central con dos dominios clínicos alterados"
-  elif adverse_count == 1:
-    global_phrase = "perfil vascular central con una alteración clínica dominante aislada"
-  elif any("no clasificable" in x for x in [hta_phrase, aug_phrase, reflection_phrase]):
-    global_phrase = "perfil vascular central parcialmente clasificable"
-  else:
-    global_phrase = "perfil vascular central sin alteraciones mayores en los dominios clasificables"
-
-  conclusion = (
-    f"Conclusión integrada automática: El estudio evidencia {hta_phrase}, {aug_phrase} y {reflection_phrase}. "
-    f"El análisis armónico se informa como {harmonic_phrase}. En conjunto, configura un {global_phrase}. "
-    f"Valores y criterios: {hta_detail}; {aug_detail}; {reflection_detail}; {harmonic_detail}. "
-    "Las métricas armónicas y temporales experimentales no suman puntaje diagnóstico ni se convierten en evidencia independiente de rigidez."
+  domain_summary = (
+    f"HTA central: {hta['short']}; "
+    f"carga pulsátil: {pulse['short']}; "
+    f"amplificación: {ppa['short']}; "
+    f"aumentación: {aug['short']}; "
+    f"reflexión: {refl['short']}; "
+    f"reserva subendocárdica: {rvse['short']}"
   )
 
-  state = {
-    "hta_central_alterada": bool(hta_altered),
-    "aumentacion_alterada": bool(aug_altered),
-    "reflexion_alterada": bool(reflection_altered),
+  technical = []
+  if not np.isnan(to_float(hta.get("value"))): technical.append(f"PASc {_fmt(hta.get('value'),0,' mmHg')}")
+  if not np.isnan(to_float(pulse.get("value"))): technical.append(f"PPc {_fmt(pulse.get('value'),0,' mmHg')}")
+  if not np.isnan(to_float(ppa.get("value"))): technical.append(f"PPA {_fmt(ppa.get('value'),2)}")
+  if not np.isnan(to_float(aug.get("value"))): technical.append(f"IAu/AIx {_fmt(aug.get('value'),1,'%')}")
+  if not np.isnan(to_float(refl.get("value"))): technical.append(f"RM {_fmt(refl.get('value'),2)}")
+  ri = refl.get("ri", np.nan)
+  if not np.isnan(to_float(ri)): technical.append(f"RI {_fmt(ri,2)} complementario")
+  tref = refl.get("tref_ms", np.nan)
+  if not np.isnan(to_float(tref)): technical.append(f"Tref {_fmt(tref,0,' ms')} continuo")
+  if not np.isnan(to_float(rvse.get("value"))): technical.append(f"RVSE {_fmt(rvse.get('value'),1,'%')}")
+
+  if harm["status"] == "experimental":
+    hm = harm.get("metrics", {})
+    harmonic_phrase = (
+      f"Análisis armónico experimental: HD {_fmt(hm.get('hd_percent'),1,'%')}, "
+      f"H1 {_fmt(hm.get('h1_energy_percent'),1,'%')}, H4+ {_fmt(hm.get('h4plus_energy_percent'),1,'%')}; "
+      "sin clasificación patológica transversal."
+    )
+  else:
+    harmonic_phrase = "Análisis armónico no clasificable por datos insuficientes."
+
+  if state["count_altered"] == 0:
+    global_phrase = (
+      "sin alteraciones clínicas en los dominios evaluados" if not state["partially_classifiable"]
+      else "sin alteraciones en los dominios clasificables, con evaluación parcial por datos insuficientes"
+    )
+  elif state["count_altered"] == 1:
+    global_phrase = "con una alteración clínica dominante aislada"
+  else:
+    global_phrase = f"con {state['count_altered']} dominios clínicos alterados"
+
+  conclusion = (
+    f"Conclusión integrada automática: {domain_summary}. "
+    f"En conjunto, configura {phenotype}; mecanismo: {mechanism}. "
+    f"El perfil global queda {global_phrase}. "
+    + ("Valores de control: " + "; ".join(technical) + ". " if technical else "")
+    + harmonic_phrase + " "
+    "RI es complementario de RM; Tref y Tfor/Tref son continuos; los armónicos no suman evidencia diagnóstica ni definen rigidez por sí solos."
+  )
+
+  return conclusion, {
+    "canonical_state": state,
+    "hta_central_alterada": d["hta_central"]["altered"],
+    "carga_pulsatil_alterada": d["carga_pulsatil"]["altered"],
+    "amplificacion_alterada": d["amplificacion"]["altered"],
+    "aumentacion_alterada": d["aumentacion"]["altered"],
+    "reflexion_alterada": d["reflexion"]["altered"],
+    "rvse_alterado": d["rvse"]["altered"],
     "armonicos_alterados": False,
-    "armonicos_experimentales": bool(hm.get("ok")),
-    "cantidad_dominios_alterados": int(adverse_count),
+    "armonicos_experimentales": d["armonicos"]["status"] == "experimental",
+    "cantidad_dominios_alterados": state["count_altered"],
     "frase_global": global_phrase,
+    "fenotipo": phenotype,
   }
-  return conclusion, state
 
 def build_continuous_conclusions(row, wave_df, hdf):
-  """Conclusiones clínicas resumidas y didácticas, sin métricas en el texto.
-
-  Mantiene el cálculo interno completo, pero la Parte 2 del PDF queda redactada
-  por dominios clínicos, con conclusión breve por ítem y sin valores numéricos.
-  Las métricas quedan reservadas para tablas técnicas, gráficos y anexos.
-  """
+  """Conclusiones clínicas por dominios desde la misma fuente canónica."""
   sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
   sep_interp = interpret_wave_separation(sep_metrics, row)
   phenotype, _, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
@@ -4956,44 +5136,28 @@ def build_continuous_conclusions(row, wave_df, hdf):
   harm_txt, harm_short, harm_level = _didactic_grade_harmonics(hdf)
   phenotype_txt, phenotype_short = _didactic_phenotype_text(phenotype)
 
-  c1 = (
-    f"{pressure_txt} "
-    f"{pulse_txt} "
-    f"Conclusión diagnóstica: {pressure_short.capitalize()}"
-  )
+  # Sección 1: solo HTA central. No repite carga pulsátil.
+  c1 = f"{pressure_txt} Conclusión diagnóstica: {pressure_short.capitalize()}"
 
+  # Sección 2: PP central + PPA, independientes de HTA central.
   c2 = (
     f"{pulse_txt} "
-    "Este dominio resume el impacto de la presión pulsátil sobre la aorta y la conservación o pérdida de amplificación periférica. "
+    "Este dominio integra la carga pulsátil central y la amplificación periférico-central sin inferirlas desde la presencia de hipertensión central. "
     f"Conclusión breve: {pulse_short.capitalize()}"
   )
 
   c3 = (
-    "El análisis de aumentación central evalúa cuánto contribuye la onda reflejada al componente sistólico central. "
-    f"{aug_txt} "
-    f"Conclusión breve: {aug_short.capitalize()}"
+    "El análisis de aumentación central evalúa la contribución reflejada al componente sistólico central. "
+    f"{aug_txt} Conclusión breve: {aug_short.capitalize()}"
   )
+  c4 = f"{wave_txt} Conclusión breve: {wave_short.capitalize()}"
+  c5 = f"{rvse_txt} Conclusión breve: {rvse_short.capitalize()}"
+  c6 = f"{harm_txt} Conclusión breve: {harm_short.capitalize()}"
 
-  c4 = (
-    f"{wave_txt} "
-    f"Conclusión breve: {wave_short.capitalize()}"
-  )
-
-  c5 = (
-    f"{rvse_txt} "
-    f"Conclusión breve: {rvse_short.capitalize()}"
-  )
-
-  c6 = (
-    f"{harm_txt} "
-    f"Conclusión breve: {harm_short.capitalize()}"
-  )
-
-  automatic_integrated_text, automatic_integrated_state = build_automatic_integrated_conclusion(row, sep_metrics, hdf)
-
+  automatic_integrated_text, _ = build_automatic_integrated_conclusion(row, sep_metrics, hdf)
   c7 = (
     f"{phenotype_txt} "
-    "Esta conclusión integra presión central, carga pulsátil, aumentación, reflexión de onda, reserva subendocárdica y morfología armónica. "
+    "Esta conclusión utiliza exactamente los mismos estados diagnósticos que las secciones previas. "
     f"Conclusión integrada: {phenotype_short.capitalize()} "
     f"{automatic_integrated_text}"
   )
@@ -5009,8 +5173,12 @@ def build_continuous_conclusions(row, wave_df, hdf):
   ], sep_df, sep_metrics, sep_interp
 
 def classify_central_pressure_phenotype(row, sep_metrics, hdf):
-  """Fenotipo integrado con separación explícita entre evidencia clínica y experimental."""
-  def fmt(v, dec=1, unit=""):
+  """Fenotipo integrado sin puntajes: usa exclusivamente el estado canónico único."""
+  state = build_canonical_diagnostic_state(row, sep_metrics, hdf)
+  d = state["domains"]
+  phenotype, mechanism = _phenotype_from_canonical_state(state)
+
+  def _fmt(v, dec=1, unit=""):
     try:
       f = float(v)
       if np.isnan(f): return "no disponible"
@@ -5018,161 +5186,44 @@ def classify_central_pressure_phenotype(row, sep_metrics, hdf):
     except Exception:
       return "no disponible"
 
-  def add_metric(target, altered, label, value, criterion, interpretation, weight=0):
-    target.append({
-      "altered": bool(altered), "label": label, "value": value,
-      "criterion": criterion, "interpretation": interpretation, "weight": int(weight)
-    })
-    return int(weight) if altered else 0
-
-  pas_c = to_float(row.get("pas_central")); pp_c = to_float(row.get("pp_central")); iau = to_float(row.get("iau")); au = to_float(row.get("au"))
-  pas_r = to_float(row.get("pas_radial")); pp_r = to_float(row.get("pp_radial"))
-  ppa = pp_r / pp_c if not np.isnan(pp_r) and not np.isnan(pp_c) and pp_c > 0 else np.nan
-  rm = sep_metrics.get("rm", np.nan); ri = sep_metrics.get("ri", np.nan); tref = sep_metrics.get("tref_ms", np.nan)
-  pb = sep_metrics.get("pb_pico", np.nan); pf = sep_metrics.get("pf_pico", np.nan)
-  rvse_calc = sep_metrics.get("rvse_calculado_%", np.nan)
-
-  pressure_metrics, wave_metrics, harmonic_metrics = [], [], []
-  pressure_score = 0
-
-  # PAS central por referencia principal.
-  saha_ref = get_saha_central_sbp_reference(row)
-  if saha_ref.get("ok"):
-    if saha_ref.get("alterada"):
-      pressure_score += add_metric(pressure_metrics, True, "PAS central por SAHA edad/sexo", fmt(pas_c,0," mmHg"),
-        f"CON HIPERTENSIÓN CENTRAL si >=P90 ({saha_ref['p90']:.1f} mmHg)",
-        f"percentil {saha_ref['percentil']:.0f}; ajustada por edad/sexo/calibración", 3)
+  def _row(key):
+    x = d[key]
+    value = x.get("value", np.nan)
+    if key in ("hta_central", "carga_pulsatil"):
+      valtxt = _fmt(value, 0, " mmHg")
+    elif key == "amplificacion":
+      valtxt = _fmt(value, 2)
+    elif key == "aumentacion":
+      valtxt = _fmt(value, 1, "%")
+    elif key == "reflexion":
+      valtxt = _fmt(value, 2)
+    elif key == "rvse":
+      valtxt = _fmt(value, 1, "%")
     else:
-      add_metric(pressure_metrics, False, "PAS central por SAHA edad/sexo", fmt(pas_c,0," mmHg"),
-        f"SIN HIPERTENSIÓN CENTRAL si <P90 ({saha_ref['p90']:.1f} mmHg)",
-        f"percentil {saha_ref['percentil']:.0f}", 0)
-  elif not np.isnan(pas_c):
-    # Se conserva el respaldo operativo preexistente solo para PAS central cuando no hay tabla aplicable.
-    if pas_c >= 130:
-      pressure_score += add_metric(pressure_metrics, True, "PAS central", fmt(pas_c,0," mmHg"), "respaldo operativo >=130 mmHg", "presión central elevada", 2)
-    else:
-      add_metric(pressure_metrics, False, "PAS central", fmt(pas_c,0," mmHg"), "respaldo operativo <130 mmHg", "sin hipertensión central por respaldo", 0)
-
-  if not np.isnan(pp_c):
-    if pp_c >= 60:
-      pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c,0," mmHg"), ">=60 mmHg", "carga pulsátil central alta", 2)
-    elif pp_c >= 50:
-      pressure_score += add_metric(pressure_metrics, True, "PP central", fmt(pp_c,0," mmHg"), ">=50 mmHg", "carga pulsátil central aumentada", 1)
-    else:
-      add_metric(pressure_metrics, False, "PP central", fmt(pp_c,0," mmHg"), "<50 mmHg", "sin aumento mayor de carga pulsátil", 0)
-
-  # IAu/AIx solo por P90 edad/sexo. Sin fallback 25/35%.
-  aix = get_saha_aix75_reference(row)
-  if aix.get("ok"):
-    if aix.get("alterada"):
-      pressure_score += add_metric(pressure_metrics, True, "IAu/AIx edad/sexo", fmt(iau,1,"%"),
-        f">=P90 ({aix['p90']:.1f}%)", f"percentil {aix['percentil']:.0f}; aumentación central aumentada", 2)
-    else:
-      add_metric(pressure_metrics, False, "IAu/AIx edad/sexo", fmt(iau,1,"%"),
-        f"<P90 ({aix['p90']:.1f}%)", f"percentil {aix['percentil']:.0f}; no aumentado", 0)
-  elif not np.isnan(iau):
-    add_metric(pressure_metrics, False, "IAu/AIx", fmt(iau,1,"%"), "sin corte fijo 25/35%; requiere edad/sexo válidos", "descriptivo no clasificable", 0)
-  if not np.isnan(au):
-    add_metric(pressure_metrics, False, "Au", fmt(au,1," mmHg"), "descriptivo; sin diagnóstico aislado por positividad", "componente de aumentación", 0)
-
-  if not np.isnan(ppa):
-    if ppa < 1.20:
-      pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa,2), "<1,20", "amplificación marcadamente reducida", 2)
-    elif ppa < 1.30:
-      pressure_score += add_metric(pressure_metrics, True, "PPA", fmt(ppa,2), "<1,30", "amplificación reducida", 1)
-    else:
-      add_metric(pressure_metrics, False, "PPA", fmt(ppa,2), ">=1,30", "amplificación conservada", 0)
-
-  if not np.isnan(rvse_calc):
-    if rvse_calc < 120:
-      pressure_score += add_metric(pressure_metrics, True, "RVSE/SEVR calculado", fmt(rvse_calc,1,"%"), "<120%", "reserva subendocárdica relativa reducida", 2)
-    else:
-      add_metric(pressure_metrics, False, "RVSE/SEVR calculado", fmt(rvse_calc,1,"%"), ">=120%", "balance subendocárdico conservado", 0)
-
-  # Separación de ondas: RM percentilar primaria; RI y Tref sin doble conteo.
-  wave_score = 0
-  rmri = get_rm_ri_reference(row, sep_metrics)
-  if rmri.get("ok") and rmri.get("rm_clasif", {}).get("ok"):
-    c = rmri["rm_clasif"]
-    if c.get("grado") == "marcada":
-      wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm,2), f">=P95 ({rmri['rm_ref']['p95']:.2f})", f"{c.get('categoria')}; percentil {c.get('percentil',np.nan):.0f}", 4)
-    elif c.get("alterada"):
-      wave_score += add_metric(wave_metrics, True, "RM Pb/Pf", fmt(rm,2), f">=P90 ({rmri['rm_ref']['p90']:.2f})", f"{c.get('categoria')}; percentil {c.get('percentil',np.nan):.0f}", 3)
-    elif c.get("grado") == "intermedia":
-      add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm,2), f"P75-P90 ({rmri['rm_ref']['p75']:.2f}-{rmri['rm_ref']['p90']:.2f})", "relativamente elevada, sin criterio diagnóstico de aumento", 0)
-    else:
-      add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm,2), f"<P75 ({rmri['rm_ref']['p75']:.2f})", "esperada para edad/método", 0)
-  elif not np.isnan(rm):
-    add_metric(wave_metrics, False, "RM Pb/Pf", fmt(rm,2), "requiere edad y método válidos", "no clasificable por referencia", 0)
-
-  if not np.isnan(ri):
-    ri_criterion = f"P90 {rmri['ri_ref']['p90']:.2f}; complementario" if rmri.get("ok") else "sin corte fijo universal"
-    add_metric(wave_metrics, False, "RI (complementario)", fmt(ri,2), ri_criterion, "descriptor proporcional derivado de Pf/Pb; sin puntaje", 0)
-  if not np.isnan(tref):
-    add_metric(wave_metrics, False, "Tref", fmt(tref,0," ms"), "variable continua; sin corte universal de 320 ms", "descriptor temporal de investigación", 0)
-  ratio = sep_metrics.get("tfor_tref", np.nan)
-  if not np.isnan(ratio):
-    add_metric(wave_metrics, False, "Tfor/Tref", fmt(ratio,2), "continuo; sin umbral universal", "descriptor temporal", 0)
-  if not np.isnan(pb) and not np.isnan(pf) and pf > 0:
-    add_metric(wave_metrics, False, "Pf/Pb pico", f"Pf {fmt(pf,1,' mmHg')} / Pb {fmt(pb,1,' mmHg')}", "descriptivo", "componentes directos", 0)
-
-  # Armónicos: todos descriptivos/experimentales; score = 0.
-  hm = harmonic_distortion_metrics(hdf)
-  harmonic_score = 0
-  if hm.get("ok"):
-    add_metric(harmonic_metrics, False, "HD energético", fmt(hm.get("hd_percent"),1,"%"), "sin corte clínico universal", "métrica experimental de distorsión energética", 0)
-    add_metric(harmonic_metrics, False, "H1", fmt(hm.get("h1_energy_percent"),1,"%"), "sin corte fijo H1 <35%", "descriptivo", 0)
-    add_metric(harmonic_metrics, False, "H4+", fmt(hm.get("h4plus_energy_percent"),1,"%"), "sin corte fijo H4+ >=25%", "descriptivo", 0)
-    add_metric(harmonic_metrics, False, "Frecuencia dominante", fmt(hm.get("dominant_frequency_hz"),2," Hz"), "3,5 Hz solo referencia mecanística", "no umbral diagnóstico", 0)
-  else:
-    add_metric(harmonic_metrics, False, "Perfil armónico", "no disponible", "requiere FFT válida", "sin clasificación", 0)
-
-  high_pressure = pressure_score >= 3
-  high_wave = wave_score >= 3
-  rvse_reduced = (not np.isnan(rvse_calc)) and rvse_calc < 120
-
-  if high_pressure and high_wave and rvse_reduced:
-    phenotype = "Fenotipo vascular central rígido-reflectivo con RVSE reducido"
-    mechanism = "carga central aumentada, RM percentilar aumentada y menor reserva subendocárdica relativa"
-  elif high_pressure and high_wave:
-    phenotype = "Fenotipo vascular central rígido-reflectivo"
-    mechanism = "carga central aumentada asociada a RM por encima del P90 de edad/método"
-  elif high_pressure and rvse_reduced:
-    phenotype = "Fenotipo vascular de carga central elevada con compromiso subendocárdico relativo"
-    mechanism = "presión/carga pulsátil central aumentada con RVSE reducido"
-  elif high_wave and rvse_reduced:
-    phenotype = "Fenotipo vascular reflectivo con compromiso subendocárdico relativo"
-    mechanism = "RM percentilar aumentada asociada a RVSE reducido"
-  elif high_wave:
-    phenotype = "Fenotipo vascular reflectivo predominante"
-    mechanism = "RM aumentada para edad y método, sin doble conteo por RI ni Tref"
-  elif high_pressure:
-    phenotype = "Fenotipo vascular de presión central elevada no reflectivo predominante"
-    mechanism = "elevación de carga central sin RM percentilar aumentada"
-  elif rvse_reduced:
-    phenotype = "Fenotipo vascular con reserva subendocárdica relativa reducida aislada"
-    mechanism = "RVSE reducido sin combinación dominante de carga central o RM aumentada"
-  else:
-    phenotype = "Fenotipo vascular central conservado o de bajo impacto pulsátil"
-    mechanism = "sin combinación dominante de sobrecarga central o RM percentilar aumentada"
-
-  altered = [m for m in pressure_metrics + wave_metrics if m["altered"]]
-  altered_text = "; ".join([f"{m['label']} {m['value']} ({m['interpretation']})" for m in altered]) or "no se identifican métricas alteradas mayores en los dominios clínicos clasificables"
-  total_score = pressure_score + wave_score
+      valtxt = _fmt(value, 1)
+    return [x["label"], x["status"], valtxt, x.get("criterion", ""), x.get("short", "")]
 
   table = [
-    ["Dominio", "Puntaje", "Métricas consideradas"],
-    ["Presión central / aumentación / RVSE", str(pressure_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in pressure_metrics]) or "sin datos"],
-    ["Separación de ondas", str(wave_score), "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in wave_metrics]) or "sin datos"],
-    ["Armónicos (investigación)", "N/A", "; ".join([f"{m['label']} {m['value']}: {m['interpretation']}" for m in harmonic_metrics])],
-    ["Total clínico", str(total_score), "Armónicos y Tref no suman puntaje diagnóstico"],
+    ["Dominio", "Estado", "Valor", "Criterio", "Conclusión"],
+    _row("hta_central"),
+    _row("carga_pulsatil"),
+    _row("amplificacion"),
+    _row("aumentacion"),
+    _row("reflexion"),
+    _row("rvse"),
+    ["Análisis armónico", d["armonicos"]["status"], _fmt(d["armonicos"].get("value"),1,"%"), d["armonicos"].get("criterion", ""), d["armonicos"].get("short", "")],
   ]
+
+  altered_text = "; ".join(d[k]["short"] for k in state["altered_keys"])
+  if not altered_text:
+    altered_text = "no se identifican dominios clínicos alterados entre los clasificables"
 
   text = (
     f"Fenotipo final: {phenotype}. Mecanismo predominante: {mechanism}. "
-    f"Métricas clínicas alteradas: {altered_text}. "
-    "RM se clasifica por percentiles de edad/método; RI es complementario; Tref es continuo. "
-    "HD, H1, H4+ y frecuencia dominante se informan como investigación y no definen por sí solos rigidez o complejidad patológica. "
+    f"Dominios clínicos alterados: {altered_text}. "
+    "La HTA central y la carga pulsátil se clasifican por separado; PPA, IAu/AIx, RM y RVSE conservan estados independientes. "
+    "RI es complementario de RM y no se cuenta como evidencia adicional; Tref es continuo. "
+    "HD, H1, H4+ y frecuencia dominante son métricas de investigación y no generan fenotipos armónicos patológicos ni diagnóstico de rigidez. "
     f"{longitudinal_harmonic_mdc_note()}"
   )
   return phenotype, text, table
