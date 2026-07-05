@@ -5532,11 +5532,17 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
   story.append(Spacer(1, 1.8*mm))
 
   story.append(_section("2. Conclusiones clínicas resumidas y didácticas"))
-  conclusion_rows = []
-  for title, body in conclusion_blocks:
-    conclusion_rows.append([Paragraph(pdf_text(title), styles["MiniTitlePAC"])])
-    conclusion_rows.append([Paragraph(_pdf_bold_conclusions(body), styles["ConclusionPAC"])])
-  story.append(Table(conclusion_rows, colWidths=[188*mm], style=TableStyle([
+
+  # Los puntos 1-6 permanecen en el primer bloque de conclusiones.
+  # El punto 7 se fuerza a comenzar en la página siguiente para evitar que su
+  # subtítulo quede huérfano al pie de la primera página. Título y cuerpo se
+  # mantienen juntos mediante KeepTogether.
+  conclusion_rows_page1 = []
+  for title, body in conclusion_blocks[:6]:
+    conclusion_rows_page1.append([Paragraph(pdf_text(title), styles["MiniTitlePAC"])])
+    conclusion_rows_page1.append([Paragraph(_pdf_bold_conclusions(body), styles["ConclusionPAC"])])
+
+  conclusion_table_style = TableStyle([
     ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
     ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
     ("INNERGRID", (0,0), (-1,-1), 0.12, colors.HexColor("#ECEFF1")),
@@ -5545,9 +5551,52 @@ def build_pdf(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=
     ("RIGHTPADDING", (0,0), (-1,-1), 5),
     ("TOPPADDING", (0,0), (-1,-1), 2.4),
     ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
-  ])))
+  ])
 
-  # Sin salto forzado: ReportLab decide el pase de página y evita blancos grandes.
+  if conclusion_rows_page1:
+    story.append(Table(
+      conclusion_rows_page1,
+      colWidths=[188*mm],
+      style=conclusion_table_style
+    ))
+
+  # Punto 7: comienza en página 2 y conserva subtítulo + conclusión unidos.
+  if len(conclusion_blocks) >= 7:
+    story.append(PageBreak())
+    title7, body7 = conclusion_blocks[6]
+    point7_table = Table([
+      [Paragraph(pdf_text(title7), styles["MiniTitlePAC"])],
+      [Paragraph(_pdf_bold_conclusions(body7), styles["ConclusionPAC"])],
+    ], colWidths=[188*mm], style=TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
+      ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
+      ("INNERGRID", (0,0), (-1,-1), 0.12, colors.HexColor("#ECEFF1")),
+      ("VALIGN", (0,0), (-1,-1), "TOP"),
+      ("LEFTPADDING", (0,0), (-1,-1), 5),
+      ("RIGHTPADDING", (0,0), (-1,-1), 5),
+      ("TOPPADDING", (0,0), (-1,-1), 2.4),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
+    ]))
+    story.append(KeepTogether([point7_table]))
+
+  # Cualquier bloque futuro adicional (8+) se conserva después del punto 7.
+  if len(conclusion_blocks) > 7:
+    extra_rows = []
+    for title, body in conclusion_blocks[7:]:
+      extra_rows.append([Paragraph(pdf_text(title), styles["MiniTitlePAC"])])
+      extra_rows.append([Paragraph(_pdf_bold_conclusions(body), styles["ConclusionPAC"])])
+    story.append(Spacer(1, 1.2*mm))
+    story.append(Table(extra_rows, colWidths=[188*mm], style=TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
+      ("BOX", (0,0), (-1,-1), 0.4, colors.HexColor("#90A4AE")),
+      ("INNERGRID", (0,0), (-1,-1), 0.12, colors.HexColor("#ECEFF1")),
+      ("VALIGN", (0,0), (-1,-1), "TOP"),
+      ("LEFTPADDING", (0,0), (-1,-1), 5),
+      ("RIGHTPADDING", (0,0), (-1,-1), 5),
+      ("TOPPADDING", (0,0), (-1,-1), 2.4),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 2.4),
+    ])))
+
   story.append(Spacer(1, 2.5*mm))
   story.append(_section("3. Gráficos del informe"))
   story.append(Spacer(1, 1.5*mm))
