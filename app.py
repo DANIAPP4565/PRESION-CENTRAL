@@ -2,7 +2,7 @@
 # App Streamlit para informe de Presión Aórtica Central (PAC)
 # Importa PDF tipo MODELO PAC, extrae variables, genera historial Excel y PDF médico integrado.
 
-import io, re, math, tempfile, json, textwrap
+import io, re, math, tempfile, json, textwrap, zipfile, gc, hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -5824,16 +5824,352 @@ def save_history(row):
     return pd.DataFrame([row])
 
 
+# -----------------------------------------------------------------------------
+# PROCESAMIENTO MASIVO DE PDF PAC
+# -----------------------------------------------------------------------------
+BATCH_MAX_FILES = 100
+
+
+def _batch_excel_safe_value(value):
+  """Normaliza valores para Excel/CSV sin perder datos clínicos."""
+  if isinstance(value, np.generic):
+    value = value.item()
+  if value is None:
+    return ""
+  if isinstance(value, float) and np.isnan(value):
+    return ""
+  if isinstance(value, (dict, list, tuple, set)):
+    try:
+      value = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+      value = str(value)
+  if isinstance(value, str):
+    # Excel no admite determinados caracteres de control XML.
+    value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", " ", value)
+  return value
+
+
+def _batch_clean_dataframe(df):
+  out = df.copy()
+  for col in out.columns:
+    out[col] = out[col].map(_batch_excel_safe_value)
+  return out
+
+
+def _batch_summary_excel_bytes(summary_df):
+  """Genera un libro Excel con resumen general, exitosos y errores."""
+  summary_df = _batch_clean_dataframe(summary_df)
+  ok_df = summary_df[summary_df.get("estado", pd.Series(dtype=str)) == "GENERADO"].copy()
+  err_df = summary_df[summary_df.get("estado", pd.Series(dtype=str)) != "GENERADO"].copy()
+  buf = io.BytesIO()
+  with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    summary_df.to_excel(writer, sheet_name="Resumen_lote", index=False)
+    ok_df.to_excel(writer, sheet_name="Informes_generados", index=False)
+    err_df.to_excel(writer, sheet_name="Errores", index=False)
+  return buf.getvalue()
+
+
+def _batch_unique_filename(filename, used_names):
+  """Evita sobrescribir informes de pacientes con nombres coincidentes."""
+  filename = safe_text(filename) or "INFORME_PAC.pdf"
+  key = filename.casefold()
+  if key not in used_names:
+    used_names[key] = 1
+    return filename
+  used_names[key] += 1
+  p = Path(filename)
+  return f"{p.stem} ({used_names[key]}){p.suffix or '.pdf'}"
+
+
+def _batch_files_signature(files):
+  """Firma estable para advertir si cambió la selección después de procesar."""
+  h = hashlib.sha256()
+  for item in list(files or []):
+    name = safe_text(getattr(item, "name", "archivo.pdf"))
+    data = item.getvalue() if hasattr(item, "getvalue") else b""
+    h.update(name.encode("utf-8", errors="ignore"))
+    h.update(str(len(data or b"")).encode("ascii"))
+    h.update(bytes(data or b""))
+  return h.hexdigest()
+
+
+def append_batch_history(rows):
+  """Agrega estudios exitosos al historial sin borrar registros existentes.
+
+  La escritura se realiza una sola vez al finalizar el lote. Se eliminan únicamente
+  duplicados exactos por identidad del estudio, conservando la versión más reciente.
+  """
+  if not rows:
+    if HISTORIAL_FILE.exists():
+      try:
+        return pd.read_excel(HISTORIAL_FILE)
+      except Exception:
+        pass
+    return pd.DataFrame()
+
+  clean_rows = []
+  for row in rows:
+    clean_rows.append({k: _batch_excel_safe_value(v) for k, v in dict(row).items()})
+  new_df = pd.DataFrame(clean_rows)
+
+  if HISTORIAL_FILE.exists():
+    try:
+      old_df = pd.read_excel(HISTORIAL_FILE)
+      out = pd.concat([old_df, new_df], ignore_index=True, sort=False)
+    except Exception:
+      out = new_df
+  else:
+    out = new_df
+
+  dedupe_candidates = [
+    "paciente", "estudio", "fecha", "hora", "pas_central", "pad_central"
+  ]
+  dedupe_cols = [c for c in dedupe_candidates if c in out.columns]
+  if dedupe_cols:
+    out = out.drop_duplicates(subset=dedupe_cols, keep="last", ignore_index=True)
+  out = _batch_clean_dataframe(out)
+  out.to_excel(HISTORIAL_FILE, index=False)
+  return out
+
+
+def process_pac_pdf_batch(
+  uploaded_files,
+  metodo_calibracion="SD_PAOC",
+  metodo_rmri="SCOR_RADIAL",
+  logo_png=None,
+  firma_png=None,
+  sello_png=None,
+  include_originals=False,
+  save_to_history=False,
+  progress_callback=None,
+):
+  """Procesa múltiples PDF PAC y devuelve informes individuales dentro de un ZIP.
+
+  Cada archivo usa exactamente el mismo flujo clínico del modo individual:
+  extracción del PDF, digitalización de la curva real, separación de ondas,
+  armónicos, fenotipo integrado y construcción del PDF médico.
+  Un error individual queda registrado y no interrumpe el resto del lote.
+  """
+  files = list(uploaded_files or [])
+  if not files:
+    raise ValueError("No se seleccionaron archivos PDF para procesar.")
+  if len(files) > BATCH_MAX_FILES:
+    raise ValueError(
+      f"El lote contiene {len(files)} PDF. El máximo por ejecución es {BATCH_MAX_FILES} "
+      "para proteger la memoria de Streamlit Cloud. Divida la carga en varios lotes."
+    )
+
+  summary_rows = []
+  generated_reports = []
+  successful_history_rows = []
+  used_names = {}
+  total = len(files)
+
+  for index, uploaded in enumerate(files, start=1):
+    source_name = safe_text(getattr(uploaded, "name", f"estudio_{index}.pdf"))
+    if progress_callback:
+      progress_callback(index - 1, total, source_name, "PROCESANDO")
+
+    base_summary = {
+      "orden": index,
+      "archivo_origen": source_name,
+      "estado": "ERROR",
+      "paciente": "",
+      "estudio": "",
+      "fecha": "",
+      "hora": "",
+      "obra_social": "",
+      "edad": "",
+      "sexo": "",
+      "pas_central_mmHg": "",
+      "pad_central_mmHg": "",
+      "pp_central_mmHg": "",
+      "ppa": "",
+      "diagnostico_hta_central": "",
+      "rm_pb_pf": "",
+      "ri": "",
+      "rvse_calculado_pct": "",
+      "fenotipo_final": "",
+      "informe_generado": "",
+      "pagina_curva": "",
+      "color_curva": "",
+      "puntos_curva": "",
+      "conclusion_integrada": "",
+      "error": "",
+    }
+
+    try:
+      raw = uploaded.getvalue() if hasattr(uploaded, "getvalue") else uploaded.read()
+      pdf_in = bytes(raw or b"")
+      if not pdf_in:
+        raise ValueError("El PDF está vacío.")
+      if not pdf_in.lstrip().startswith(b"%PDF"):
+        raise ValueError("El archivo no tiene una cabecera PDF válida.")
+
+      text = extract_pdf_text(pdf_in)
+      row = parse_model_pac_from_pdf(pdf_in, text)
+      if not isinstance(row, dict):
+        raise ValueError("No se pudieron estructurar los datos del estudio.")
+      row = dict(row)
+      row["metodo_calibracion_pac"] = metodo_calibracion
+      row["metodo_referencia_rmri"] = metodo_rmri
+
+      screenshot_png = render_pdf_page_png(pdf_in, page_index=1)
+      wave_df, curve_debug_png, curve_meta = digitize_curve_from_pdf(
+        pdf_in, row, max_pages=4, zoom=3.0
+      )
+      hdf = harmonic_analysis(wave_df)
+      sep_df, sep_metrics = estimate_wave_separation(wave_df, row)
+      final_phenotype, _, _ = classify_central_pressure_phenotype(row, sep_metrics, hdf)
+      integrated_text, _ = build_automatic_integrated_conclusion(row, sep_metrics, hdf)
+      hta_status = central_hypertension_status(row)
+      _, _, _, _, ppa, _ = central_diagnosis(row)
+
+      report_bytes = ensure_download_bytes(
+        build_pdf(
+          row,
+          wave_df,
+          hdf,
+          screenshot_png,
+          firma_png=firma_png,
+          sello_png=sello_png,
+          logo_png=logo_png,
+        )
+      )
+      if not report_bytes or not report_bytes.lstrip().startswith(b"%PDF"):
+        raise ValueError("El generador no devolvió un PDF médico válido.")
+
+      report_name = _batch_unique_filename(nombre_archivo_informe_pac(row), used_names)
+      generated_reports.append({
+        "filename": report_name,
+        "data": report_bytes,
+        "patient": safe_text(row.get("paciente")) or "Sin identificar",
+        "source_name": source_name,
+        "original": pdf_in if include_originals else None,
+      })
+      successful_history_rows.append(row)
+
+      base_summary.update({
+        "estado": "GENERADO",
+        "paciente": safe_text(row.get("paciente")),
+        "estudio": safe_text(row.get("estudio")),
+        "fecha": safe_text(row.get("fecha")),
+        "hora": safe_text(row.get("hora")),
+        "obra_social": safe_text(row.get("obra_social")),
+        "edad": to_float(row.get("edad")),
+        "sexo": safe_text(row.get("sexo")),
+        "pas_central_mmHg": to_float(row.get("pas_central")),
+        "pad_central_mmHg": to_float(row.get("pad_central")),
+        "pp_central_mmHg": to_float(row.get("pp_central")),
+        "ppa": ppa,
+        "diagnostico_hta_central": hta_status.get("diagnostico_breve", ""),
+        "rm_pb_pf": to_float(sep_metrics.get("rm")),
+        "ri": to_float(sep_metrics.get("ri")),
+        "rvse_calculado_pct": to_float(sep_metrics.get("rvse_calculado_%")),
+        "fenotipo_final": final_phenotype,
+        "informe_generado": report_name,
+        "pagina_curva": curve_meta.get("pagina", ""),
+        "color_curva": curve_meta.get("color_detectado", ""),
+        "puntos_curva": curve_meta.get("puntos", len(wave_df)),
+        "conclusion_integrada": integrated_text,
+        "error": "",
+      })
+      if progress_callback:
+        progress_callback(index, total, source_name, "GENERADO")
+
+    except Exception as exc:
+      base_summary["error"] = safe_text(exc)[:1500]
+      if progress_callback:
+        progress_callback(index, total, source_name, "ERROR")
+    finally:
+      summary_rows.append(base_summary)
+      # Evita acumulación de figuras y matrices de imagen entre pacientes.
+      try:
+        plt.close("all")
+      except Exception:
+        pass
+      gc.collect()
+
+  summary_df = pd.DataFrame(summary_rows)
+  excel_bytes = _batch_summary_excel_bytes(summary_df)
+
+  history_total = None
+  if save_to_history and successful_history_rows:
+    history_total = len(append_batch_history(successful_history_rows))
+
+  zip_buffer = io.BytesIO()
+  used_original_names = {}
+  with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for original_index, item in enumerate(generated_reports, start=1):
+      zf.writestr(f"informes_pdf/{item['filename']}", item["data"])
+      if include_originals and item.get("original"):
+        original_name = _componente_seguro_nombre_archivo(
+          item["source_name"], f"original_{original_index}.pdf"
+        )
+        if not original_name.lower().endswith(".pdf"):
+          original_name += ".pdf"
+        original_name = _batch_unique_filename(original_name, used_original_names)
+        zf.writestr(f"pdf_originales/{original_name}", item["original"])
+    zf.writestr("resumen_lote_pac.xlsx", excel_bytes)
+    error_df = summary_df[summary_df["estado"] != "GENERADO"]
+    if not error_df.empty:
+      zf.writestr(
+        "errores_lote.csv",
+        _batch_clean_dataframe(error_df).to_csv(index=False).encode("utf-8-sig"),
+      )
+    manifest = (
+      "PROCESAMIENTO MASIVO PAC\n"
+      f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+      f"PDF recibidos: {total}\n"
+      f"Informes generados: {len(generated_reports)}\n"
+      f"Errores: {total - len(generated_reports)}\n"
+      f"Método calibración PAC: {metodo_calibracion}\n"
+      f"Método referencia RM/RI: {metodo_rmri}\n"
+      "Cada informe fue generado desde la curva real digitalizada de su PDF.\n"
+    )
+    zf.writestr("LEEME.txt", manifest.encode("utf-8"))
+
+  return {
+    "zip_bytes": zip_buffer.getvalue(),
+    "excel_bytes": excel_bytes,
+    "summary_df": summary_df,
+    "reports": generated_reports,
+    "total": total,
+    "success_count": len(generated_reports),
+    "error_count": total - len(generated_reports),
+    "history_total": history_total,
+  }
+
+
 st.title(APP_TITLE)
 st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF integrado, historial Excel y análisis armónico.")
 
 with st.sidebar:
-  st.header("1) Importar estudio")
-  pdf_file = st.file_uploader("PDF original PAC / Exxer", type=["pdf"])
-  wave_file = st.file_uploader("Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)", type=["csv", "txt"])
+  st.header("1) Informe individual")
+  pdf_file = st.file_uploader(
+    "PDF original PAC / Exxer",
+    type=["pdf"],
+    key="pac_pdf_individual",
+  )
+  wave_file = st.file_uploader(
+    "Opcional: CSV/TXT curva central REAL del paciente (tiempo_ms, presion_mmHg)",
+    type=["csv", "txt"],
+    key="pac_curva_individual",
+  )
+  st.markdown("---")
+  st.header("2) Informes por lotes")
+  batch_pdf_files = st.file_uploader(
+    "Importar múltiples PDF PAC",
+    type=["pdf"],
+    accept_multiple_files=True,
+    key="pac_pdf_lote",
+    help=f"Seleccione hasta {BATCH_MAX_FILES} PDF. Se generará un informe individual por paciente y un ZIP para descargar todo el lote.",
+  )
+  if batch_pdf_files:
+    st.caption(f"PDF seleccionados: {len(batch_pdf_files)}")
   st.markdown("---")
   st.info("Modo datos reales: si no se carga CSV/TXT, la app digitaliza automáticamente la curva desde la imagen del PDF. No se aceptan curvas sintéticas ni genéricas.")
-  st.caption("La carga de logo, firma y sello está visible en la pantalla principal, debajo del título de la app.")
+  st.caption("El logo, la firma y el sello cargados en la pantalla principal se aplican también a todos los informes del lote.")
 
 base = {}
 screenshot = None
@@ -5889,6 +6225,220 @@ logo_png = read_uploaded_image_bytes(logo_file)
 firma_png = read_uploaded_image_bytes(firma_file)
 sello_png = read_uploaded_image_bytes(sello_file)
 
+# -----------------------------------------------------------------------------
+# INTERFAZ DE PROCESAMIENTO POR LOTES
+# -----------------------------------------------------------------------------
+st.markdown("## Generación de informes PAC por lotes")
+st.caption(
+  "Importe varios PDF del equipo. La app procesa cada paciente de forma independiente, "
+  "genera un PDF médico por estudio y prepara un archivo ZIP para descargar el lote completo."
+)
+
+with st.expander(
+  "Procesar múltiples PDF y descargar informes individuales",
+  expanded=bool(batch_pdf_files),
+):
+  batch_count = len(batch_pdf_files or [])
+  if batch_count:
+    total_mb = sum(len(f.getvalue()) for f in batch_pdf_files) / (1024 * 1024)
+    st.info(
+      f"Lote preparado: {batch_count} PDF, {total_mb:.1f} MB. "
+      f"Máximo permitido por ejecución: {BATCH_MAX_FILES} PDF."
+    )
+    with st.expander("Ver archivos seleccionados", expanded=False):
+      selected_df = pd.DataFrame([
+        {
+          "archivo": safe_text(getattr(f, "name", "archivo.pdf")),
+          "tamaño_MB": round(len(f.getvalue()) / (1024 * 1024), 2),
+        }
+        for f in batch_pdf_files
+      ])
+      st.dataframe(selected_df, use_container_width=True, hide_index=True)
+  else:
+    st.info("Seleccione los PDF en la barra lateral, en “2) Informes por lotes”.")
+
+  bc1, bc2 = st.columns(2)
+  with bc1:
+    batch_calibration = st.selectbox(
+      "Calibración PAC común para el lote",
+      options=["SD_PAOC", "C_PAOC"],
+      index=0,
+      key="batch_metodo_calibracion",
+      format_func=lambda x: SAHA_CALIBRATION_LABELS.get(x, x),
+    )
+  with bc2:
+    batch_rmri = st.selectbox(
+      "Referencia RM/RI común para el lote",
+      options=["SCOR_RADIAL", "SCOR_CAROTID", "MOG"],
+      index=0,
+      key="batch_metodo_rmri",
+      format_func=lambda x: RM_RI_METHOD_LABELS.get(x, x),
+    )
+
+  bo1, bo2 = st.columns(2)
+  with bo1:
+    batch_save_history = st.checkbox(
+      "Agregar estudios exitosos al historial Excel",
+      value=False,
+      key="batch_save_history",
+      help="No borra el historial existente. Agrega los estudios exitosos y evita duplicados exactos.",
+    )
+  with bo2:
+    batch_include_originals = st.checkbox(
+      "Incluir también los PDF originales dentro del ZIP",
+      value=False,
+      key="batch_include_originals",
+    )
+
+  action_col, clear_col = st.columns([3, 1])
+  with action_col:
+    process_batch_clicked = st.button(
+      "Procesar lote y generar informes",
+      type="primary",
+      use_container_width=True,
+      disabled=(batch_count == 0 or batch_count > BATCH_MAX_FILES),
+      key="process_pac_batch",
+    )
+  with clear_col:
+    clear_batch_clicked = st.button(
+      "Limpiar resultados",
+      use_container_width=True,
+      key="clear_pac_batch_results",
+    )
+
+  if clear_batch_clicked:
+    st.session_state.pop("pac_batch_result", None)
+    st.success("Resultados anteriores eliminados de la sesión. Los PDF seleccionados permanecen disponibles.")
+
+  if batch_count > BATCH_MAX_FILES:
+    st.error(
+      f"Se seleccionaron {batch_count} PDF. Divida la carga en lotes de hasta "
+      f"{BATCH_MAX_FILES} archivos para evitar fallos de memoria."
+    )
+
+  if process_batch_clicked:
+    progress = st.progress(0.0, text="Preparando procesamiento por lotes...")
+    status_placeholder = st.empty()
+
+    def _update_batch_progress(done, total, filename, state):
+      fraction = 0.0 if total <= 0 else min(max(done / total, 0.0), 1.0)
+      progress.progress(
+        fraction,
+        text=f"{state}: {filename} ({min(done, total)}/{total})",
+      )
+      status_placeholder.caption(
+        "Cada error queda aislado; el procesamiento continúa con el siguiente paciente."
+      )
+
+    try:
+      result = process_pac_pdf_batch(
+        batch_pdf_files,
+        metodo_calibracion=batch_calibration,
+        metodo_rmri=batch_rmri,
+        logo_png=logo_png,
+        firma_png=firma_png,
+        sello_png=sello_png,
+        include_originals=batch_include_originals,
+        save_to_history=batch_save_history,
+        progress_callback=_update_batch_progress,
+      )
+      result["input_signature"] = _batch_files_signature(batch_pdf_files)
+      result["generated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      st.session_state["pac_batch_result"] = result
+      progress.progress(1.0, text="Lote finalizado")
+      status_placeholder.empty()
+    except Exception as exc:
+      st.error(f"No se pudo iniciar o completar el procesamiento por lotes: {exc}")
+
+  batch_result = st.session_state.get("pac_batch_result")
+  if batch_result:
+    current_signature = _batch_files_signature(batch_pdf_files) if batch_pdf_files else ""
+    if current_signature and current_signature != batch_result.get("input_signature"):
+      st.warning(
+        "La selección actual de PDF cambió después del último procesamiento. "
+        "Los archivos descargables corresponden al lote previamente generado."
+      )
+
+    st.markdown("### Resultado del lote")
+    mr1, mr2, mr3 = st.columns(3)
+    mr1.metric("PDF recibidos", batch_result.get("total", 0))
+    mr2.metric("Informes generados", batch_result.get("success_count", 0))
+    mr3.metric("Errores", batch_result.get("error_count", 0))
+
+    if batch_result.get("history_total") is not None:
+      st.success(
+        f"Historial actualizado sin borrar registros previos. Total actual: "
+        f"{batch_result['history_total']} estudios."
+      )
+
+    summary_batch_df = batch_result.get("summary_df", pd.DataFrame())
+    if not summary_batch_df.empty:
+      display_cols = [
+        c for c in [
+          "orden", "archivo_origen", "estado", "paciente", "fecha",
+          "pas_central_mmHg", "pp_central_mmHg", "rm_pb_pf",
+          "rvse_calculado_pct", "fenotipo_final", "informe_generado", "error"
+        ] if c in summary_batch_df.columns
+      ]
+      st.dataframe(
+        summary_batch_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+      )
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+      st.download_button(
+        "Descargar lote completo en ZIP",
+        data=batch_result.get("zip_bytes", b""),
+        file_name=f"INFORMES_PAC_LOTE_{stamp}.zip",
+        mime="application/zip",
+        use_container_width=True,
+        key="download_pac_batch_zip",
+      )
+    with dl2:
+      st.download_button(
+        "Descargar resumen del lote en Excel",
+        data=batch_result.get("excel_bytes", b""),
+        file_name=f"RESUMEN_PAC_LOTE_{stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="download_pac_batch_excel",
+      )
+    st.caption(
+      "Al pulsar Descargar, el navegador guarda el archivo en la carpeta Descargas configurada en su equipo. "
+      "El ZIP contiene una carpeta informes_pdf con un PDF independiente por paciente."
+    )
+
+    reports = batch_result.get("reports", [])
+    if reports:
+      with st.expander("Descargar informes individuales del lote", expanded=False):
+        for ridx, item in enumerate(reports):
+          label = f"{item.get('patient', 'Paciente')} — {item.get('filename', 'informe.pdf')}"
+          st.download_button(
+            label,
+            data=item.get("data", b""),
+            file_name=item.get("filename", f"informe_{ridx+1}.pdf"),
+            mime="application/pdf",
+            key=f"download_batch_report_{ridx}_{hashlib.md5(item.get('filename','').encode('utf-8')).hexdigest()[:8]}",
+          )
+
+    if batch_result.get("error_count", 0):
+      with st.expander("Detalle de PDF que no pudieron generar informe", expanded=True):
+        err_df = summary_batch_df[summary_batch_df["estado"] != "GENERADO"]
+        st.dataframe(
+          err_df[[c for c in ["archivo_origen", "error"] if c in err_df.columns]],
+          use_container_width=True,
+          hide_index=True,
+        )
+
+# Cuando solo se cargó un lote, se evita mostrar debajo el formulario individual vacío.
+if batch_pdf_files and pdf_file is None:
+  st.info("Modo por lotes activo. Los resultados y descargas se administran en el panel anterior.")
+  st.stop()
+
+st.markdown("---")
 st.subheader("Datos extraídos / edición manual")
 cols = st.columns(4)
 fields = ["paciente","estudio","fecha","hora","obra_social","edad","sexo","peso","altura","imc","sc","pas_radial","pad_radial","pam_radial","pp_radial","pas_central","pad_central","pam_central","pp_central","fc","au","iau","rvse","pe","apc","medicacion","diagnostico_previo"]
