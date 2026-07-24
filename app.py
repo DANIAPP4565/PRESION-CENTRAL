@@ -43,6 +43,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfgen import canvas as rl_canvas
 
 def ensure_download_bytes(obj):
   """Convierte salida de PDF a bytes válidos para st.download_button."""
@@ -6215,7 +6216,7 @@ def _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_
     if PILImage is None or ImageDraw is None:
       return sources[0][1]
 
-    tile_w, tile_h = 860, 390
+    tile_w, tile_h = 900, 600
     canvas = PILImage.new("RGB", (tile_w * 2, tile_h * 2), "white")
     draw = ImageDraw.Draw(canvas)
     positions = [(0, 0), (tile_w, 0), (0, tile_h), (tile_w, tile_h)]
@@ -6225,12 +6226,12 @@ def _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_
         if not img_bytes:
           continue
         img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-        img.thumbnail((tile_w - 36, tile_h - 52))
+        img.thumbnail((tile_w - 36, tile_h - 58))
         x0, y0 = positions[i]
         draw.rectangle([x0 + 6, y0 + 6, x0 + tile_w - 6, y0 + tile_h - 6], outline=(210, 218, 226), width=2)
         draw.text((x0 + 18, y0 + 14), title, fill=(31, 45, 61))
         px = x0 + (tile_w - img.width) // 2
-        py = y0 + 40 + (tile_h - 46 - img.height) // 2
+        py = y0 + 44 + (tile_h - 50 - img.height) // 2
         canvas.paste(img, (px, py))
       except Exception:
         continue
@@ -6295,98 +6296,143 @@ def _pc_kpi_cell(label, value, styles, accent="#1F4E79"):
   )
 
 
+def _pc_footer_slot(image_bytes, label, width_mm, height_mm, styles):
+  """Caja reservada para logo/firma/sello con o sin imagen."""
+  img = _pc_maybe_image(image_bytes, width_mm*mm - 4*mm, height_mm*mm - 5*mm) if image_bytes else None
+  if img is not None:
+    inner = img
+  elif label:
+    inner = Paragraph(f"<b>{pdf_text(label)}</b>", styles["PC_Small"])
+  else:
+    inner = ""
+  tbl = Table([[inner]], colWidths=[width_mm*mm], rowHeights=[height_mm*mm])
+  tbl.setStyle(TableStyle([
+    ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#BFCBD5")),
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FAFCFE")),
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("ALIGN", (0,0), (-1,-1), "CENTER"),
+    ("LEFTPADDING", (0,0), (-1,-1), 2),
+    ("RIGHTPADDING", (0,0), (-1,-1), 2),
+    ("TOPPADDING", (0,0), (-1,-1), 2),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+  ]))
+  return tbl
+
+
 def build_pdf_one_page(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=None, logo_png=None):
-  """Versión institucional optimizada: informe PDF A4 de una sola hoja para Presión Central."""
+  """Informe A4 de una sola hoja con distribución fija y banda de validación anclada al pie."""
   conclusion_items, sep_df, sep_metrics = _pc_make_conclusion_items(row, wave_df, hdf)
   didactic_png = _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_png=screenshot_png)
   dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
   buf = io.BytesIO()
-  doc = SimpleDocTemplate(
-    buf, pagesize=A4,
-    rightMargin=6*mm, leftMargin=6*mm,
-    topMargin=6*mm, bottomMargin=6*mm,
-    allowSplitting=0,
-  )
+  c = rl_canvas.Canvas(buf, pagesize=A4)
+  page_w, page_h = A4
+  left = 6*mm
+  right = page_w - 6*mm
+  content_w = right - left
+  top = page_h - 5*mm
+  footer_y = 5*mm
+  footer_h = 27*mm
+  content_bottom = footer_y + footer_h + 2*mm
+
   styles = getSampleStyleSheet()
-  styles.add(ParagraphStyle(name="PC_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=12.2, leading=13.0, textColor=colors.white, alignment=0, spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_Sub", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.3, leading=7.0, textColor=colors.HexColor("#D8E7F2"), alignment=0, spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_Section", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.4, leading=8.0, textColor=colors.HexColor("#153B5B"), spaceBefore=0.5, spaceAfter=1.0))
-  styles.add(ParagraphStyle(name="PC_Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.0, leading=6.8, textColor=colors.HexColor("#263746"), spaceAfter=0.4))
-  styles.add(ParagraphStyle(name="PC_Small", parent=styles["BodyText"], fontName="Helvetica", fontSize=5.85, leading=6.5, textColor=colors.HexColor("#31424F"), spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_Bold", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=6.05, leading=6.8, textColor=colors.HexColor("#12263A"), spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_KPI_Label", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.6, leading=6.0, textColor=colors.HexColor("#486577"), spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_KPI_Value", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=8.5, leading=9.0, textColor=colors.HexColor("#17324A"), spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_ConcTitle", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.85, leading=6.4, textColor=colors.HexColor("#203746"), spaceAfter=0))
-  styles.add(ParagraphStyle(name="PC_Conc", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.95, leading=6.55, textColor=colors.HexColor("#152536"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=13.2, leading=14.0, textColor=colors.white, alignment=0, spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Sub", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.7, leading=7.4, textColor=colors.HexColor("#D8E7F2"), alignment=0, spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.45, leading=7.3, textColor=colors.HexColor("#263746"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Small", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.0, leading=6.7, textColor=colors.HexColor("#31424F"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Bold", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=6.35, leading=7.0, textColor=colors.HexColor("#12263A"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_KPI_Label", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.9, leading=6.4, textColor=colors.HexColor("#486577"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_KPI_Value", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=9.2, leading=9.8, textColor=colors.HexColor("#17324A"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_ConcTitle", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=6.15, leading=6.7, textColor=colors.HexColor("#203746"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Conc", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=6.25, leading=6.85, textColor=colors.HexColor("#152536"), spaceAfter=0))
 
-  story = []
+  def draw_flowable(flow, y, width=content_w, x=left):
+    fw, fh = flow.wrap(width, max(10, y-content_bottom))
+    flow.drawOn(c, x, y-fh)
+    return y-fh, fh
 
-  logo = _pc_maybe_image(logo_png, 22*mm, 12*mm)
-  title_block = [
-    Paragraph("INFORME MEDICION DE PRESION CENTRAL", styles["PC_Title"]),
-    Paragraph("Evaluación no invasiva de presión aórtica central y mecánica de la onda de pulso", styles["PC_Sub"]),
-  ]
-  header = Table(
-    [[logo if logo is not None else "", title_block]],
-    colWidths=[26*mm, 165*mm],
-    rowHeights=[15*mm],
-    style=TableStyle([
-      ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#153B5B")),
-      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-      ("LEFTPADDING", (0,0), (0,0), 4),
-      ("RIGHTPADDING", (0,0), (0,0), 2),
-      ("LEFTPADDING", (1,0), (1,0), 7),
-      ("RIGHTPADDING", (1,0), (1,0), 4),
-      ("TOPPADDING", (0,0), (-1,-1), 2),
-      ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-    ])
-  )
-  story.append(header)
-  story.append(Spacer(1, 1.3))
+  def draw_section(title, y):
+    c.setFillColor(colors.HexColor("#153B5B"))
+    c.setFont("Helvetica-Bold", 7.8)
+    c.drawString(left, y-7.5, title)
+    c.setStrokeColor(colors.HexColor("#C9D6E0"))
+    c.setLineWidth(0.35)
+    c.line(left, y-9.5, right, y-9.5)
+    return y-12.0
 
-  story.append(Paragraph("DATOS DEL PACIENTE", styles["PC_Section"]))
+  def draw_image_in_box(image_bytes, x, y, w, h, border=True, pad=2*mm):
+    if border:
+      c.setFillColor(colors.white)
+      c.setStrokeColor(colors.HexColor("#D4DEE7"))
+      c.setLineWidth(0.45)
+      c.rect(x, y, w, h, fill=1, stroke=1)
+    if not image_bytes:
+      return
+    try:
+      ir = ImageReader(io.BytesIO(image_bytes))
+      iw, ih = ir.getSize()
+      if iw <= 0 or ih <= 0:
+        return
+      avail_w = max(1, w-2*pad)
+      avail_h = max(1, h-2*pad)
+      scale = min(avail_w/iw, avail_h/ih)
+      dw, dh = iw*scale, ih*scale
+      dx = x + (w-dw)/2
+      dy = y + (h-dh)/2
+      c.drawImage(ir, dx, dy, width=dw, height=dh, preserveAspectRatio=True, mask='auto')
+    except Exception:
+      pass
+
+  y = top
+
+  # ENCABEZADO SIN LOGO: el logo queda exclusivamente en la banda final
+  header_h = 17*mm
+  c.setFillColor(colors.HexColor("#153B5B"))
+  c.rect(left, y-header_h, content_w, header_h, fill=1, stroke=0)
+  c.setFillColor(colors.white)
+  c.setFont("Helvetica-Bold", 13.2)
+  c.drawString(left+8*mm, y-7.2*mm, "INFORME MEDICION DE PRESION CENTRAL")
+  c.setFillColor(colors.HexColor("#D8E7F2"))
+  c.setFont("Helvetica", 6.7)
+  c.drawString(left+8*mm, y-12.3*mm, "Evaluación no invasiva de presión aórtica central y mecánica de la onda de pulso")
+  y -= header_h + 1.5*mm
+
+  # 1. DATOS DEL PACIENTE
+  y = draw_section("DATOS DEL PACIENTE", y)
   patient_data = [
     ["Paciente", safe_text(row.get("paciente")) or "SD", "Edad / Sexo", f"{safe_text(row.get('edad')) or 'SD'} / {safe_text(row.get('sexo')) or 'SD'}", "Fecha", safe_text(row.get("fecha")) or "SD"],
     ["Documento", safe_text(row.get("documento")) or "SD", "Obra social", safe_text(row.get("obra_social")) or "SD", "Estudio", safe_text(row.get("estudio")) or "Presión Central"],
   ]
-  t_patient = Table(patient_data, colWidths=[18*mm, 48*mm, 22*mm, 40*mm, 18*mm, 45*mm], rowHeights=[6.2*mm, 6.2*mm])
+  t_patient = Table(patient_data, colWidths=[18*mm, 48*mm, 22*mm, 40*mm, 18*mm, 45*mm], rowHeights=[7*mm, 7*mm])
   t_patient.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
-    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#D8E2EA")),
-    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
-    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
-    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
-    ("FONTNAME", (4,0), (4,-1), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,-1), 6.0),
-    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 2.5),
-    ("RIGHTPADDING", (0,0), (-1,-1), 2.5),
-    ("TOPPADDING", (0,0), (-1,-1), 1),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")), ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#D8E2EA")),
+    ("FONTNAME", (0,0), (-1,-1), "Helvetica"), ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"), ("FONTNAME", (4,0), (4,-1), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 6.25), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 3), ("RIGHTPADDING", (0,0), (-1,-1), 3),
+    ("TOPPADDING", (0,0), (-1,-1), 1), ("BOTTOMPADDING", (0,0), (-1,-1), 1),
   ]))
-  story.append(t_patient)
-  story.append(Spacer(1, 1.1))
+  y, _ = draw_flowable(t_patient, y)
+  y -= 1.5*mm
 
-  story.append(Paragraph("METODOLOGIA", styles["PC_Section"]))
+  # 2. METODOLOGIA
+  y = draw_section("METODOLOGIA", y)
   metodologia = (
-    "Se realizo medicion de presion central y metricas derivadas con sensores piezo electricos "
-    "con dispositivo Aortic (Exxer), previo reposo de 5 minutos con paciente en decubito supino, "
-    "se registraron 3 mediciones promediadas."
+    "Se realizo medicion de presion central y metricas derivadas con sensores piezo electricos con dispositivo Aortic (Exxer), "
+    "previo reposo de 5 minutos con paciente en decubito supino, se registraron 3 mediciones promediadas."
   )
   meth = Table([[Paragraph(pdf_text(metodologia), styles["PC_Body"])]], colWidths=[191*mm])
   meth.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#EEF5FA")),
-    ("BOX", (0,0), (-1,-1), 0.45, colors.HexColor("#C9DAE6")),
-    ("LEFTPADDING", (0,0), (-1,-1), 4),
-    ("RIGHTPADDING", (0,0), (-1,-1), 4),
-    ("TOPPADDING", (0,0), (-1,-1), 2.5),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#EEF5FA")), ("BOX", (0,0), (-1,-1), 0.45, colors.HexColor("#C9DAE6")),
+    ("LEFTPADDING", (0,0), (-1,-1), 5), ("RIGHTPADDING", (0,0), (-1,-1), 5),
+    ("TOPPADDING", (0,0), (-1,-1), 3.2), ("BOTTOMPADDING", (0,0), (-1,-1), 3.2),
   ]))
-  story.append(meth)
-  story.append(Spacer(1, 1.1))
+  y, _ = draw_flowable(meth, y)
+  y -= 1.5*mm
 
-  story.append(Paragraph("RESULTADOS", styles["PC_Section"]))
+  # 3. RESULTADOS
+  y = draw_section("RESULTADOS", y)
   kpis = [
     _pc_kpi_cell("PAS CENTRAL", _pc_short_text(row.get("pas_central"), 0, " mmHg"), styles, "#1F4E79"),
     _pc_kpi_cell("PP CENTRAL", _pc_short_text(row.get("pp_central"), 0, " mmHg"), styles, "#315B7D"),
@@ -6395,100 +6441,78 @@ def build_pdf_one_page(row, wave_df, hdf, screenshot_png=None, firma_png=None, s
     _pc_kpi_cell("RM", _pc_short_text(sep_metrics.get("rm"), 2, ""), styles, "#3C6E71"),
     _pc_kpi_cell("RVSE", _pc_short_text(sep_metrics.get("rvse_calculado_%"), 1, "%"), styles, "#18794E"),
   ]
-  kpi_table = Table([kpis[:3], kpis[3:]], colWidths=[63.3*mm]*3, rowHeights=[11.8*mm, 11.8*mm])
+  kpi_table = Table([kpis[:3], kpis[3:]], colWidths=[63.3*mm]*3, rowHeights=[13.2*mm, 13.2*mm])
   kpi_table.setStyle(TableStyle([
-    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 1.5),
-    ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
-    ("TOPPADDING", (0,0), (-1,-1), 1),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LEFTPADDING", (0,0), (-1,-1), 2), ("RIGHTPADDING", (0,0), (-1,-1), 2),
+    ("TOPPADDING", (0,0), (-1,-1), 1), ("BOTTOMPADDING", (0,0), (-1,-1), 1),
   ]))
-  story.append(kpi_table)
+  y, _ = draw_flowable(kpi_table, y)
 
   dx_short = _pc_extract_bold_only(dx)
   status_color, status_bg = _pc_diag_palette(dx_short)
   status_box = Table(
     [[Paragraph("<b>Presión aórtica central</b>", styles["PC_Bold"]), Paragraph(f"<b>{pdf_text(dx_short)}</b>", styles["PC_Bold"])]],
-    colWidths=[45*mm, 146*mm],
-    rowHeights=[7.2*mm],
-    style=TableStyle([
-      ("BACKGROUND", (0,0), (-1,-1), status_bg),
-      ("BOX", (0,0), (-1,-1), 0.5, status_color),
-      ("LINEBEFORE", (0,0), (0,0), 3.0, status_color),
-      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-      ("LEFTPADDING", (0,0), (-1,-1), 4),
-      ("RIGHTPADDING", (0,0), (-1,-1), 4),
-      ("TOPPADDING", (0,0), (-1,-1), 1),
-      ("BOTTOMPADDING", (0,0), (-1,-1), 1),
-    ])
+    colWidths=[45*mm, 146*mm], rowHeights=[8*mm]
   )
-  story.append(status_box)
-  story.append(Spacer(1, 1.1))
+  status_box.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), status_bg), ("BOX", (0,0), (-1,-1), 0.5, status_color), ("LINEBEFORE", (0,0), (0,0), 3.2, status_color),
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"), ("LEFTPADDING", (0,0), (-1,-1), 5), ("RIGHTPADDING", (0,0), (-1,-1), 4),
+    ("TOPPADDING", (0,0), (-1,-1), 1), ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+  ]))
+  y, _ = draw_flowable(status_box, y)
+  y -= 1.5*mm
 
-  story.append(Paragraph("CONCLUSIONES", styles["PC_Section"]))
+  # 4. CONCLUSIONES
+  y = draw_section("CONCLUSIONES", y)
   conc_rows = []
   for title, conc in conclusion_items:
-    conc_rows.append([
-      Paragraph(f"<b>{pdf_text(title)}</b>", styles["PC_ConcTitle"]),
-      Paragraph(f"<b>{pdf_text(conc)}</b>", styles["PC_Conc"]),
-      ""
-    ])
+    conc_rows.append([Paragraph(f"<b>{pdf_text(title)}</b>", styles["PC_ConcTitle"]), Paragraph(f"<b>{pdf_text(conc)}</b>", styles["PC_Conc"]), ""])
   if not conc_rows:
     conc_rows = [[Paragraph("<b>1. Presión aórtica central</b>", styles["PC_ConcTitle"]), Paragraph(f"<b>{pdf_text(dx_short)}</b>", styles["PC_Conc"]), ""]]
   t_conc = Table(conc_rows, colWidths=[52*mm, 136*mm, 3*mm])
   ts = [
-    ("GRID", (0,0), (-2,-1), 0.35, colors.HexColor("#D9E2EC")),
-    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 2.5),
-    ("RIGHTPADDING", (0,0), (-1,-1), 2.5),
-    ("TOPPADDING", (0,0), (-1,-1), 1.2),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 1.2),
+    ("GRID", (0,0), (-2,-1), 0.35, colors.HexColor("#D9E2EC")), ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 3), ("RIGHTPADDING", (0,0), (-1,-1), 3),
+    ("TOPPADDING", (0,0), (-1,-1), 1.5), ("BOTTOMPADDING", (0,0), (-1,-1), 1.5),
   ]
   for i, (_, conc) in enumerate(conclusion_items[:len(conc_rows)]):
     fg, bg = _pc_diag_palette(conc)
-    ts += [
-      ("BACKGROUND", (0,i), (1,i), bg),
-      ("BACKGROUND", (2,i), (2,i), fg),
-    ]
+    ts += [("BACKGROUND", (0,i), (1,i), bg), ("BACKGROUND", (2,i), (2,i), fg)]
   t_conc.setStyle(TableStyle(ts))
-  story.append(t_conc)
-  story.append(Spacer(1, 1.1))
+  y, _ = draw_flowable(t_conc, y)
+  y -= 1.5*mm
 
-  story.append(Paragraph("LAMINAS GRAFICAS", styles["PC_Section"]))
-  did_img = _pc_maybe_image(didactic_png, 191*mm, 67*mm)
-  if did_img is not None:
-    img_table = Table([[did_img]], colWidths=[191*mm])
-    img_table.setStyle(TableStyle([
-      ("BACKGROUND", (0,0), (-1,-1), colors.white),
-      ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#D4DEE7")),
-      ("LEFTPADDING", (0,0), (-1,-1), 1.5),
-      ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
-      ("TOPPADDING", (0,0), (-1,-1), 1.5),
-      ("BOTTOMPADDING", (0,0), (-1,-1), 1.5),
-      ("ALIGN", (0,0), (-1,-1), "CENTER"),
-    ]))
-    story.append(img_table)
-  story.append(Spacer(1, 0.9))
+  # 5. LAMINAS GRAFICAS - usa todo el espacio restante hasta la banda final
+  y = draw_section("LAMINAS GRAFICAS", y)
+  graph_bottom = content_bottom
+  graph_h = max(35*mm, y - graph_bottom)
+  draw_image_in_box(didactic_png, left, graph_bottom, content_w, graph_h, border=True, pad=1.2*mm)
 
-  firma = _pc_maybe_image(firma_png, 29*mm, 9*mm) if firma_png else None
-  sello = _pc_maybe_image(sello_png, 21*mm, 9*mm) if sello_png else None
-  footer_text = "Informe resumido de una hoja. La interpretación debe integrarse con el contexto clínico del paciente."
-  footer = Table(
-    [[firma if firma is not None else "", sello if sello is not None else "", Paragraph(pdf_text(footer_text), styles["PC_Small"]) ]],
-    colWidths=[33*mm, 24*mm, 134*mm],
-    rowHeights=[9.5*mm],
-    style=TableStyle([
-      ("LINEABOVE", (0,0), (-1,0), 0.45, colors.HexColor("#BFCBD5")),
-      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-      ("LEFTPADDING", (0,0), (-1,-1), 0),
-      ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
-      ("TOPPADDING", (0,0), (-1,-1), 0.8),
-      ("BOTTOMPADDING", (0,0), (-1,-1), 0),
-    ])
-  )
-  story.append(footer)
+  # BANDA FINAL FIJA EN EL PIE
+  label_y = footer_y + 21.5*mm
+  c.setFillColor(colors.HexColor("#50697A"))
+  c.setFont("Helvetica-Bold", 5.8)
+  col1_w, col2_w, col3_w = 52*mm, 87*mm, 52*mm
+  c.drawCentredString(left + col1_w/2, label_y+1.5*mm, "LOGO INSTITUCIONAL")
+  c.drawCentredString(left + col1_w + col2_w/2, label_y+1.5*mm, "FIRMA DIGITAL")
+  c.drawCentredString(left + col1_w + col2_w + col3_w/2, label_y+1.5*mm, "SELLO DIGITAL")
 
-  doc.build(story)
+  box_y = footer_y
+  box_h = 20*mm
+  gap = 2*mm
+  x1 = left
+  x2 = left + col1_w
+  x3 = left + col1_w + col2_w
+  for x, w in [(x1,col1_w-gap),(x2+gap/2,col2_w-gap),(x3+gap/2,col3_w-gap/2)]:
+    c.setFillColor(colors.HexColor("#FAFCFE")); c.setStrokeColor(colors.HexColor("#BFCBD5")); c.setLineWidth(0.5)
+    c.rect(x, box_y, w, box_h, fill=1, stroke=1)
+
+  draw_image_in_box(logo_png, x1, box_y, col1_w-gap, box_h, border=False, pad=2*mm)
+  draw_image_in_box(firma_png, x2+gap/2, box_y, col2_w-gap, box_h, border=False, pad=2*mm)
+  draw_image_in_box(sello_png, x3+gap/2, box_y, col3_w-gap/2, box_h, border=False, pad=2*mm)
+
+  c.showPage()
+  c.save()
   return buf.getvalue()
 
 
