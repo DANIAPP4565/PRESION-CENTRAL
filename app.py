@@ -6221,6 +6221,9 @@ def _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_
     positions = [(0, 0), (tile_w, 0), (0, tile_h), (tile_w, tile_h)]
     for i, (title, img_bytes) in enumerate(sources[:4]):
       try:
+        img_bytes = ensure_download_bytes(img_bytes)
+        if not img_bytes:
+          continue
         img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
         img.thumbnail((tile_w - 36, tile_h - 52))
         x0, y0 = positions[i]
@@ -6246,6 +6249,7 @@ def _pc_paragraph(text, style):
 
 
 def _pc_maybe_image(image_bytes, max_w, max_h):
+  image_bytes = ensure_download_bytes(image_bytes)
   if not image_bytes:
     return None
   try:
@@ -6255,167 +6259,252 @@ def _pc_maybe_image(image_bytes, max_w, max_h):
     return None
 
 
+def _pc_diag_palette(text):
+  """Color institucional de apoyo según el sentido de la conclusión, sin alterar el diagnóstico."""
+  t = safe_text(text).lower()
+  alert_terms = ["con hipertensión", "aumentada", "aumentado", "alterada", "alterado", "reducida", "reducido", "patológica", "patologico", "marcadamente"]
+  ok_terms = ["sin hipertensión", "sin aumentación", "no aumentada", "no aumentado", "normal", "conservada", "conservado", "esperada", "esperado", "adecuada", "adecuado"]
+  mid_terms = ["intermedia", "intermedio", "relativamente", "limítrofe", "limitrofe", "subóptima", "suboptima"]
+  # Las expresiones negativas (p. ej. "sin aumentación aumentada" / "no aumentada")
+  # tienen prioridad para no colorearlas erróneamente como patológicas por contener la palabra "aumentada".
+  if any(k in t for k in ok_terms):
+    return colors.HexColor("#18794E"), colors.HexColor("#EAF7F0")
+  if any(k in t for k in mid_terms):
+    return colors.HexColor("#A15C00"), colors.HexColor("#FFF4E5")
+  if any(k in t for k in alert_terms):
+    return colors.HexColor("#B42318"), colors.HexColor("#FDECEC")
+  return colors.HexColor("#315B7D"), colors.HexColor("#EEF4F8")
+
+
+def _pc_kpi_cell(label, value, styles, accent="#1F4E79"):
+  return Table(
+    [[Paragraph(f"<font color='{accent}'><b>{pdf_text(label)}</b></font>", styles["PC_KPI_Label"])],
+     [Paragraph(f"<b>{pdf_text(value)}</b>", styles["PC_KPI_Value"])]],
+    colWidths=[56*mm],
+    rowHeights=[5.2*mm, 7.2*mm],
+    style=TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), colors.white),
+      ("BOX", (0,0), (-1,-1), 0.6, colors.HexColor("#D7E1EA")),
+      ("LINEBEFORE", (0,0), (0,-1), 3.2, colors.HexColor(accent)),
+      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+      ("LEFTPADDING", (0,0), (-1,-1), 5),
+      ("RIGHTPADDING", (0,0), (-1,-1), 4),
+      ("TOPPADDING", (0,0), (-1,-1), 1),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+    ])
+  )
+
+
 def build_pdf_one_page(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=None, logo_png=None):
-  """Genera informe PDF A4 de una sola hoja para Presión Central."""
+  """Versión institucional optimizada: informe PDF A4 de una sola hoja para Presión Central."""
   conclusion_items, sep_df, sep_metrics = _pc_make_conclusion_items(row, wave_df, hdf)
   didactic_png = _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_png=screenshot_png)
   dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
 
   buf = io.BytesIO()
   doc = SimpleDocTemplate(
-    buf,
-    pagesize=A4,
-    rightMargin=9*mm,
-    leftMargin=9*mm,
-    topMargin=11*mm,
-    bottomMargin=11*mm,
+    buf, pagesize=A4,
+    rightMargin=6*mm, leftMargin=6*mm,
+    topMargin=6*mm, bottomMargin=6*mm,
+    allowSplitting=0,
   )
   styles = getSampleStyleSheet()
-  styles.add(ParagraphStyle(name="PC_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=13, leading=14.5, textColor=colors.HexColor("#16324F"), alignment=1, spaceAfter=4))
-  styles.add(ParagraphStyle(name="PC_Sub", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.0, leading=8.0, textColor=colors.HexColor("#455A64"), alignment=1, spaceAfter=3))
-  styles.add(ParagraphStyle(name="PC_Section", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=8.3, leading=9.2, textColor=colors.white, backColor=colors.HexColor("#1F4E79"), borderPadding=(3,4,2), spaceBefore=2, spaceAfter=2))
-  styles.add(ParagraphStyle(name="PC_Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.0, leading=8.0, textColor=colors.HexColor("#1F2D3D"), spaceAfter=1.5))
-  styles.add(ParagraphStyle(name="PC_Small", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=7.2, textColor=colors.HexColor("#31424F"), spaceAfter=1))
-  styles.add(ParagraphStyle(name="PC_Bold", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7.0, leading=8.1, textColor=colors.HexColor("#12263A"), spaceAfter=1.2))
+  styles.add(ParagraphStyle(name="PC_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=12.2, leading=13.0, textColor=colors.white, alignment=0, spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Sub", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.3, leading=7.0, textColor=colors.HexColor("#D8E7F2"), alignment=0, spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Section", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=7.4, leading=8.0, textColor=colors.HexColor("#153B5B"), spaceBefore=0.5, spaceAfter=1.0))
+  styles.add(ParagraphStyle(name="PC_Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.0, leading=6.8, textColor=colors.HexColor("#263746"), spaceAfter=0.4))
+  styles.add(ParagraphStyle(name="PC_Small", parent=styles["BodyText"], fontName="Helvetica", fontSize=5.85, leading=6.5, textColor=colors.HexColor("#31424F"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Bold", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=6.05, leading=6.8, textColor=colors.HexColor("#12263A"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_KPI_Label", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.6, leading=6.0, textColor=colors.HexColor("#486577"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_KPI_Value", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=8.5, leading=9.0, textColor=colors.HexColor("#17324A"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_ConcTitle", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.85, leading=6.4, textColor=colors.HexColor("#203746"), spaceAfter=0))
+  styles.add(ParagraphStyle(name="PC_Conc", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=5.95, leading=6.55, textColor=colors.HexColor("#152536"), spaceAfter=0))
 
   story = []
-  story.append(Paragraph("INFORME MEDICION DE PRESION CENTRAL", styles["PC_Title"]))
-  story.append(Paragraph("Informe médico resumido de una hoja", styles["PC_Sub"]))
 
-  # encabezado con logo opcional
-  header_row = []
-  logo = _pc_maybe_image(logo_png, 24*mm, 14*mm)
-  if logo is not None:
-    header_row.append(logo)
-  else:
-    header_row.append("")
-  header_row.append(Paragraph("<b>Presión Central</b>", styles["PC_Bold"]))
-  hdr = Table([header_row], colWidths=[26*mm, 155*mm])
-  hdr.setStyle(TableStyle([
+  logo = _pc_maybe_image(logo_png, 22*mm, 12*mm)
+  title_block = [
+    Paragraph("INFORME MEDICION DE PRESION CENTRAL", styles["PC_Title"]),
+    Paragraph("Evaluación no invasiva de presión aórtica central y mecánica de la onda de pulso", styles["PC_Sub"]),
+  ]
+  header = Table(
+    [[logo if logo is not None else "", title_block]],
+    colWidths=[26*mm, 165*mm],
+    rowHeights=[15*mm],
+    style=TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#153B5B")),
+      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+      ("LEFTPADDING", (0,0), (0,0), 4),
+      ("RIGHTPADDING", (0,0), (0,0), 2),
+      ("LEFTPADDING", (1,0), (1,0), 7),
+      ("RIGHTPADDING", (1,0), (1,0), 4),
+      ("TOPPADDING", (0,0), (-1,-1), 2),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+    ])
+  )
+  story.append(header)
+  story.append(Spacer(1, 1.3))
+
+  story.append(Paragraph("DATOS DEL PACIENTE", styles["PC_Section"]))
+  patient_data = [
+    ["Paciente", safe_text(row.get("paciente")) or "SD", "Edad / Sexo", f"{safe_text(row.get('edad')) or 'SD'} / {safe_text(row.get('sexo')) or 'SD'}", "Fecha", safe_text(row.get("fecha")) or "SD"],
+    ["Documento", safe_text(row.get("documento")) or "SD", "Obra social", safe_text(row.get("obra_social")) or "SD", "Estudio", safe_text(row.get("estudio")) or "Presión Central"],
+  ]
+  t_patient = Table(patient_data, colWidths=[18*mm, 48*mm, 22*mm, 40*mm, 18*mm, 45*mm], rowHeights=[6.2*mm, 6.2*mm])
+  t_patient.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F7FAFC")),
+    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#D8E2EA")),
+    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
+    ("FONTNAME", (4,0), (4,-1), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 6.0),
     ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 0),
-    ("RIGHTPADDING", (0,0), (-1,-1), 0),
-    ("TOPPADDING", (0,0), (-1,-1), 0),
+    ("LEFTPADDING", (0,0), (-1,-1), 2.5),
+    ("RIGHTPADDING", (0,0), (-1,-1), 2.5),
+    ("TOPPADDING", (0,0), (-1,-1), 1),
     ("BOTTOMPADDING", (0,0), (-1,-1), 1),
   ]))
-  story.append(hdr)
-
-  # Datos del paciente
-  story.append(Paragraph("Datos del paciente", styles["PC_Section"]))
-  patient_data = [
-    ["Paciente", safe_text(row.get("paciente")) or "SD", "Documento", safe_text(row.get("documento")) or "SD"],
-    ["Edad", safe_text(row.get("edad")) or "SD", "Sexo", safe_text(row.get("sexo")) or "SD"],
-    ["Fecha", safe_text(row.get("fecha")) or "SD", "Obra social", safe_text(row.get("obra_social")) or "SD"],
-    ["Médico solicitante", safe_text(row.get("medico")) or safe_text(row.get("medico_solicitante")) or "SD", "Estudio", safe_text(row.get("estudio")) or "Presión Central"],
-  ]
-  t_patient = Table(patient_data, colWidths=[26*mm, 63*mm, 28*mm, 63*mm])
-  t_patient.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F8FAFC")),
-    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#CFD8DC")),
-    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
-    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
-    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,-1), 6.8),
-    ("LEADING", (0,0), (-1,-1), 7.5),
-    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 3),
-    ("RIGHTPADDING", (0,0), (-1,-1), 3),
-    ("TOPPADDING", (0,0), (-1,-1), 2),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-  ]))
   story.append(t_patient)
-  story.append(Spacer(1, 2))
+  story.append(Spacer(1, 1.1))
 
-  # Metodología
-  story.append(Paragraph("Metodologia de medicion de PRESION CENTRAL", styles["PC_Section"]))
+  story.append(Paragraph("METODOLOGIA", styles["PC_Section"]))
   metodologia = (
-    "Medición no invasiva de la onda de presión arterial con estimación de presión aórtica central. "
-    f"La interpretación integra PAS central, PAD central, PAM, presión de pulso central, amplificación periférico-central, índice de aumentación y separación de ondas. "
-    f"Método de calibración: {safe_text(row.get('metodo_calibracion_pac')) or 'según estudio importado'}. "
-    f"Si se dispuso de la curva real del paciente, el análisis de ondas, reserva subendocárdica y armónicos se realizó sobre esa curva original del estudio."
+    "Se realizo medicion de presion central y metricas derivadas con sensores piezo electricos "
+    "con dispositivo Aortic (Exxer), previo reposo de 5 minutos con paciente en decubito supino, "
+    "se registraron 3 mediciones promediadas."
   )
-  story.append(_pc_paragraph(metodologia, styles["PC_Body"]))
-
-  # Resultado
-  story.append(Paragraph("Resultado", styles["PC_Section"]))
-  result_data = [
-    ["PAS central", _pc_short_text(row.get("pas_central"), 0, " mmHg"), "PAD central", _pc_short_text(row.get("pad_central"), 0, " mmHg")],
-    ["PAM central", _pc_short_text(row.get("pam_central"), 0, " mmHg"), "PP central", _pc_short_text(row.get("pp_central"), 0, " mmHg")],
-    ["IAu/AIx", _pc_short_text(row.get("iau"), 1, "%"), "PPA", _pc_short_text(ppa, 2, "")],
-    ["RM", _pc_short_text(sep_metrics.get("rm"), 2, ""), "RVSE", _pc_short_text(sep_metrics.get("rvse_calculado_%"), 1, "%")],
-    ["Diagnóstico central", safe_text(dx), "Riesgo resumido", safe_text(risk) or "SD"],
-  ]
-  t_result = Table(result_data, colWidths=[24*mm, 48*mm, 24*mm, 84*mm])
-  t_result.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F8FAFC")),
-    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#CFD8DC")),
-    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
-    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
-    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,-1), 6.6),
-    ("LEADING", (0,0), (-1,-1), 7.3),
-    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 3),
-    ("RIGHTPADDING", (0,0), (-1,-1), 3),
-    ("TOPPADDING", (0,0), (-1,-1), 2),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+  meth = Table([[Paragraph(pdf_text(metodologia), styles["PC_Body"])]], colWidths=[191*mm])
+  meth.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#EEF5FA")),
+    ("BOX", (0,0), (-1,-1), 0.45, colors.HexColor("#C9DAE6")),
+    ("LEFTPADDING", (0,0), (-1,-1), 4),
+    ("RIGHTPADDING", (0,0), (-1,-1), 4),
+    ("TOPPADDING", (0,0), (-1,-1), 2.5),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 2.5),
   ]))
-  story.append(t_result)
-  story.append(Spacer(1, 2))
+  story.append(meth)
+  story.append(Spacer(1, 1.1))
 
-  # Lámina didáctica
-  story.append(Paragraph("Lamina didactica", styles["PC_Section"]))
-  did_img = _pc_maybe_image(didactic_png, 186*mm, 76*mm)
-  if did_img is not None:
-    story.append(did_img)
-    story.append(Spacer(1, 2))
+  story.append(Paragraph("RESULTADOS", styles["PC_Section"]))
+  kpis = [
+    _pc_kpi_cell("PAS CENTRAL", _pc_short_text(row.get("pas_central"), 0, " mmHg"), styles, "#1F4E79"),
+    _pc_kpi_cell("PP CENTRAL", _pc_short_text(row.get("pp_central"), 0, " mmHg"), styles, "#315B7D"),
+    _pc_kpi_cell("IAu / AIx", _pc_short_text(row.get("iau"), 1, "%"), styles, "#6F4E7C"),
+    _pc_kpi_cell("PPA", _pc_short_text(ppa, 2, ""), styles, "#8A5A00"),
+    _pc_kpi_cell("RM", _pc_short_text(sep_metrics.get("rm"), 2, ""), styles, "#3C6E71"),
+    _pc_kpi_cell("RVSE", _pc_short_text(sep_metrics.get("rvse_calculado_%"), 1, "%"), styles, "#18794E"),
+  ]
+  kpi_table = Table([kpis[:3], kpis[3:]], colWidths=[63.3*mm]*3, rowHeights=[11.8*mm, 11.8*mm])
+  kpi_table.setStyle(TableStyle([
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 1.5),
+    ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
+    ("TOPPADDING", (0,0), (-1,-1), 1),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+  ]))
+  story.append(kpi_table)
 
-  # Conclusiones clínicas diagnósticas
-  story.append(Paragraph("Conclusiones clínicas diagnósticas", styles["PC_Section"]))
+  dx_short = _pc_extract_bold_only(dx)
+  status_color, status_bg = _pc_diag_palette(dx_short)
+  status_box = Table(
+    [[Paragraph("<b>Presión aórtica central</b>", styles["PC_Bold"]), Paragraph(f"<b>{pdf_text(dx_short)}</b>", styles["PC_Bold"])]],
+    colWidths=[45*mm, 146*mm],
+    rowHeights=[7.2*mm],
+    style=TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), status_bg),
+      ("BOX", (0,0), (-1,-1), 0.5, status_color),
+      ("LINEBEFORE", (0,0), (0,0), 3.0, status_color),
+      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+      ("LEFTPADDING", (0,0), (-1,-1), 4),
+      ("RIGHTPADDING", (0,0), (-1,-1), 4),
+      ("TOPPADDING", (0,0), (-1,-1), 1),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+    ])
+  )
+  story.append(status_box)
+  story.append(Spacer(1, 1.1))
+
+  story.append(Paragraph("CONCLUSIONES", styles["PC_Section"]))
   conc_rows = []
   for title, conc in conclusion_items:
-    conc_rows.append([Paragraph(f"<b>{pdf_text(title)}</b>", styles["PC_Small"]), Paragraph(f"<b>{pdf_text(conc)}</b>", styles["PC_Small"])])
+    conc_rows.append([
+      Paragraph(f"<b>{pdf_text(title)}</b>", styles["PC_ConcTitle"]),
+      Paragraph(f"<b>{pdf_text(conc)}</b>", styles["PC_Conc"]),
+      ""
+    ])
   if not conc_rows:
-    conc_rows = [[Paragraph("<b>1. Presión aórtica central</b>", styles["PC_Small"]), Paragraph(f"<b>{pdf_text(_pc_extract_bold_only(dx))}</b>", styles["PC_Small"])]]
-  t_conc = Table(conc_rows, colWidths=[58*mm, 126*mm])
-  t_conc.setStyle(TableStyle([
-    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FFFFFF")),
-    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#D9E2EC")),
-    ("VALIGN", (0,0), (-1,-1), "TOP"),
-    ("LEFTPADDING", (0,0), (-1,-1), 3),
-    ("RIGHTPADDING", (0,0), (-1,-1), 3),
-    ("TOPPADDING", (0,0), (-1,-1), 2),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
-  ]))
-  story.append(t_conc)
-  story.append(Spacer(1, 2))
-
-  # Pie con firma/sello compactos
-  footer_cells = []
-  if firma_png:
-    footer_cells.append(_pc_maybe_image(firma_png, 32*mm, 12*mm) or "")
-  else:
-    footer_cells.append("")
-  if sello_png:
-    footer_cells.append(_pc_maybe_image(sello_png, 24*mm, 12*mm) or "")
-  else:
-    footer_cells.append("")
-  footer_cells.append(Paragraph(pdf_text("Informe resumido de presión central de una hoja."), styles["PC_Small"]))
-  foot = Table([footer_cells], colWidths=[36*mm, 28*mm, 120*mm])
-  foot.setStyle(TableStyle([
+    conc_rows = [[Paragraph("<b>1. Presión aórtica central</b>", styles["PC_ConcTitle"]), Paragraph(f"<b>{pdf_text(dx_short)}</b>", styles["PC_Conc"]), ""]]
+  t_conc = Table(conc_rows, colWidths=[52*mm, 136*mm, 3*mm])
+  ts = [
+    ("GRID", (0,0), (-2,-1), 0.35, colors.HexColor("#D9E2EC")),
     ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-    ("LEFTPADDING", (0,0), (-1,-1), 0),
-    ("RIGHTPADDING", (0,0), (-1,-1), 0),
-    ("TOPPADDING", (0,0), (-1,-1), 0),
-    ("BOTTOMPADDING", (0,0), (-1,-1), 0),
-  ]))
-  story.append(foot)
+    ("LEFTPADDING", (0,0), (-1,-1), 2.5),
+    ("RIGHTPADDING", (0,0), (-1,-1), 2.5),
+    ("TOPPADDING", (0,0), (-1,-1), 1.2),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 1.2),
+  ]
+  for i, (_, conc) in enumerate(conclusion_items[:len(conc_rows)]):
+    fg, bg = _pc_diag_palette(conc)
+    ts += [
+      ("BACKGROUND", (0,i), (1,i), bg),
+      ("BACKGROUND", (2,i), (2,i), fg),
+    ]
+  t_conc.setStyle(TableStyle(ts))
+  story.append(t_conc)
+  story.append(Spacer(1, 1.1))
+
+  story.append(Paragraph("LAMINAS GRAFICAS", styles["PC_Section"]))
+  did_img = _pc_maybe_image(didactic_png, 191*mm, 67*mm)
+  if did_img is not None:
+    img_table = Table([[did_img]], colWidths=[191*mm])
+    img_table.setStyle(TableStyle([
+      ("BACKGROUND", (0,0), (-1,-1), colors.white),
+      ("BOX", (0,0), (-1,-1), 0.5, colors.HexColor("#D4DEE7")),
+      ("LEFTPADDING", (0,0), (-1,-1), 1.5),
+      ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
+      ("TOPPADDING", (0,0), (-1,-1), 1.5),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 1.5),
+      ("ALIGN", (0,0), (-1,-1), "CENTER"),
+    ]))
+    story.append(img_table)
+  story.append(Spacer(1, 0.9))
+
+  firma = _pc_maybe_image(firma_png, 29*mm, 9*mm) if firma_png else None
+  sello = _pc_maybe_image(sello_png, 21*mm, 9*mm) if sello_png else None
+  footer_text = "Informe resumido de una hoja. La interpretación debe integrarse con el contexto clínico del paciente."
+  footer = Table(
+    [[firma if firma is not None else "", sello if sello is not None else "", Paragraph(pdf_text(footer_text), styles["PC_Small"]) ]],
+    colWidths=[33*mm, 24*mm, 134*mm],
+    rowHeights=[9.5*mm],
+    style=TableStyle([
+      ("LINEABOVE", (0,0), (-1,0), 0.45, colors.HexColor("#BFCBD5")),
+      ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+      ("LEFTPADDING", (0,0), (-1,-1), 0),
+      ("RIGHTPADDING", (0,0), (-1,-1), 1.5),
+      ("TOPPADDING", (0,0), (-1,-1), 0.8),
+      ("BOTTOMPADDING", (0,0), (-1,-1), 0),
+    ])
+  )
+  story.append(footer)
 
   doc.build(story)
   return buf.getvalue()
 
-st.title(APP_TITLE)
-st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF de 1 hoja, historial Excel y análisis armónico.")
+
+st.markdown("""
+<style>
+.block-container {padding-top: 1.2rem;}
+.pac-institutional-header {background: linear-gradient(90deg,#153B5B,#1F4E79); padding:18px 22px; border-radius:12px; margin-bottom:10px; box-shadow:0 5px 18px rgba(21,59,91,.15);}
+.pac-institutional-header h1 {color:white; margin:0; font-size:2rem; letter-spacing:.01em;}
+.pac-institutional-header p {color:#D8E7F2; margin:5px 0 0 0; font-size:.95rem;}
+</style>
+<div class="pac-institutional-header">
+<h1>INFORME MEDICION DE PRESION CENTRAL</h1>
+<p>Evaluación no invasiva de presión aórtica central y mecánica de la onda de pulso</p>
+</div>
+""", unsafe_allow_html=True)
+st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF institucional de 1 hoja, historial Excel y análisis armónico.")
 
 with st.sidebar:
   st.header("1) Informe individual")
