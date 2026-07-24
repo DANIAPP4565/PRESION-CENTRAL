@@ -121,9 +121,9 @@ def fit_image_box(image_bytes, max_w, max_h):
   return w, h
 
 
-st.set_page_config(page_title="PAC IA - Presión Aórtica Central", layout="wide")
+st.set_page_config(page_title="INFORME MEDICION DE PRESION CENTRAL", layout="wide")
 
-APP_TITLE = "PAC IA - Informe médico integrado de Presión Aórtica Central"
+APP_TITLE = "INFORME MEDICION DE PRESION CENTRAL"
 HISTORIAL_FILE = Path("historial_pac.xlsx")
 
 BIBLIOGRAFIA = [
@@ -6026,7 +6026,7 @@ def process_pac_pdf_batch(
       _, _, _, _, ppa, _ = central_diagnosis(row)
 
       report_bytes = ensure_download_bytes(
-        build_pdf(
+        build_pdf_one_page(
           row,
           wave_df,
           hdf,
@@ -6141,8 +6141,281 @@ def process_pac_pdf_batch(
   }
 
 
+
+
+# -----------------------------------------------------------------------------
+# PDF DE 1 HOJA: INFORME MEDICION DE PRESION CENTRAL
+# -----------------------------------------------------------------------------
+def _pc_short_text(v, dec=1, unit=""):
+  try:
+    f = float(v)
+    if np.isnan(f):
+      return "no disponible"
+    if dec == 0:
+      return f"{f:.0f}{unit}"
+    return f"{f:.{dec}f}{unit}"
+  except Exception:
+    return "no disponible"
+
+
+def _pc_extract_bold_only(texto):
+  txt = safe_text(texto)
+  markers = ["Conclusión diagnóstica:", "Conclusión breve:", "Conclusión integrada:", "Conclusión final:"]
+  pos = -1
+  marker_used = None
+  for m in markers:
+    i = txt.lower().find(m.lower())
+    if i != -1 and i > pos:
+      pos = i
+      marker_used = m
+  if pos == -1 or marker_used is None:
+    return txt.strip()
+  out = txt[pos + len(marker_used):].strip()
+  out = re.split(r"(?<=[\.!?])\s+", out)[0].strip()
+  out = out.strip(" -:;")
+  return out or txt.strip()
+
+
+def _pc_make_conclusion_items(row, wave_df, hdf):
+  blocks, sep_df, sep_metrics, sep_interp = build_continuous_conclusions(row, wave_df, hdf)
+  items = []
+  for title, body in blocks:
+    num_title = safe_text(title)
+    if not any(num_title.startswith(f"{n}.") for n in ["1", "2", "3", "4", "5"]):
+      continue
+    items.append((num_title, _pc_extract_bold_only(body)))
+  return items, sep_df, sep_metrics
+
+
+def _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_png=None):
+  """Compone una lámina didáctica compacta 2x2 en PNG para el PDF de 1 hoja."""
+  try:
+    sources = []
+    try:
+      sources.append(("Presiones periféricas vs centrales", plot_pressure_comparison(row)))
+    except Exception:
+      pass
+    try:
+      sources.append(("Pulso aórtico central y separación de ondas", plot_wave_separation(sep_df, sep_metrics)))
+    except Exception:
+      pass
+    try:
+      sources.append(("Reserva subendocárdica", plot_rvse_area(sep_df, sep_metrics)))
+    except Exception:
+      pass
+    try:
+      sources.append(("Análisis armónico", plot_harmonics(hdf)))
+    except Exception:
+      pass
+    if not sources:
+      try:
+        return plot_waveform(wave_df)
+      except Exception:
+        return screenshot_png
+    if PILImage is None or ImageDraw is None:
+      return sources[0][1]
+
+    tile_w, tile_h = 860, 390
+    canvas = PILImage.new("RGB", (tile_w * 2, tile_h * 2), "white")
+    draw = ImageDraw.Draw(canvas)
+    positions = [(0, 0), (tile_w, 0), (0, tile_h), (tile_w, tile_h)]
+    for i, (title, img_bytes) in enumerate(sources[:4]):
+      try:
+        img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+        img.thumbnail((tile_w - 36, tile_h - 52))
+        x0, y0 = positions[i]
+        draw.rectangle([x0 + 6, y0 + 6, x0 + tile_w - 6, y0 + tile_h - 6], outline=(210, 218, 226), width=2)
+        draw.text((x0 + 18, y0 + 14), title, fill=(31, 45, 61))
+        px = x0 + (tile_w - img.width) // 2
+        py = y0 + 40 + (tile_h - 46 - img.height) // 2
+        canvas.paste(img, (px, py))
+      except Exception:
+        continue
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+  except Exception:
+    try:
+      return plot_waveform(wave_df)
+    except Exception:
+      return screenshot_png
+
+
+def _pc_paragraph(text, style):
+  return Paragraph(pdf_text(text), style)
+
+
+def _pc_maybe_image(image_bytes, max_w, max_h):
+  if not image_bytes:
+    return None
+  try:
+    w, h = fit_image_box(image_bytes, max_w, max_h)
+    return Image(io.BytesIO(image_bytes), width=w, height=h)
+  except Exception:
+    return None
+
+
+def build_pdf_one_page(row, wave_df, hdf, screenshot_png=None, firma_png=None, sello_png=None, logo_png=None):
+  """Genera informe PDF A4 de una sola hoja para Presión Central."""
+  conclusion_items, sep_df, sep_metrics = _pc_make_conclusion_items(row, wave_df, hdf)
+  didactic_png = _pc_build_didactic_sheet(row, wave_df, sep_df, sep_metrics, hdf, screenshot_png=screenshot_png)
+  dx, cat, ref, amp_sbp, ppa, risk = central_diagnosis(row)
+
+  buf = io.BytesIO()
+  doc = SimpleDocTemplate(
+    buf,
+    pagesize=A4,
+    rightMargin=9*mm,
+    leftMargin=9*mm,
+    topMargin=11*mm,
+    bottomMargin=11*mm,
+  )
+  styles = getSampleStyleSheet()
+  styles.add(ParagraphStyle(name="PC_Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=13, leading=14.5, textColor=colors.HexColor("#16324F"), alignment=1, spaceAfter=4))
+  styles.add(ParagraphStyle(name="PC_Sub", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.0, leading=8.0, textColor=colors.HexColor("#455A64"), alignment=1, spaceAfter=3))
+  styles.add(ParagraphStyle(name="PC_Section", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=8.3, leading=9.2, textColor=colors.white, backColor=colors.HexColor("#1F4E79"), borderPadding=(3,4,2), spaceBefore=2, spaceAfter=2))
+  styles.add(ParagraphStyle(name="PC_Body", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.0, leading=8.0, textColor=colors.HexColor("#1F2D3D"), spaceAfter=1.5))
+  styles.add(ParagraphStyle(name="PC_Small", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=7.2, textColor=colors.HexColor("#31424F"), spaceAfter=1))
+  styles.add(ParagraphStyle(name="PC_Bold", parent=styles["BodyText"], fontName="Helvetica-Bold", fontSize=7.0, leading=8.1, textColor=colors.HexColor("#12263A"), spaceAfter=1.2))
+
+  story = []
+  story.append(Paragraph("INFORME MEDICION DE PRESION CENTRAL", styles["PC_Title"]))
+  story.append(Paragraph("Informe médico resumido de una hoja", styles["PC_Sub"]))
+
+  # encabezado con logo opcional
+  header_row = []
+  logo = _pc_maybe_image(logo_png, 24*mm, 14*mm)
+  if logo is not None:
+    header_row.append(logo)
+  else:
+    header_row.append("")
+  header_row.append(Paragraph("<b>Presión Central</b>", styles["PC_Bold"]))
+  hdr = Table([header_row], colWidths=[26*mm, 155*mm])
+  hdr.setStyle(TableStyle([
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 0),
+    ("RIGHTPADDING", (0,0), (-1,-1), 0),
+    ("TOPPADDING", (0,0), (-1,-1), 0),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+  ]))
+  story.append(hdr)
+
+  # Datos del paciente
+  story.append(Paragraph("Datos del paciente", styles["PC_Section"]))
+  patient_data = [
+    ["Paciente", safe_text(row.get("paciente")) or "SD", "Documento", safe_text(row.get("documento")) or "SD"],
+    ["Edad", safe_text(row.get("edad")) or "SD", "Sexo", safe_text(row.get("sexo")) or "SD"],
+    ["Fecha", safe_text(row.get("fecha")) or "SD", "Obra social", safe_text(row.get("obra_social")) or "SD"],
+    ["Médico solicitante", safe_text(row.get("medico")) or safe_text(row.get("medico_solicitante")) or "SD", "Estudio", safe_text(row.get("estudio")) or "Presión Central"],
+  ]
+  t_patient = Table(patient_data, colWidths=[26*mm, 63*mm, 28*mm, 63*mm])
+  t_patient.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F8FAFC")),
+    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#CFD8DC")),
+    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 6.8),
+    ("LEADING", (0,0), (-1,-1), 7.5),
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 3),
+    ("RIGHTPADDING", (0,0), (-1,-1), 3),
+    ("TOPPADDING", (0,0), (-1,-1), 2),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+  ]))
+  story.append(t_patient)
+  story.append(Spacer(1, 2))
+
+  # Metodología
+  story.append(Paragraph("Metodologia de medicion de PRESION CENTRAL", styles["PC_Section"]))
+  metodologia = (
+    "Medición no invasiva de la onda de presión arterial con estimación de presión aórtica central. "
+    f"La interpretación integra PAS central, PAD central, PAM, presión de pulso central, amplificación periférico-central, índice de aumentación y separación de ondas. "
+    f"Método de calibración: {safe_text(row.get('metodo_calibracion_pac')) or 'según estudio importado'}. "
+    f"Si se dispuso de la curva real del paciente, el análisis de ondas, reserva subendocárdica y armónicos se realizó sobre esa curva original del estudio."
+  )
+  story.append(_pc_paragraph(metodologia, styles["PC_Body"]))
+
+  # Resultado
+  story.append(Paragraph("Resultado", styles["PC_Section"]))
+  result_data = [
+    ["PAS central", _pc_short_text(row.get("pas_central"), 0, " mmHg"), "PAD central", _pc_short_text(row.get("pad_central"), 0, " mmHg")],
+    ["PAM central", _pc_short_text(row.get("pam_central"), 0, " mmHg"), "PP central", _pc_short_text(row.get("pp_central"), 0, " mmHg")],
+    ["IAu/AIx", _pc_short_text(row.get("iau"), 1, "%"), "PPA", _pc_short_text(ppa, 2, "")],
+    ["RM", _pc_short_text(sep_metrics.get("rm"), 2, ""), "RVSE", _pc_short_text(sep_metrics.get("rvse_calculado_%"), 1, "%")],
+    ["Diagnóstico central", safe_text(dx), "Riesgo resumido", safe_text(risk) or "SD"],
+  ]
+  t_result = Table(result_data, colWidths=[24*mm, 48*mm, 24*mm, 84*mm])
+  t_result.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#F8FAFC")),
+    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#CFD8DC")),
+    ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+    ("FONTNAME", (0,0), (0,-1), "Helvetica-Bold"),
+    ("FONTNAME", (2,0), (2,-1), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 6.6),
+    ("LEADING", (0,0), (-1,-1), 7.3),
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 3),
+    ("RIGHTPADDING", (0,0), (-1,-1), 3),
+    ("TOPPADDING", (0,0), (-1,-1), 2),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+  ]))
+  story.append(t_result)
+  story.append(Spacer(1, 2))
+
+  # Lámina didáctica
+  story.append(Paragraph("Lamina didactica", styles["PC_Section"]))
+  did_img = _pc_maybe_image(didactic_png, 186*mm, 76*mm)
+  if did_img is not None:
+    story.append(did_img)
+    story.append(Spacer(1, 2))
+
+  # Conclusiones clínicas diagnósticas
+  story.append(Paragraph("Conclusiones clínicas diagnósticas", styles["PC_Section"]))
+  conc_rows = []
+  for title, conc in conclusion_items:
+    conc_rows.append([Paragraph(f"<b>{pdf_text(title)}</b>", styles["PC_Small"]), Paragraph(f"<b>{pdf_text(conc)}</b>", styles["PC_Small"])])
+  if not conc_rows:
+    conc_rows = [[Paragraph("<b>1. Presión aórtica central</b>", styles["PC_Small"]), Paragraph(f"<b>{pdf_text(_pc_extract_bold_only(dx))}</b>", styles["PC_Small"])]]
+  t_conc = Table(conc_rows, colWidths=[58*mm, 126*mm])
+  t_conc.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#FFFFFF")),
+    ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#D9E2EC")),
+    ("VALIGN", (0,0), (-1,-1), "TOP"),
+    ("LEFTPADDING", (0,0), (-1,-1), 3),
+    ("RIGHTPADDING", (0,0), (-1,-1), 3),
+    ("TOPPADDING", (0,0), (-1,-1), 2),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+  ]))
+  story.append(t_conc)
+  story.append(Spacer(1, 2))
+
+  # Pie con firma/sello compactos
+  footer_cells = []
+  if firma_png:
+    footer_cells.append(_pc_maybe_image(firma_png, 32*mm, 12*mm) or "")
+  else:
+    footer_cells.append("")
+  if sello_png:
+    footer_cells.append(_pc_maybe_image(sello_png, 24*mm, 12*mm) or "")
+  else:
+    footer_cells.append("")
+  footer_cells.append(Paragraph(pdf_text("Informe resumido de presión central de una hoja."), styles["PC_Small"]))
+  foot = Table([footer_cells], colWidths=[36*mm, 28*mm, 120*mm])
+  foot.setStyle(TableStyle([
+    ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ("LEFTPADDING", (0,0), (-1,-1), 0),
+    ("RIGHTPADDING", (0,0), (-1,-1), 0),
+    ("TOPPADDING", (0,0), (-1,-1), 0),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 0),
+  ]))
+  story.append(foot)
+
+  doc.build(story)
+  return buf.getvalue()
+
 st.title(APP_TITLE)
-st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF integrado, historial Excel y análisis armónico.")
+st.caption("Importación tipo MODELO PAC, digitalización real de curva del estudio original, informe PDF de 1 hoja, historial Excel y análisis armónico.")
 
 with st.sidebar:
   st.header("1) Informe individual")
@@ -6602,15 +6875,15 @@ if HISTORIAL_FILE.exists():
   st.download_button("Descargar historial Excel", HISTORIAL_FILE.read_bytes(), file_name="historial_pac.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 if wave_df is None:
-  st.error("PDF médico integrado no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
+  st.error("PDF informe de 1 hoja no habilitado: falta curva real válida del paciente desde CSV/TXT o digitalización del PDF. No se generará reporte con curvas simuladas.")
 else:
-  pdf_bytes_out = build_pdf(row, wave_df, hdf, screenshot, firma_png=firma_png, sello_png=sello_png, logo_png=logo_png)
+  pdf_bytes_out = build_pdf_one_page(row, wave_df, hdf, screenshot, firma_png=firma_png, sello_png=sello_png, logo_png=logo_png)
   pdf_download_bytes = ensure_download_bytes(pdf_bytes_out)
   if not pdf_download_bytes:
-    st.error("No se pudo generar el PDF médico integrado.")
+    st.error("No se pudo generar el PDF informe de 1 hoja.")
   else:
     st.download_button(
-      "Generar y descargar PDF médico integrado",
+      "Generar y descargar PDF informe de 1 hoja",
       data=pdf_download_bytes,
       file_name=nombre_archivo_informe_pac(row),
       mime="application/pdf"
